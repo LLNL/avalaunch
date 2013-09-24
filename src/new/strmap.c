@@ -24,7 +24,7 @@ Allocate and delete map objects
 /* allocates a new tree and initializes it as a single element */
 static strmap_node* strmap_node_new(const char* key, const char* value)
 {
-  strmap_node* node = (strmap_node*) malloc(sizeof(strmap_node));
+  strmap_node* node = (strmap_node*) SPAWN_MALLOC(sizeof(strmap_node));
   if (node != NULL) {
     node->key       = NULL;
     node->key_len   = 0;
@@ -45,9 +45,11 @@ static strmap_node* strmap_node_new(const char* key, const char* value)
     }
     if (node->key == NULL || node->value == NULL) {
       /* error */
+      SPAWN_ERR("Failed to allocate key or value");
     }
   } else {
     /* error */
+    SPAWN_ERR("Failed to allocate AVL node");
   }
   return node;
 }
@@ -65,17 +67,13 @@ static int strmap_node_delete(strmap_node* node)
     node->right = NULL;
 
     /* delete value */
-    if (node->value != NULL) {
-      free((void*)node->value);
-    }
+    spawn_free(&node->value);
 
     /* delete key */
-    if (node->key != NULL) {
-      free((void*)node->key);
-    }
+    spawn_free(&node->key);
 
     /* finally delete the node */
-    free(node);
+    spawn_free(&node);
   }
   return STRMAP_SUCCESS;
 }
@@ -83,13 +81,9 @@ static int strmap_node_delete(strmap_node* node)
 /* allocates a new tree and initializes it as a single element */
 strmap* strmap_new()
 {
-  strmap* tree = (strmap*) malloc(sizeof(strmap));
-  if (tree != NULL) {
-    tree->root = NULL;
-    tree->len = 0;
-  } else {
-    /* error */
-  }
+  strmap* tree = (strmap*) SPAWN_MALLOC(sizeof(strmap));
+  tree->root = NULL;
+  tree->len = 0;
   return tree;
 }
 
@@ -101,9 +95,8 @@ void strmap_delete(strmap** ptree)
     if (tree != NULL) {
       strmap_node_delete(tree->root);
       tree->root = NULL;
-
-      free(tree);
     }
+    spawn_free(&tree);
     *ptree = NULL;
   }
   return;
@@ -578,10 +571,7 @@ int strmap_set(strmap* tree, const char* key, const char* value)
     } else {
       /* key already exists, free the current value and reset it */
       tree->len -= node->value_len;
-      if (node->value != NULL) {
-        free((void*)node->value);
-        node->value = NULL;
-      }
+      spawn_free(&node->value);
       node->value_len = 0;
 
       /* copy in the new value */
@@ -614,11 +604,7 @@ int strmap_setf(strmap* map, const char* format, ...)
 
   /* allocate and print the string */
   if (size > 0) {
-    str = (char*) malloc(size);
-    if (str == NULL) {
-      /* error */
-      return STRMAP_FAILURE;
-    }
+    str = (char*) SPAWN_MALLOC(size);
 
     va_start(args, format);
     vsnprintf(str, size, format, args);
@@ -636,7 +622,7 @@ int strmap_setf(strmap* map, const char* format, ...)
       rc = strmap_set(map, key, val);
     }
 
-    free(str);
+    spawn_free(&str);
     return rc;
   }
 
@@ -675,11 +661,7 @@ const char* strmap_getf(strmap* map, const char* format, ...)
 
   /* allocate and print the string */
   if (size > 0) {
-    str = (char*) malloc(size);
-    if (str == NULL) {
-      /* error */
-      return NULL;
-    }
+    str = (char*) SPAWN_MALLOC(size);
 
     va_start(args, format);
     vsnprintf(str, size, format, args);
@@ -689,7 +671,7 @@ const char* strmap_getf(strmap* map, const char* format, ...)
     const char* val;
     val = strmap_get(map, str);
 
-    free(str);
+    spawn_free(&str);
     return val;
   }
 
@@ -794,11 +776,7 @@ int strmap_unsetf(strmap* map, const char* format, ...)
 
   /* allocate and print the string */
   if (size > 0) {
-    str = (char*) malloc(size);
-    if (str == NULL) {
-      /* error */
-      return STRMAP_FAILURE;
-    }
+    str = (char*) SPAWN_MALLOC(size);
 
     va_start(args, format);
     vsnprintf(str, size, format, args);
@@ -808,7 +786,7 @@ int strmap_unsetf(strmap* map, const char* format, ...)
     int rc;
     rc = strmap_unset(map, str);
 
-    free(str);
+    spawn_free(&str);
     return rc;
   }
 
