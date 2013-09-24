@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <time.h>
 
 #include "spawn_internal.h"
 
@@ -55,11 +56,14 @@ void spawn_err(const char* file, int line, const char* format, ...)
     vsnprintf(str, size, format, args);
     va_end(args);
 
-    /* TODO: insert timestamp */
+    /* grab timestamp */
+    char time_str[30];
+    time_t timestamp = time(NULL);
+    strftime(time_str, sizeof(time_str), "%Y-%m-%dT%H:%M:%S", localtime(&timestamp));
 
     /* print message */
-    fprintf(stderr, "%s on %s:%d at TIME: %s @ %s:%d\n",
-        my_prog, my_host, my_pid, str, file, line
+    fprintf(stderr, "%s on %s:%d at %s: %s @ %s:%d\n",
+        my_prog, my_host, my_pid, time_str, str, file, line
     );
     fflush(stderr);
 
