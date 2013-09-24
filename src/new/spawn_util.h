@@ -3,6 +3,7 @@
 
 #include <stdlib.h>
 #include <stdint.h>
+#include <stdarg.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -43,6 +44,10 @@ void spawn_exit(int code);
  * fatal error if allocation fails */
 #define SPAWN_MALLOC(X) spawn_malloc(X, __FILE__, __LINE__);
 void* spawn_malloc(size_t size, const char* file, int line);
+
+/* allocate a formatted string */
+#define SPAWN_STRDUPF(X, ...) spawn_strdupf(__FILE__, __LINE__, X, __VA_ARGS__);
+char* spawn_strdupf(const char* file, int line, const char* format, ...);
 
 /* free memory and set caller's pointer to NULL,
  * it's ok to call with pptr == NULL or *pptr == NULL */
