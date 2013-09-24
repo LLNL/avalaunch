@@ -110,3 +110,17 @@ void spawn_free(void* arg_pptr)
   return;
 }
 
+size_t spawn_pack_uint64(void* buf, uint64_t val)
+{
+  uint64_t val_net = spawn_hton64(val);
+  memcpy(buf, &val_net, 8);
+  return 8;
+}
+
+size_t spawn_unpack_uint64(const void* buf, uint64_t* val)
+{
+  uint64_t val_net;
+  memcpy(&val_net, buf, 8);
+  *val = spawn_ntoh64(val_net);
+  return 8;
+}

@@ -809,8 +809,7 @@ size_t strmap_pack(void* buf, const strmap* tree)
 
   /* TODO: convert size to network order */
   uint64_t size = (uint64_t) strmap_pack_size(tree);
-  memcpy(ptr, &size, 8);
-  ptr += 8;
+  ptr += spawn_pack_uint64(ptr, size);
 
   /* TODO: be sure we don't write past end of buffer */
   /* copy key/value pairs */
@@ -837,8 +836,7 @@ size_t strmap_unpack(const void* buf, strmap* tree)
   
   /* TODO: convert size to network order */
   uint64_t size;
-  memcpy(&size, ptr, 8);
-  ptr += 8;
+  ptr += spawn_unpack_uint64(ptr, &size);
 
   /* TODO: be sure we don't try to read past size bytes */
   char* end = (char*)buf + size;
