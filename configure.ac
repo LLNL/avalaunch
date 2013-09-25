@@ -35,5 +35,6 @@ AC_FUNC_FORK
 AC_CHECK_FUNCS([dup2 memset strdup strerror])
 
 AC_CONFIG_FILES([Makefile
-                 src/Makefile])
+                 src/Makefile
+                 src/new/Makefile])
 AC_OUTPUT
