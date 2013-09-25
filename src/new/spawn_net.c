@@ -19,12 +19,12 @@ int spawn_net_open(spawn_endpoint_type type, spawn_endpoint_t* ep)
   }
 
   /* initialize endpoint */
-  ep->type = SPAWN_EP_TYPE_NULL;
+  ep->type = SPAWN_NET_TYPE_NULL;
   ep->name = NULL;
   ep->data = NULL;
 
   /* open endpoint */
-  if (type == SPAWN_EP_TYPE_TCP) {
+  if (type == SPAWN_NET_TYPE_TCP) {
     return spawn_net_open_tcp(ep);
   } else {
     SPAWN_ERR("Unknown endpoint type %d", (int)type);
@@ -40,10 +40,10 @@ int spawn_net_close(spawn_endpoint_t* ep)
     return SPAWN_FAILURE;
   }
 
-  if (ep->type == SPAWN_EP_TYPE_NULL) {
+  if (ep->type == SPAWN_NET_TYPE_NULL) {
     /* nothing to do with a NULL endpoint */
     return SPAWN_SUCCESS;
-  } else if (ep->type == SPAWN_EP_TYPE_TCP) {
+  } else if (ep->type == SPAWN_NET_TYPE_TCP) {
     return spawn_net_close_tcp(ep);
   } else {
     SPAWN_ERR("Unknown endpoint type %d", (int)ep->type);
@@ -98,14 +98,14 @@ int spawn_net_accept(const spawn_endpoint_t* ep, spawn_channel_t* ch)
   }
 
   /* initialize channel */
-  ch->type = SPAWN_EP_TYPE_NULL;
+  ch->type = SPAWN_NET_TYPE_NULL;
   ch->name = NULL;
   ch->data = NULL;
 
-  if (ep->type == SPAWN_EP_TYPE_NULL) {
+  if (ep->type == SPAWN_NET_TYPE_NULL) {
     /* return a NULL channel for a NULL endpoint */
     return SPAWN_SUCCESS;
-  } else if (ep->type == SPAWN_EP_TYPE_TCP) {
+  } else if (ep->type == SPAWN_NET_TYPE_TCP) {
     return spawn_net_accept_tcp(ep, ch);
   } else {
     SPAWN_ERR("Unknown endpoint type %d", ep->type);
@@ -123,10 +123,10 @@ int spawn_net_disconnect(spawn_channel_t* ch)
     return SPAWN_FAILURE;
   }
 
-  if (ch->type == SPAWN_EP_TYPE_NULL) {
+  if (ch->type == SPAWN_NET_TYPE_NULL) {
     /* return a NULL channel for a NULL endpoint */
     return SPAWN_SUCCESS;
-  } else if (ch->type == SPAWN_EP_TYPE_TCP) {
+  } else if (ch->type == SPAWN_NET_TYPE_TCP) {
     return spawn_net_disconnect_tcp(ch);
   } else {
     SPAWN_ERR("Unknown channel type %d", ch->type);
@@ -144,10 +144,10 @@ int spawn_net_read(const spawn_channel_t* ch, void* buf, size_t size)
     return SPAWN_FAILURE;
   }
 
-  if (ch->type == SPAWN_EP_TYPE_NULL) {
+  if (ch->type == SPAWN_NET_TYPE_NULL) {
     /* return a NULL channel for a NULL endpoint */
     return SPAWN_SUCCESS;
-  } else if (ch->type == SPAWN_EP_TYPE_TCP) {
+  } else if (ch->type == SPAWN_NET_TYPE_TCP) {
     return spawn_net_read_tcp(ch, buf, size);
   } else {
     SPAWN_ERR("Unknown channel type %d", ch->type);
@@ -165,10 +165,10 @@ int spawn_net_write(const spawn_channel_t* ch, const void* buf, size_t size)
     return SPAWN_FAILURE;
   }
 
-  if (ch->type == SPAWN_EP_TYPE_NULL) {
+  if (ch->type == SPAWN_NET_TYPE_NULL) {
     /* return a NULL channel for a NULL endpoint */
     return SPAWN_SUCCESS;
-  } else if (ch->type == SPAWN_EP_TYPE_TCP) {
+  } else if (ch->type == SPAWN_NET_TYPE_TCP) {
     return spawn_net_write_tcp(ch, buf, size);
   } else {
     SPAWN_ERR("Unknown channel type %d", ch->type);

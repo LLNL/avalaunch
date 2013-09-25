@@ -124,7 +124,7 @@ int spawn_net_open_tcp(spawn_endpoint_t* ep)
   char* name = SPAWN_STRDUPF("TCP:%d:%s:%s:%u", host_len, hostname, inet_ntoa(ip), (unsigned int) port);
 
   /* store values in endpoint struct */
-  ep->type = SPAWN_EP_TYPE_TCP;
+  ep->type = SPAWN_NET_TYPE_TCP;
   ep->name = name;
   ep->data = (void*)fd;
 
@@ -143,7 +143,7 @@ int spawn_net_close_tcp(spawn_endpoint_t* ep)
   /* free the name string */
   spawn_free(&ep->name);
 
-  ep->type = SPAWN_EP_TYPE_NULL;
+  ep->type = SPAWN_NET_TYPE_NULL;
 
   return SPAWN_SUCCESS;
 }
@@ -232,7 +232,7 @@ int spawn_net_connect_tcp(const char* name, spawn_channel_t* ch)
   spawn_free(&remote_name);
   spawn_free(&local_name);
 
-  ch->type = SPAWN_EP_TYPE_TCP;
+  ch->type = SPAWN_NET_TYPE_TCP;
   ch->name = ch_name;
   ch->data = (void*)fd;
 
@@ -264,7 +264,7 @@ int spawn_net_accept_tcp(const spawn_endpoint_t* ep, spawn_channel_t* ch)
   spawn_free(&local_name);
 
   /* set channel parameters */
-  ch->type = SPAWN_EP_TYPE_TCP;
+  ch->type = SPAWN_NET_TYPE_TCP;
   ch->name = ch_name;
   ch->data = (void*)fd;
 
@@ -283,7 +283,7 @@ int spawn_net_disconnect_tcp(spawn_channel_t* ch)
   /* free the name string */
   spawn_free(&ch->name);
 
-  ch->type = SPAWN_EP_TYPE_NULL;
+  ch->type = SPAWN_NET_TYPE_NULL;
 
   return SPAWN_SUCCESS;
 }

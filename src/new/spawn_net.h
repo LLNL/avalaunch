@@ -8,10 +8,10 @@ extern "C" {
 #define SPAWN_SUCCESS (0)
 #define SPAWN_FAILURE (1)
 
-typedef enum spawn_endpoint_type_enum {
-  SPAWN_EP_TYPE_NULL = 0, /* netowrk not defined */
-  SPAWN_EP_TYPE_TCP  = 1, /* TCP sockets */
-} spawn_endpoint_type;
+typedef enum spawn_net_type_enum {
+  SPAWN_NET_TYPE_NULL = 0, /* netowrk not defined */
+  SPAWN_NET_TYPE_TCP  = 1, /* TCP sockets */
+} spawn_net_type;
 
 /* represents an endpoint which others may connect to */
 typedef struct spawn_endpoint_struct {
@@ -28,7 +28,7 @@ typedef struct spawn_channel_struct {
 } spawn_channel_t;
 
 /* open endpoint for listening */
-int spawn_net_open(spawn_endpoint_type type, spawn_endpoint_t* ep);
+int spawn_net_open(spawn_net_type type, spawn_endpoint_t* ep);
 
 /* close listening endpoint */
 int spawn_net_close(spawn_endpoint_t* ep);

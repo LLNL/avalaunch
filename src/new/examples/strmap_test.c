@@ -4,14 +4,6 @@
 
 int main(int argc, char* argv[])
 {
-  spawn_endpoint_t ep;
-  spawn_channel_t ch;
-  spawn_net_open(SPAWN_EP_TYPE_TCP, &ep);
-  const char* ep_name = spawn_net_name(&ep);
-  printf("Endpoint name: %s\n", ep_name);
-  spawn_net_connect(ep_name, &ch);
-  spawn_net_close(&ep);
-
   strmap* map = strmap_new();
   strmap_set(map, "hi", "there");
   strmap_set(map, "hello", "world");

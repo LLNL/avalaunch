@@ -16,7 +16,7 @@ int main(int argc, char* argv[])
 
   spawn_endpoint_t ep;
   spawn_channel_t ch;
-  spawn_net_open(SPAWN_EP_TYPE_TCP, &ep);
+  spawn_net_open(SPAWN_NET_TYPE_TCP, &ep);
   const char* ep_name = spawn_net_name(&ep);
   printf("%d: Endpoint name: %s\n", rank, ep_name);
 
