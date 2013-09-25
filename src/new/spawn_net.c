@@ -10,7 +10,7 @@
 
 #include "spawn_internal.h"
 
-int spawn_net_open(spawn_net_type type, spawn_endpoint_t* ep)
+int spawn_net_open(spawn_net_type type, spawn_endpoint* ep)
 {
   /* check that we got a valid pointer */
   if (ep == NULL) {
@@ -32,7 +32,7 @@ int spawn_net_open(spawn_net_type type, spawn_endpoint_t* ep)
   }
 }
 
-int spawn_net_close(spawn_endpoint_t* ep)
+int spawn_net_close(spawn_endpoint* ep)
 {
   /* check that we got a valid pointer */
   if (ep == NULL) {
@@ -51,7 +51,7 @@ int spawn_net_close(spawn_endpoint_t* ep)
   }
 }
 
-const char* spawn_net_name(const spawn_endpoint_t* ep)
+const char* spawn_net_name(const spawn_endpoint* ep)
 {
   /* check that we got a valid pointer */
   if (ep == NULL) {
@@ -63,7 +63,7 @@ const char* spawn_net_name(const spawn_endpoint_t* ep)
   return name;
 }
 
-int spawn_net_connect(const char* name, spawn_channel_t* ch)
+int spawn_net_connect(const char* name, spawn_channel* ch)
 {
   /* check that we got a valid pointer */
   if (name == NULL) {
@@ -85,7 +85,7 @@ int spawn_net_connect(const char* name, spawn_channel_t* ch)
   return SPAWN_FAILURE;
 }
 
-int spawn_net_accept(const spawn_endpoint_t* ep, spawn_channel_t* ch)
+int spawn_net_accept(const spawn_endpoint* ep, spawn_channel* ch)
 {
   /* check that we got a valid pointer */
   if (ep == NULL) {
@@ -115,7 +115,7 @@ int spawn_net_accept(const spawn_endpoint_t* ep, spawn_channel_t* ch)
   return SPAWN_FAILURE;
 }
 
-int spawn_net_disconnect(spawn_channel_t* ch)
+int spawn_net_disconnect(spawn_channel* ch)
 {
   /* check that we got a valid pointer */
   if (ch == NULL) {
@@ -136,7 +136,7 @@ int spawn_net_disconnect(spawn_channel_t* ch)
   return SPAWN_FAILURE;
 }
 
-int spawn_net_read(const spawn_channel_t* ch, void* buf, size_t size)
+int spawn_net_read(const spawn_channel* ch, void* buf, size_t size)
 {
   /* check that we got a valid pointer */
   if (ch == NULL) {
@@ -157,7 +157,7 @@ int spawn_net_read(const spawn_channel_t* ch, void* buf, size_t size)
   return SPAWN_FAILURE;
 }
 
-int spawn_net_write(const spawn_channel_t* ch, const void* buf, size_t size)
+int spawn_net_write(const spawn_channel* ch, const void* buf, size_t size)
 {
   /* check that we got a valid pointer */
   if (ch == NULL) {

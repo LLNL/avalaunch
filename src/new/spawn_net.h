@@ -18,38 +18,38 @@ typedef struct spawn_endpoint_struct {
   int type;         /* network type for endpoint */
   const char* name; /* address of endpoint */
   void* data;       /* network-specific data */
-} spawn_endpoint_t;
+} spawn_endpoint;
 
 /* represents an open, reliable channel between two endpoints */
 typedef struct spawn_channel_struct {
   int type;         /* network type for channel */
   const char* name; /* printable name of channel */
   void* data;       /* network-specific data */
-} spawn_channel_t;
+} spawn_channel;
 
 /* open endpoint for listening */
-int spawn_net_open(spawn_net_type type, spawn_endpoint_t* ep);
+int spawn_net_open(spawn_net_type type, spawn_endpoint* ep);
 
 /* close listening endpoint */
-int spawn_net_close(spawn_endpoint_t* ep);
+int spawn_net_close(spawn_endpoint* ep);
 
 /* get name of opened endpoint (pass to others for call to connect) */
-const char* spawn_net_name(const spawn_endpoint_t* ep);
+const char* spawn_net_name(const spawn_endpoint* ep);
 
 /* connect to named endpoint (name comes from spawn_net_name) */
-int spawn_net_connect(const char* name, spawn_channel_t* ch);
+int spawn_net_connect(const char* name, spawn_channel* ch);
 
 /* accept connection on endpoint */
-int spawn_net_accept(const spawn_endpoint_t* ep, spawn_channel_t* ch);
+int spawn_net_accept(const spawn_endpoint* ep, spawn_channel* ch);
 
 /* close connection */
-int spawn_net_disconnect(spawn_channel_t* ch);
+int spawn_net_disconnect(spawn_channel* ch);
 
 /* read size bytes from connection into buffer */
-int spawn_net_read(const spawn_channel_t* ch, void* buf, size_t size);
+int spawn_net_read(const spawn_channel* ch, void* buf, size_t size);
 
 /* write size bytes from buffer into connection */
-int spawn_net_write(const spawn_channel_t* ch, const void* buf, size_t size);
+int spawn_net_write(const spawn_channel* ch, const void* buf, size_t size);
 
 /* TODO: isend/irecv/waitall */
 
