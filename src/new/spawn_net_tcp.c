@@ -78,6 +78,22 @@ int spawn_net_open_tcp(spawn_endpoint_t* ep)
   sin.sin_addr.s_addr = htonl(INADDR_ANY);
   sin.sin_port = htons(0); /* bind ephemeral port - OS will assign us a free port */
 
+  /* disable TCP Nagle buffering if requested */
+  int set_nodelay = 0;
+  char *env;
+  if ((env = getenv("SPAWN_TCP_NODELAY")) != NULL ) {
+    set_nodelay = atoi(env);
+  }
+  if (set_nodelay) {
+      int flag=1;
+      if (setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag)) < 0 ) {
+        SPAWN_ERR("Failed to set TCP_NODELAY option (setsockopt() errno=%d %s)", errno, strerror(errno));
+        close(fd);
+        return SPAWN_FAILURE;
+      }
+  }
+
+
   /* bind socket */
   if (bind(fd, (struct sockaddr *) &sin, sizeof(sin)) < 0) {
     SPAWN_ERR("Failed to bind socket (bind() errno=%d %s)", errno, strerror(errno));
