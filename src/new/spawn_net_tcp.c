@@ -12,6 +12,54 @@
 
 static int spawn_net_tcp_backlog = 64;
 
+static int reliable_read(const char* name, int fd, void* buf, size_t size)
+{
+  /* read from socket */
+  size_t total = 0;
+  char* ptr = (char*) buf;
+  while (total < size) {
+    size_t remaining = size - total;
+    ssize_t count = read(fd, ptr, remaining);
+    if (count > 0) {
+      total += (size_t) count;
+      ptr += count;
+    } else if (count == 0) {
+      SPAWN_ERR("Unexpected read of 0 bytes %s (read() errno=%d %s)", name, errno, strerror(errno));
+      return SPAWN_FAILURE;
+    } else {
+      /* TODO: if EINTR, retry */
+
+      SPAWN_ERR("Error reading socket %s (read() errno=%d %s)", name, errno, strerror(errno));
+      return SPAWN_FAILURE;
+    }
+  }
+  return SPAWN_SUCCESS;
+}
+
+static int reliable_write(const char* name, int fd, const void* buf, size_t size)
+{
+  /* write to socket */
+  size_t total = 0;
+  char* ptr = (char*) buf;
+  while (total < size) {
+    size_t remaining = size - total;
+    ssize_t count = write(fd, ptr, remaining);
+    if (count > 0) {
+      total += (size_t) count;
+      ptr += count;
+    } else if (count == 0) {
+      SPAWN_ERR("Unexpected write of 0 bytes %s (write() errno=%d %s)", name, errno, strerror(errno));
+      return SPAWN_FAILURE;
+    } else {
+      /* TODO: if EINTR, retry */
+
+      SPAWN_ERR("Error writing socket %s (write() errno=%d %s)", name, errno, strerror(errno));
+      return SPAWN_FAILURE;
+    }
+  }
+  return SPAWN_SUCCESS;
+}
+
 /* allocates the name of a socket */
 static char* spawn_net_get_local_sockname(int fd)
 {
@@ -62,7 +110,7 @@ static char* spawn_net_get_remote_sockname(int fd, const char* host)
   return name;
 }
 
-int spawn_net_open_tcp(spawn_endpoint_t* ep)
+int spawn_net_open_tcp(spawn_net_endpoint* ep)
 {
   /* create a TCP socket */
   int fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -147,7 +195,7 @@ int spawn_net_open_tcp(spawn_endpoint_t* ep)
   return SPAWN_SUCCESS;
 }
 
-int spawn_net_close_tcp(spawn_endpoint_t* ep)
+int spawn_net_close_tcp(spawn_net_endpoint* ep)
 {
   /* close the socket */
   int fd = (int) ep->data;
@@ -164,7 +212,7 @@ int spawn_net_close_tcp(spawn_endpoint_t* ep)
   return SPAWN_SUCCESS;
 }
 
-int spawn_net_connect_tcp(const char* name, spawn_channel_t* ch)
+int spawn_net_connect_tcp(const char* name, spawn_net_channel* ch)
 {
   /* verify that the address string starts with correct prefix */
   if (strncmp(name, "TCP:", 4) != 0) {
@@ -248,18 +296,44 @@ int spawn_net_connect_tcp(const char* name, spawn_channel_t* ch)
   spawn_free(&remote_name);
   spawn_free(&local_name);
 
-  ch->type = SPAWN_NET_TYPE_TCP;
-  ch->name = ch_name;
-  ch->data = (void*)fd;
-
   /* free our copy */
   free(name_copy);
   name_copy = NULL;
 
+  /* get our host name to tell remote end who we are */
+  char hostname[256];
+  if (gethostname(hostname, sizeof(hostname)) < 0) {
+    SPAWN_ERR("Failed gethostname()");
+    free(ch_name);
+    close(fd);
+    return SPAWN_FAILURE;
+  }
+
+  /* tell remote end who we are */
+  int64_t len, len_net;
+  len = (int64_t) (strlen(hostname) + 1);
+  spawn_pack_uint64(&len_net, len);
+  if (reliable_write(ch_name, fd, &len_net, 8) != SPAWN_SUCCESS) {
+    SPAWN_ERR("Failed to write length of name to %s", ch_name);
+    free(ch_name);
+    close(fd);
+    return SPAWN_FAILURE;
+  }
+  if (reliable_write(ch_name, fd, hostname, (size_t)len) != SPAWN_SUCCESS) {
+    SPAWN_ERR("Failed to write name to %s", ch_name);
+    free(ch_name);
+    close(fd);
+    return SPAWN_FAILURE;
+  }
+
+  ch->type = SPAWN_NET_TYPE_TCP;
+  ch->name = ch_name;
+  ch->data = (void*)fd;
+
   return SPAWN_SUCCESS;
 }
 
-int spawn_net_accept_tcp(const spawn_endpoint_t* ep, spawn_channel_t* ch)
+int spawn_net_accept_tcp(const spawn_net_endpoint* ep, spawn_net_channel* ch)
 {
   int listenfd = (int)ep->data;
 
@@ -272,12 +346,41 @@ int spawn_net_accept_tcp(const spawn_endpoint_t* ep, spawn_channel_t* ch)
     return SPAWN_FAILURE;
   }
 
+  /* TODO: authenticate remote side */
+
+  /* create temporary remote name for errors until we read real name */
+  char* tmp_remote_name = spawn_net_get_remote_sockname(fd, "remote");
+
+  /* read length of name from remote side */
+  uint64_t len, len_net;
+  if (reliable_read(tmp_remote_name, fd, &len_net, 8) != SPAWN_SUCCESS) {
+    SPAWN_ERR("Failed to read length of name from %s", tmp_remote_name);
+    spawn_free(&tmp_remote_name);
+    close(fd);
+    return SPAWN_FAILURE;
+  }
+  spawn_unpack_uint64(&len_net, &len);
+
+  /* allocate memory and read remote name */
+  char* remote = (char*) SPAWN_MALLOC((size_t)len);
+  if (reliable_read(tmp_remote_name, fd, remote, (size_t)len) != SPAWN_SUCCESS) {
+    SPAWN_ERR("Failed to read name from %s", tmp_remote_name);
+    spawn_free(&remote);
+    spawn_free(&tmp_remote_name);
+    close(fd);
+    return SPAWN_FAILURE;
+  }
+
+  /* free temporary name */
+  spawn_free(&tmp_remote_name);
+
   /* get local socket name */
   char* local_name  = spawn_net_get_local_sockname(fd);
-  char* remote_name = spawn_net_get_remote_sockname(fd, "remote");
+  char* remote_name = spawn_net_get_remote_sockname(fd, remote);
   char* ch_name = SPAWN_STRDUPF("%s --> %s", local_name, remote_name);
   spawn_free(&remote_name);
   spawn_free(&local_name);
+  spawn_free(&remote);
 
   /* set channel parameters */
   ch->type = SPAWN_NET_TYPE_TCP;
@@ -287,7 +390,7 @@ int spawn_net_accept_tcp(const spawn_endpoint_t* ep, spawn_channel_t* ch)
   return SPAWN_SUCCESS;
 }
 
-int spawn_net_disconnect_tcp(spawn_channel_t* ch)
+int spawn_net_disconnect_tcp(spawn_net_channel* ch)
 {
   /* close the socket */
   int fd = (int) ch->data;
@@ -304,52 +407,22 @@ int spawn_net_disconnect_tcp(spawn_channel_t* ch)
   return SPAWN_SUCCESS;
 }
 
-int spawn_net_read_tcp(const spawn_channel_t* ch, void* buf, size_t size)
+int spawn_net_read_tcp(const spawn_net_channel* ch, void* buf, size_t size)
 {
   /* close the socket */
   int fd = (int) ch->data;
   if (fd > 0) {
-    size_t total = 0;
-    char* ptr = (char*) buf;
-    while (total < size) {
-      size_t remaining = size - total;
-      ssize_t count = read(fd, ptr, remaining);
-      if (count > 0) {
-        total += (size_t) count;
-        ptr += count;
-      } else if (count == 0) {
-        SPAWN_ERR("Unexpected read of 0 bytes %s (read() errno=%d %s)", ch->name, errno, strerror(errno));
-        return SPAWN_FAILURE;
-      } else {
-        SPAWN_ERR("Error reading socket %s (read() errno=%d %s)", ch->name, errno, strerror(errno));
-        return SPAWN_FAILURE;
-      }
-    }
+    return reliable_read(ch->name, fd, buf, size);
   }
   return SPAWN_SUCCESS;
 }
 
-int spawn_net_write_tcp(const spawn_channel_t* ch, const void* buf, size_t size)
+int spawn_net_write_tcp(const spawn_net_channel* ch, const void* buf, size_t size)
 {
-  /* close the socket */
+  /* write to socket */
   int fd = (int) ch->data;
   if (fd > 0) {
-    size_t total = 0;
-    char* ptr = (char*) buf;
-    while (total < size) {
-      size_t remaining = size - total;
-      ssize_t count = write(fd, ptr, remaining);
-      if (count > 0) {
-        total += (size_t) count;
-        ptr += count;
-      } else if (count == 0) {
-        SPAWN_ERR("Unexpected write of 0 bytes %s (write() errno=%d %s)", ch->name, errno, strerror(errno));
-        return SPAWN_FAILURE;
-      } else {
-        SPAWN_ERR("Error writing socket %s (write() errno=%d %s)", ch->name, errno, strerror(errno));
-        return SPAWN_FAILURE;
-      }
-    }
+    return reliable_write(ch->name, fd, buf, size);
   }
   return SPAWN_SUCCESS;
 }
