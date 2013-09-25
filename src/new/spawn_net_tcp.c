@@ -110,7 +110,7 @@ static char* spawn_net_get_remote_sockname(int fd, const char* host)
   return name;
 }
 
-int spawn_net_open_tcp(spawn_endpoint* ep)
+int spawn_net_open_tcp(spawn_net_endpoint* ep)
 {
   /* create a TCP socket */
   int fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -179,7 +179,7 @@ int spawn_net_open_tcp(spawn_endpoint* ep)
   return SPAWN_SUCCESS;
 }
 
-int spawn_net_close_tcp(spawn_endpoint* ep)
+int spawn_net_close_tcp(spawn_net_endpoint* ep)
 {
   /* close the socket */
   int fd = (int) ep->data;
@@ -196,7 +196,7 @@ int spawn_net_close_tcp(spawn_endpoint* ep)
   return SPAWN_SUCCESS;
 }
 
-int spawn_net_connect_tcp(const char* name, spawn_channel* ch)
+int spawn_net_connect_tcp(const char* name, spawn_net_channel* ch)
 {
   /* verify that the address string starts with correct prefix */
   if (strncmp(name, "TCP:", 4) != 0) {
@@ -317,7 +317,7 @@ int spawn_net_connect_tcp(const char* name, spawn_channel* ch)
   return SPAWN_SUCCESS;
 }
 
-int spawn_net_accept_tcp(const spawn_endpoint* ep, spawn_channel* ch)
+int spawn_net_accept_tcp(const spawn_net_endpoint* ep, spawn_net_channel* ch)
 {
   int listenfd = (int)ep->data;
 
@@ -374,7 +374,7 @@ int spawn_net_accept_tcp(const spawn_endpoint* ep, spawn_channel* ch)
   return SPAWN_SUCCESS;
 }
 
-int spawn_net_disconnect_tcp(spawn_channel* ch)
+int spawn_net_disconnect_tcp(spawn_net_channel* ch)
 {
   /* close the socket */
   int fd = (int) ch->data;
@@ -391,7 +391,7 @@ int spawn_net_disconnect_tcp(spawn_channel* ch)
   return SPAWN_SUCCESS;
 }
 
-int spawn_net_read_tcp(const spawn_channel* ch, void* buf, size_t size)
+int spawn_net_read_tcp(const spawn_net_channel* ch, void* buf, size_t size)
 {
   /* close the socket */
   int fd = (int) ch->data;
@@ -401,7 +401,7 @@ int spawn_net_read_tcp(const spawn_channel* ch, void* buf, size_t size)
   return SPAWN_SUCCESS;
 }
 
-int spawn_net_write_tcp(const spawn_channel* ch, const void* buf, size_t size)
+int spawn_net_write_tcp(const spawn_net_channel* ch, const void* buf, size_t size)
 {
   /* write to socket */
   int fd = (int) ch->data;

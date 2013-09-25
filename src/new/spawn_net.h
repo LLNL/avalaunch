@@ -14,42 +14,42 @@ typedef enum spawn_net_type_enum {
 } spawn_net_type;
 
 /* represents an endpoint which others may connect to */
-typedef struct spawn_endpoint_struct {
+typedef struct spawn_net_endpoint_struct {
   int type;         /* network type for endpoint */
   const char* name; /* address of endpoint */
   void* data;       /* network-specific data */
-} spawn_endpoint;
+} spawn_net_endpoint;
 
 /* represents an open, reliable channel between two endpoints */
-typedef struct spawn_channel_struct {
+typedef struct spawn_net_channel_struct {
   int type;         /* network type for channel */
   const char* name; /* printable name of channel */
   void* data;       /* network-specific data */
-} spawn_channel;
+} spawn_net_channel;
 
 /* open endpoint for listening */
-int spawn_net_open(spawn_net_type type, spawn_endpoint* ep);
+int spawn_net_open(spawn_net_type type, spawn_net_endpoint* ep);
 
 /* close listening endpoint */
-int spawn_net_close(spawn_endpoint* ep);
+int spawn_net_close(spawn_net_endpoint* ep);
 
 /* get name of opened endpoint (pass to others for call to connect) */
-const char* spawn_net_name(const spawn_endpoint* ep);
+const char* spawn_net_name(const spawn_net_endpoint* ep);
 
 /* connect to named endpoint (name comes from spawn_net_name) */
-int spawn_net_connect(const char* name, spawn_channel* ch);
+int spawn_net_connect(const char* name, spawn_net_channel* ch);
 
 /* accept connection on endpoint */
-int spawn_net_accept(const spawn_endpoint* ep, spawn_channel* ch);
+int spawn_net_accept(const spawn_net_endpoint* ep, spawn_net_channel* ch);
 
 /* close connection */
-int spawn_net_disconnect(spawn_channel* ch);
+int spawn_net_disconnect(spawn_net_channel* ch);
 
 /* read size bytes from connection into buffer */
-int spawn_net_read(const spawn_channel* ch, void* buf, size_t size);
+int spawn_net_read(const spawn_net_channel* ch, void* buf, size_t size);
 
 /* write size bytes from buffer into connection */
-int spawn_net_write(const spawn_channel* ch, const void* buf, size_t size);
+int spawn_net_write(const spawn_net_channel* ch, const void* buf, size_t size);
 
 /* TODO: isend/irecv/waitall */
 
