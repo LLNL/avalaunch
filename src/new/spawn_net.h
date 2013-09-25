@@ -21,7 +21,7 @@ typedef struct spawn_endpoint_struct {
 
 typedef struct spawn_channel_struct {
   int type;
-  const char* str;
+  const char* name;
   void* data;
 } spawn_channel_t;
 
@@ -35,17 +35,21 @@ int spawn_net_close(spawn_endpoint_t* ep);
 const char* spawn_net_name(const spawn_endpoint_t* ep);
 
 /* connect to named endpoint */
-int spawn_net_connect(const char* name, spawn_channel_t* channel);
+int spawn_net_connect(const char* name, spawn_channel_t* ch);
 
 /* accept connection on endpoint */
-int spawn_net_accept(const spawn_endpoint_t* ep, spawn_channel_t* channel);
+int spawn_net_accept(const spawn_endpoint_t* ep, spawn_channel_t* ch);
 
 /* close connection */
-int spawn_net_disconnect(spawn_channel_t* channel);
+int spawn_net_disconnect(spawn_channel_t* ch);
+
+/* read size bytes from channel into buffer */
+int spawn_net_read(const spawn_channel_t* ch, void* buf, size_t size);
+
+/* write size bytes from buffer into channel */
+int spawn_net_write(const spawn_channel_t* ch, const void* buf, size_t size);
 
 /* TODO: isend/irecv/waitall */
-/* send */
-/* recv */
 
 #ifdef __cplusplus
 }
