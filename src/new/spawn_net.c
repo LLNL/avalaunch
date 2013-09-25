@@ -10,7 +10,7 @@
 
 #include "spawn_internal.h"
 
-int spawn_net_open(spawn_endpoint_type type, spawn_endpoint_t* ep)
+int spawn_net_open(spawn_net_type type, spawn_endpoint_t* ep)
 {
   /* check that we got a valid pointer */
   if (ep == NULL) {
