@@ -110,12 +110,36 @@ static char* spawn_net_get_remote_sockname(int fd, const char* host)
   return name;
 }
 
+static int spawn_net_set_tcp_nodelay(int fd)
+{
+  int set_nodelay = 0;
+  char *env;
+  if ((env = getenv("SPAWN_TCP_NODELAY")) != NULL ) {
+    set_nodelay = atoi(env);
+  }
+
+  /* disable TCP Nagle buffering if requested */
+  if (set_nodelay) {
+      int flag=1;
+      if (setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag)) < 0 ) {
+        SPAWN_ERR("Failed to set TCP_NODELAY option (setsockopt() errno=%d %s)", errno, strerror(errno));
+        return SPAWN_FAILURE;
+      }
+  }
+
+  return SPAWN_SUCCESS;
+}
+
 int spawn_net_open_tcp(spawn_net_endpoint* ep)
 {
   /* create a TCP socket */
   int fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
   if (fd < 0) {
-    SPAWN_ERR("Failed to create TCP socket (socket() errno=%d %s)", errno, strerror(errno));
+    return SPAWN_FAILURE;
+  }
+
+  if (spawn_net_set_tcp_nodelay(fd)) {
+    close(fd);
     return SPAWN_FAILURE;
   }
 
@@ -125,22 +149,6 @@ int spawn_net_open_tcp(spawn_net_endpoint* ep)
   sin.sin_family = AF_INET;
   sin.sin_addr.s_addr = htonl(INADDR_ANY);
   sin.sin_port = htons(0); /* bind ephemeral port - OS will assign us a free port */
-
-  /* disable TCP Nagle buffering if requested */
-  int set_nodelay = 0;
-  char *env;
-  if ((env = getenv("SPAWN_TCP_NODELAY")) != NULL ) {
-    set_nodelay = atoi(env);
-  }
-  if (set_nodelay) {
-      int flag=1;
-      if (setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag)) < 0 ) {
-        SPAWN_ERR("Failed to set TCP_NODELAY option (setsockopt() errno=%d %s)", errno, strerror(errno));
-        close(fd);
-        return SPAWN_FAILURE;
-      }
-  }
-
 
   /* bind socket */
   if (bind(fd, (struct sockaddr *) &sin, sizeof(sin)) < 0) {
@@ -280,6 +288,11 @@ int spawn_net_connect_tcp(const char* name, spawn_net_channel* ch)
     return SPAWN_FAILURE;
   }
 
+  if (spawn_net_set_tcp_nodelay(fd)) {
+    close(fd);
+    return SPAWN_FAILURE;
+  }
+
   /* connect */
   int rc = connect(fd, (const struct sockaddr*) &sockaddr, sizeof(struct sockaddr_in));
   if (rc < 0) {
@@ -343,6 +356,11 @@ int spawn_net_accept_tcp(const spawn_net_endpoint* ep, spawn_net_channel* ch)
   int fd = accept(listenfd, &incoming_addr, &incoming_len);
   if (fd < 0) {
     SPAWN_ERR("Failed to connect to %s (connect() errno=%d %s)", ep->name, errno, strerror(errno));
+    return SPAWN_FAILURE;
+  }
+
+  if (spawn_net_set_tcp_nodelay(fd)) {
+    close(fd);
     return SPAWN_FAILURE;
   }
 
