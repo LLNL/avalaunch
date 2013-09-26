@@ -81,14 +81,9 @@ node_get_id (char const * location)
         }
 
         t->edge[0] = id + 1;
-#if 0
-        is_local = is_local_ipaddr(location);
-#else
-        is_local = 0;
-#endif
+        
         node_table[id].location = location;
-        node_table[id].is_local = is_local;
-        printf("%s is %slocal\n", location, is_local ? "" : "not ");
+        node_table[id].is_local = is_local_ipaddr(location);
     }
 
     return id;

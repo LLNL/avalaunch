@@ -12,6 +12,7 @@ main (int argc, char * argv[])
     int i, n;
 
     is_local_ipaddr_db_init();
+
     if (start_event_handler()) {
         exit(EXIT_FAILURE);
     }
