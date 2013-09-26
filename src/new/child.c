@@ -1,7 +1,8 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <errno.h>
-#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
 
 #include <print_errmsg.h>
 
@@ -55,6 +56,9 @@ create_child (char const * command[])
     }
 
     else if (!cpid) {
+        char const * const stdout_msg = "writing to stdout";
+        char const * const stderr_msg = "writing to stderr";
+
         /*
          * Child
          */
@@ -66,7 +70,16 @@ create_child (char const * command[])
         close(pipe_stdout[0]);
         close(pipe_stderr[0]);
 
-        execvp(command[0], command);
+        write(STDOUT_FILENO, stdout_msg, strlen(stdout_msg));
+        write(STDERR_FILENO, stderr_msg, strlen(stderr_msg));
+        fprintf(stdout, stdout_msg);
+        fprintf(stderr, stderr_msg);
+
+        /*
+         * Why isn't the second parameter of execvp defined to be an array of
+         * pointers to constant characters?
+         */
+        execvp(command[0], (char **)command);
         print_errmsg("create_child (execvp)", errno);
         _exit(EXIT_FAILURE);
     }
@@ -80,7 +93,7 @@ create_child (char const * command[])
     close(pipe_stdout[1]);
     close(pipe_stderr[1]);
 
-    if (NULL == tsearch(ptr, &rootp, compare_child)) {
+    if (!tsearch(ptr, &rootp, &compare_child)) {
         print_errmsg("create_child (tsearch)", errno);
         return NULL;
     }

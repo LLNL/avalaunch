@@ -4,7 +4,6 @@
 
 #include <is_local_ipaddr.h>
 #include <event_handler.h>
-#include <child.h>
 #include <node.h>
 
 int

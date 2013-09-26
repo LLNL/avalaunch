@@ -6,12 +6,20 @@
 #include <errno.h>
 
 #include <print_errmsg.h>
+#include <pollfds.h>
 
 static sigset_t thread_sigmask;
-static sigset_t original_sigmask;
 
 static pthread_t thread_id;
 static unsigned num_exited = 0;
+
+static volatile sig_atomic_t got_SIGCHLD = 0;
+
+static void
+child_sig_handler (int sig)
+{
+    got_SIGCHLD = 1;
+}
 
 extern int
 get_num_exited (void)
@@ -23,31 +31,37 @@ static void
 event_handler (void * arg)
 {
     int error, signal, status;
+    struct sigaction sa;
+
+    sa.sa_flags = 0;
+    sa.sa_handler = child_sig_handler;
+    sigemptyset(&sa.sa_mask);
+
+    if (-1 == sigaction(SIGCHLD, &sa, NULL)) {
+        print_errmsg("event_handler (sigaction)", error);
+        /*
+         * Replace abort with state change once state machine is
+         * reintroduced.
+         */
+        abort();
+    }
 
     for (;;) {
-        if ((error = sigwait(&thread_sigmask, &signal))) {
-            print_errmsg("event_handler (sigwait)", error);
-            /*
-             * Replace abort with state change once state machine is
-             * reintroduced.
-             */
-            abort();
-        }
+        pollfds_poll();
+        pollfds_process();
 
-        switch (signal) {
-            case SIGCHLD:
-                if (-1 == wait(&status)) {
-                    print_errmsg("event_handler (wait)", errno);
-                    abort();
-                }
+        if (got_SIGCHLD) {
+            got_SIGCHLD = 0;
 
-                else {
-                    printf("child exited (status = %d)\n", status);
-                    num_exited++;
-                }
-                break;
-            default:
-                break;
+            if (-1 == wait(&status)) {
+                print_errmsg("event_handler (wait)", errno);
+                abort();
+            }
+
+            else {
+                printf("child exited (status = %d)\n", status);
+                num_exited++;
+            }
         }
     }
 }
