@@ -24,11 +24,6 @@ main (int argc, char * argv[])
         if (0 > node_get_id(argv[i])) {
             exit(EXIT_FAILURE);
         }
-#if 0
-        if (NULL != launch(argv[i])) {
-            n++;
-        }
-#endif
     }
 
     for (i = 0, n = node_count(); i < n; i++) {
