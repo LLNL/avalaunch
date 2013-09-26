@@ -25,10 +25,15 @@ static struct trie {
 static size_t trie_index = 0;
 static size_t trie_alloc = 0;
 
+enum spawn_method {
+    SPAWN_METHOD_FORK,
+    SPAWN_METHOD_SSH,
+};
+
 static int create_node (void);
 static int trie_create (void);
 static struct trie * trie_walk (struct trie *, char const *);
-static int create_process (size_t);
+static int create_process (size_t, enum spawn_method);
 static void stdin_handler (size_t, int);
 static void stdout_handler (size_t, int);
 static void stderr_handler (size_t, int);
@@ -92,17 +97,7 @@ node_get_id (char const * location)
 extern int
 node_launch (size_t id)
 {
-#if 0
-    size_t index = node_table[id].is_local ? 0 : 1;
-    char const * command[][4] = {
-        { "echo", "foo", "bar", NULL },
-        { "ssh", node_table[id].location, "hostname", NULL }
-    };
-
-    return create_child(command[index]);
-#else
-    return create_process(id);
-#endif
+    return create_process(id, node_table[id].is_local ? SPAWN_METHOD_FORK : SPAWN_METHOD_SSH);
 }
 
 extern size_t
@@ -183,9 +178,8 @@ trie_walk (struct trie * root, char const * location)
 }
 
 static int
-create_process (size_t id)
+create_process (size_t id, enum spawn_method method)
 {
-    char const * command[] = { "ssh", node_table[id].location, "hostname", NULL };
     int pipe_stdin[2], pipe_stdout[2], pipe_stderr[2];
     pid_t cpid;
 
@@ -231,8 +225,16 @@ create_process (size_t id)
          * Why isn't the second parameter of execvp defined to be an array of
          * pointers to constant characters?
          */
-        execvp(command[0], (char **)command);
-        print_errmsg("create_child (execvp)", errno);
+        switch (method) {
+            case SPAWN_METHOD_FORK:
+                execlp("hostname", "hostname", (char *)NULL);
+                break;
+            case SPAWN_METHOD_SSH:
+                execlp("ssh", "ssh", node_table[id].location, "hostname", (char *)NULL);
+                break;
+        }
+
+        print_errmsg("create_child (execlp)", errno);
         _exit(EXIT_FAILURE);
     }
 
