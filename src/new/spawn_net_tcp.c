@@ -229,12 +229,8 @@ int spawn_net_connect_tcp(const char* name, spawn_net_channel* ch)
     return SPAWN_FAILURE;
   }
 
-  /* make a copy of name we can change */
-  char* name_copy = strdup(name);
-  if (name_copy == NULL) {
-    SPAWN_ERR("Failed to copy name");
-    return SPAWN_FAILURE;
-  }
+  /* make a copy of name that we can modify */
+  char* name_copy = SPAWN_STRDUP(name);
 
   /* advance past TCP: */
   char* ptr = name_copy;
