@@ -1,8 +1,7 @@
 /*
  * Local headers
  */
-#include <spawn_net.h>
-#include <spawn_net_tcp.h>
+#include <spawn_internal.h>
 #include <node.h>
 #include <print_errmsg.h>
 #include <spawn_util.h>
@@ -33,47 +32,36 @@ void session_destroy (struct session_t *);
 struct session_t *
 session_init (int argc, char * argv[])
 {
-    struct session_t * s = malloc(sizeof(struct session_t));
+    struct session_t * s = SPAWN_MALLOC(sizeof(struct session_t));
     char * spawn_cwd = NULL, * spawn_command = NULL;
     size_t len = 128;
-
-    if (!s) {
-        return NULL;
-    }
 
     spawn_net_open(SPAWN_NET_TYPE_TCP, &(s->ep));
     s->ep_name = spawn_net_name(&(s->ep));
 
     while (!spawn_cwd) {
-        spawn_cwd = malloc(len);
-        if (!spawn_cwd) {
-            return -1;
-        }
-
+        spawn_cwd = SPAWN_MALLOC(len);
         if (NULL == getcwd(spawn_cwd, len)) {
             switch (errno) {
                 case ERANGE:
-                    spawn_cwd = NULL;
+                    spawn_free(&spawn_cwd);
                     len <<= 1;
 
                     if (len < 128) {
-                        return -1;
+                        session_destroy(s);
+                        return NULL;
                     }
                     break;
                 default:
-                    print_errmsg("node_initialize (getcwd)", errno);
+                    SPAWN_ERR("node_initialize (getcwd() errno=%d %s)", errno, strerror(errno));
                     break;
             }
         }
 
     }
 
-    spawn_command = spawn_strdupf(__FILE__, __LINE__, "cd %s && env %s=%s %s",
+    spawn_command = SPAWN_STRDUPF("cd %s && env %s=%s %s",
             spawn_cwd, "MV2_SPAWN_PARENT", s->ep_name, argv[0]);
-
-    if (!spawn_command) {
-        return -1;
-    }
 
     is_local_ipaddr_db_init();
     call_is_local_ipaddr_db_free = 1;
@@ -179,9 +167,7 @@ session_start (struct session_t * s)
 void
 session_destroy (struct session_t * s)
 {
-    if (s) {
-        free(s);
-    }
+    spawn_free(&s);
 
     if (call_stop_event_handler) {
         stop_event_handler();
