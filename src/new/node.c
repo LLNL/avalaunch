@@ -30,6 +30,8 @@ enum spawn_method {
     SPAWN_METHOD_SSH,
 };
 
+static char * spawn_command = NULL;
+
 static int create_node (void);
 static int trie_create (void);
 static struct trie * trie_walk (struct trie *, char const *);
@@ -39,11 +41,13 @@ static void stdout_handler (size_t, int);
 static void stderr_handler (size_t, int);
 
 extern int
-node_initialize (void)
+node_initialize (char const * command)
 {
     if (trie_table) {
         return -1;
     }
+
+    spawn_command = command;
 
     return trie_create();
 }
@@ -222,10 +226,10 @@ create_process (size_t id, enum spawn_method method)
          */
         switch (method) {
             case SPAWN_METHOD_FORK:
-                execlp("hostname", "hostname", (char *)NULL);
+                execlp("sh", "sh", "-c", spawn_command, (char *)NULL);
                 break;
             case SPAWN_METHOD_SSH:
-                execlp("ssh", "ssh", node_table[id].location, "hostname", (char *)NULL);
+                execlp("ssh", "ssh", node_table[id].location, spawn_command, (char *)NULL);
                 break;
         }
 

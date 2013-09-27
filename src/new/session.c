@@ -4,12 +4,15 @@
 #include <spawn_net.h>
 #include <spawn_net_tcp.h>
 #include <node.h>
+#include <print_errmsg.h>
+#include <spawn_util.h>
 
 /*
  * System headers
  */
 #include <stdlib.h>
 #include <stdio.h>
+#include <errno.h>
 
 struct session_t {
     int is_root;
@@ -31,6 +34,8 @@ struct session_t *
 session_init (int argc, char * argv[])
 {
     struct session_t * s = malloc(sizeof(struct session_t));
+    char * spawn_cwd = NULL, * spawn_command = NULL;
+    size_t len = 128;
 
     if (!s) {
         return NULL;
@@ -38,6 +43,38 @@ session_init (int argc, char * argv[])
 
     spawn_net_open(SPAWN_NET_TYPE_TCP, &(s->ep));
     s->ep_name = spawn_net_name(&(s->ep));
+
+    while (!spawn_cwd) {
+        spawn_cwd = malloc(len);
+        if (!spawn_cwd) {
+            return -1;
+        }
+
+        if (NULL == getcwd(spawn_cwd, len)) {
+            switch (errno) {
+                case ERANGE:
+                    spawn_cwd = NULL;
+                    len <<= 1;
+
+                    if (len < 128) {
+                        return -1;
+                    }
+                    break;
+                default:
+                    print_errmsg("node_initialize (getcwd)", errno);
+                    break;
+            }
+        }
+
+    }
+
+    spawn_command = spawn_strdupf(__FILE__, __LINE__, "cd %s && env %s=%s %s",
+            spawn_cwd, "MV2_SPAWN_PARENT", s->ep_name, argv[0]);
+
+    if (!spawn_command) {
+        return -1;
+    }
+
     is_local_ipaddr_db_init();
     call_is_local_ipaddr_db_free = 1;
 
@@ -48,7 +85,7 @@ session_init (int argc, char * argv[])
 
     call_stop_event_handler = 1;
 
-    if (node_initialize()) {
+    if (node_initialize(spawn_command)) {
         session_destroy(s);
         return NULL;
     }
@@ -111,10 +148,10 @@ session_start (struct session_t * s)
         node_launch(i);
     }
 
-#if 0
     /*
      * This for loop will be in another thread to overlap and speed up the
-     * startup
+     * startup.  This loop also will cause a hang if any nodes do not launch
+     * and connect back properly.
      */
     for (i = 0; i < n; i++) {
         char str[100];
@@ -127,9 +164,8 @@ session_start (struct session_t * s)
          */
         spawn_net_read(&(s->ch), &str_len, sizeof(int));
         spawn_net_read(&(s->ch), str, (size_t)str_len);
-        printf("recevied %s\n", str);
+        printf("received %s\n", str);
     }
-#endif
 
     /*
      * This is a busy wait.  I plan on using the state machine from mpirun_rsh
