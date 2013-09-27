@@ -45,6 +45,11 @@ void spawn_exit(int code);
 #define SPAWN_MALLOC(X) spawn_malloc(X, __FILE__, __LINE__);
 void* spawn_malloc(size_t size, const char* file, int line);
 
+/* allocate a string, returns NULL if str == NULL,
+ * fatal error if allocation fails */
+#define SPAWN_STRDUP(X) spawn_strdup(__FILE__, __LINE__, X);
+char* spawn_strdup(const char* file, int line, const char* str);
+
 /* allocate a formatted string */
 #define SPAWN_STRDUPF(X, ...) spawn_strdupf(__FILE__, __LINE__, X, __VA_ARGS__);
 char* spawn_strdupf(const char* file, int line, const char* format, ...);

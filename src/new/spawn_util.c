@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <time.h>
+#include <errno.h>
 
 #include "spawn_internal.h"
 
@@ -62,7 +63,7 @@ void spawn_err(const char* file, int line, const char* format, ...)
     strftime(time_str, sizeof(time_str), "%Y-%m-%dT%H:%M:%S", localtime(&timestamp));
 
     /* print message */
-    fprintf(stderr, "%s on %s:%d at %s: %s @ %s:%d\n",
+    fprintf(stderr, "ERROR: %s on %s:%d at %s: %s @ %s:%d\n",
         my_prog, my_host, my_pid, time_str, str, file, line
     );
     fflush(stderr);
@@ -95,6 +96,20 @@ void* spawn_malloc(size_t size, const char* file, int line)
     }
   }
   return ptr;
+}
+
+char* spawn_strdup(const char* file, int line, const char* origstr)
+{
+  char* str = NULL;
+  if (origstr != NULL) {
+    str = strdup(origstr);
+    if (str == NULL) {
+      /* error */
+      spawn_err(file, line, "Failed to allocate string (strdup() errno=%d %s)", errno, strerror(errno));
+      spawn_exit(1);
+    }
+  }
+  return str;
 }
 
 char* spawn_strdupf(const char* file, int line, const char* format, ...)
