@@ -1,6 +1,8 @@
 #ifndef POLLFDS_H
 #define POLLFDS_H 1
 
+#include <stdlib.h>
+
 struct pollfds_param {
     int fd;
     void (* fd_handler)(size_t, int);
