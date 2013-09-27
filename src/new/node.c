@@ -1,13 +1,19 @@
+/*
+ * Local Headers
+ */
+#include <is_local_ipaddr.h>
+#include <print_errmsg.h>
+#include <pollfds.h>
+
+/*
+ * System Headers
+ */
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <errno.h>
 #include <unistd.h>
 #include <fcntl.h>
-
-#include <is_local_ipaddr.h>
-#include <print_errmsg.h>
-#include <pollfds.h>
 
 static struct node {
     char const  * location;
@@ -55,12 +61,18 @@ node_initialize (char const * command)
 extern int
 node_finalize (void)
 {
-    free(trie_table);
+    if (trie_table) {
+        free(trie_table);
+    }
+
     trie_table = NULL;
     trie_index = 0;
     trie_alloc = 0;
 
-    free(node_table);
+    if (node_table) {
+        free(node_table);
+    }
+
     node_table = NULL;
     node_index = 0;
     node_alloc = 0;
