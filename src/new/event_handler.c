@@ -51,16 +51,45 @@ event_handler (void * arg)
         pollfds_process();
 
         if (got_SIGCHLD) {
+            pid_t waited_pid;
             got_SIGCHLD = 0;
 
-            if (-1 == wait(&status)) {
-                print_errmsg("event_handler (wait)", errno);
-                abort();
+            while (0 < (waited_pid = waitpid(-1, &status, WNOHANG | WUNTRACED |
+                            WCONTINUED))) {
+                if (WIFEXITED(status)) {
+                    int rc = WEXITSTATUS(status);
+
+                    if (rc) {
+                        printf("child exited (status = %d) [pid: %d]\n", rc,
+                                waited_pid);
+                    }
+
+                    num_exited++;
+                }
+
+                else if (WIFSIGNALED(status)) {
+                    num_exited++;
+                    printf("child exited (signal %d) [pid: %d]\n",
+                            WTERMSIG(status), waited_pid);
+                }
+
+                else if (WIFSTOPPED(status)) {
+                    printf("child stopped [pid: %d]\n", waited_pid);
+                }
+
+                else if (WIFCONTINUED(status)) {
+                    printf("child continued [pid: %d]\n", waited_pid);
+                }
             }
 
-            else {
-                printf("child exited (status = %d)\n", status);
-                num_exited++;
+            if (-1 == waited_pid) {
+                switch (errno) {
+                    case ECHILD:
+                        break;
+                    default:
+                        print_errmsg("event_handler (wait)", errno);
+                        abort();
+                }
             }
         }
     }
