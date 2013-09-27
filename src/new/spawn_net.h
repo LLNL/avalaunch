@@ -1,6 +1,8 @@
 #ifndef SPAWN_NET_H
 #define SPAWN_NET_H
 
+#include <stdlib.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
