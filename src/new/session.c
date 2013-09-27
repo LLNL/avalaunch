@@ -67,13 +67,6 @@ session_init (int argc, char * argv[])
     is_local_ipaddr_db_init();
     call_is_local_ipaddr_db_free = 1;
 
-    if (start_event_handler()) {
-        session_destroy(s);
-        return NULL;
-    }
-
-    call_stop_event_handler = 1;
-
     if (node_initialize(spawn_command)) {
         session_destroy(s);
         return NULL;
@@ -134,6 +127,13 @@ int
 session_start (struct session_t * s)
 {
     int i, n;
+
+    if (start_event_handler()) {
+        session_destroy(s);
+        return -1;
+    }
+
+    call_stop_event_handler = 1;
 
     for (i = 0, n = node_count(); i < n; i++) {
         node_launch(i);
