@@ -26,6 +26,55 @@ static void get_name()
 }
 
 /* print error message */
+void spawn_dbg(const char* file, int line, const char* format, ...)
+{
+  get_name();
+
+  va_list args;
+  char* str = NULL;
+
+  /* check that we have a format string */
+  if (format == NULL) {
+    return;
+  }
+
+  /* compute the size of the string we need to allocate */
+  va_start(args, format);
+  int size = vsnprintf(NULL, 0, format, args) + 1;
+  va_end(args);
+
+  /* allocate and print the string */
+  if (size > 0) {
+    /* NOTE: we don't use spawn_malloc to avoid infinite loop */
+    str = (char*) malloc(size);
+    if (str == NULL) {
+      /* error */
+      return;
+    }
+
+    /* format message */
+    va_start(args, format);
+    vsnprintf(str, size, format, args);
+    va_end(args);
+
+    /* grab timestamp */
+    char time_str[30];
+    time_t timestamp = time(NULL);
+    strftime(time_str, sizeof(time_str), "%Y-%m-%dT%H:%M:%S", localtime(&timestamp));
+
+    /* print message */
+    fprintf(stderr, "DEBUG: %s on %s:%d at %s: %s @ %s:%d\n",
+        my_prog, my_host, my_pid, time_str, str, file, line
+    );
+    fflush(stderr);
+
+    free(str);
+  }
+
+  return;
+}
+
+/* print error message */
 void spawn_err(const char* file, int line, const char* format, ...)
 {
   get_name();
