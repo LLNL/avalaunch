@@ -2,6 +2,7 @@
 #include <poll.h>
 #include <signal.h>
 #include <stdlib.h>
+#include <errno.h>
 
 #include <pollfds.h>
 
@@ -71,7 +72,16 @@ pollfds_poll (void)
     sigset_t empty_sigmask;
     sigemptyset(&empty_sigmask);
 
-    ppoll(fds_table, fds_index, NULL, &empty_sigmask);
+    if (-1 == ppoll(fds_table, fds_index, NULL, &empty_sigmask)) {
+        switch (errno) {
+            case EINTR:
+                break;
+            default:
+                print_errmsg("pollfds_poll (ppoll)", errno);
+                abort();
+                break;
+        }
+    }
 }
 
 extern void
