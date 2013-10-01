@@ -197,6 +197,7 @@ int spawn_net_chgrp_getsize(spawn_net_channel_group* chgrp)
 int spawn_net_chgrp_add(spawn_net_channel_group* chgrp, spawn_net_channel* ch)
 {
   spawn_list_add(&ch->list,&chgrp->list);
+  ch->type = chgrp->type;
   chgrp->size++;
 
   /* TODO: add error-checking */
