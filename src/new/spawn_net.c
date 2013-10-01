@@ -177,3 +177,53 @@ int spawn_net_write(const spawn_net_channel* ch, const void* buf, size_t size)
 
   return SPAWN_FAILURE;
 }
+
+int spawn_net_chgrp_init(spawn_net_channel_group* chgrp, int type)
+{
+  chgrp->type = type;
+  chgrp->size = 0;
+  SPAWN_INIT_LIST_HEAD(&chgrp->list);
+
+  /* TODO: add error-checking */
+  return SPAWN_SUCCESS;
+}
+
+/* currently for debugging */
+int spawn_net_chgrp_getsize(spawn_net_channel_group* chgrp)
+{
+  return chgrp->size;
+}
+
+int spawn_net_chgrp_add(spawn_net_channel_group* chgrp, spawn_net_channel* ch)
+{
+  spawn_list_add(&ch->list,&chgrp->list);
+  chgrp->size++;
+
+  /* TODO: add error-checking */
+  return SPAWN_SUCCESS;
+}
+
+int spawn_net_mcast(const void* buf,
+                        size_t size,
+                        spawn_net_channel_group* chgrp)
+{
+  if (chgrp == NULL) {
+    SPAWN_ERR("NULL mcast channel group");
+    return SPAWN_FAILURE;
+  }
+
+  if (!chgrp->size) {
+    SPAWN_ERR("Multicast group is empty");
+    return SPAWN_FAILURE;
+  }
+
+#if 0
+  if ( ) {
+    /* recv data from root */
+  } else {
+    /* send data to each channel */ 
+  }
+#endif
+
+  return SPAWN_SUCCESS;
+}

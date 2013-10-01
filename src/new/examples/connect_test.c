@@ -16,6 +16,8 @@ int main(int argc, char* argv[])
 
   spawn_net_endpoint ep;
   spawn_net_channel ch;
+  //spawn_net_channel_group chgrp;
+
   spawn_net_open(SPAWN_NET_TYPE_TCP, &ep);
   const char* ep_name = spawn_net_name(&ep);
   printf("%d: Endpoint name: %s\n", rank, ep_name);
@@ -36,6 +38,7 @@ int main(int argc, char* argv[])
     spawn_net_read(&ch, &str_len, sizeof(int));
     spawn_net_read(&ch, str, (size_t)str_len);
     printf("%d: recevied %s\n", rank, str);
+    printf("%d: recevied ch:%s\n", rank, ch.name);
   } else if (rank == 1) {
     spawn_net_connect(parent_name, &ch);
 
@@ -44,7 +47,11 @@ int main(int argc, char* argv[])
     spawn_net_write(&ch, &str_len, sizeof(int));
     spawn_net_write(&ch, str, (size_t)str_len);
     printf("%d: sent %s\n", rank, str);
+    printf("%d: sent ch:%s\n", rank, ch.name);
   }
+
+  //cha str2[] = "BeatTheBadgers!";
+  //spawn_net_mcast(str, strlen(str) + 1, &chgrp);
 
   spawn_net_disconnect(&ch);
   spawn_net_close(&ep);

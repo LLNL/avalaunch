@@ -2,6 +2,7 @@
 #define SPAWN_NET_H
 
 #include <stdlib.h>
+#include "list.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -24,10 +25,18 @@ typedef struct spawn_net_endpoint_struct {
 
 /* represents an open, reliable channel between two endpoints */
 typedef struct spawn_net_channel_struct {
-  int type;         /* network type for channel */
-  const char* name; /* printable name of channel */
-  void* data;       /* network-specific data */
+  int type;                 /* network type for channel */
+  const char* name;         /* printable name of channel */
+  void* data;               /* network-specific data */
+  struct list_head list;    /* list of channels */
 } spawn_net_channel;
+
+/* represents a channel group */
+typedef struct spawn_net_channel_group_struct {
+  int type;                     /* network type for channel group */
+  int size;                     /* size of channel group */
+  spawn_net_channel* list;       /* list of channels in group*/
+} spawn_net_channel_group;
 
 /* open endpoint for listening */
 int spawn_net_open(spawn_net_type type, spawn_net_endpoint* ep);
@@ -52,6 +61,19 @@ int spawn_net_read(const spawn_net_channel* ch, void* buf, size_t size);
 
 /* write size bytes from buffer into connection */
 int spawn_net_write(const spawn_net_channel* ch, const void* buf, size_t size);
+
+/* initialize a channel group */
+int spawn_net_chgrp_init(spawn_net_channel_group* chgrp, int type);
+
+/* get size of the channel group */
+int spawn_net_chgrp_getsize(spawn_net_channel_group* chgrp);
+
+/* add children channels to the channel group */
+int spawn_net_chgrp_add(spawn_net_channel_group* chgrp, spawn_net_channel* ch);
+
+/* multicast a message to all end-points connected via channel group  */
+int spawn_net_mcast(const void* buf, size_t size, spawn_net_channel_group* chgrp);
+
 
 /* TODO: isend/irecv/waitall */
 
