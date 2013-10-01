@@ -182,7 +182,7 @@ int spawn_net_chgrp_init(spawn_net_channel_group* chgrp, int type)
 {
   chgrp->type = type;
   chgrp->size = 0;
-  SPAWN_INIT_LIST_HEAD(&chgrp->list);
+  SPAWN_INIT_LIST_HEAD(&chgrp->chlist);
 
   /* TODO: add error-checking */
   return SPAWN_SUCCESS;
@@ -196,7 +196,7 @@ int spawn_net_chgrp_getsize(spawn_net_channel_group* chgrp)
 
 int spawn_net_chgrp_add(spawn_net_channel_group* chgrp, spawn_net_channel* ch)
 {
-  spawn_list_add(&ch->list,&chgrp->list);
+  spawn_list_add(&ch->list,&chgrp->chlist);
   ch->type = chgrp->type;
   chgrp->size++;
 
@@ -208,6 +208,7 @@ int spawn_net_mcast(const void* buf,
                         size_t size,
                         spawn_net_channel_group* chgrp)
 {
+
   if (chgrp == NULL) {
     SPAWN_ERR("NULL mcast channel group");
     return SPAWN_FAILURE;
@@ -219,7 +220,8 @@ int spawn_net_mcast(const void* buf,
   }
 
 #if 0
-  if ( ) {
+  if ( in channel group ) {
+    spawn_net_read();
     /* recv data from root */
   } else {
     /* send data to each channel */ 

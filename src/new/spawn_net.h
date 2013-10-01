@@ -28,14 +28,14 @@ typedef struct spawn_net_channel_struct {
   int type;                 /* network type for channel */
   const char* name;         /* printable name of channel */
   void* data;               /* network-specific data */
-  struct list_head list;    /* list of channels */
+  struct list_head list;    /* circularly-linked list of channels */
 } spawn_net_channel;
 
 /* represents a channel group */
 typedef struct spawn_net_channel_group_struct {
   int type;                     /* network type for channel group */
   int size;                     /* size of channel group */
-  spawn_net_channel* list;       /* list of channels in group*/
+  spawn_net_channel* chlist;    /* pointer to list of channels in group*/
 } spawn_net_channel_group;
 
 /* open endpoint for listening */
