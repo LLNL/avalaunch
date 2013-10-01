@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <errno.h>
+#include <sys/utsname.h>
 
 struct session_t {
     int is_root;
@@ -81,10 +82,12 @@ session_init (int argc, char * argv[])
     call_node_finalize = 1;
 
     if (s->parent_name = getenv("MV2_SPAWN_PARENT")) {
-        int param_size;
-        char const * str = getenv("HOSTNAME");
-        int str_len = strlen(str) + 1;
+        int param_size, str_len;
+        struct utsname buf;
 
+        uname(&buf);
+
+        str_len = strlen(buf.nodename) + 1;
         s->is_root = 0;
 
         /*
@@ -103,7 +106,7 @@ session_init (int argc, char * argv[])
          * strmap_unpack(param_buf, param_strmap);
          */
         spawn_net_write(&(s->parent_ch), &str_len, sizeof(int));
-        spawn_net_write(&(s->parent_ch), str, (size_t)str_len);
+        spawn_net_write(&(s->parent_ch), buf.nodename, (size_t)str_len);
     }
 
     else {
