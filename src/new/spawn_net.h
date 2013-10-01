@@ -35,7 +35,7 @@ typedef struct spawn_net_channel_struct {
 typedef struct spawn_net_channel_group_struct {
   int type;                     /* network type for channel group */
   int size;                     /* size of channel group */
-  spawn_net_channel* chlist;    /* pointer to list of channels in group*/
+  struct list_head chlist;      /* pointer to list of channels in group*/
 } spawn_net_channel_group;
 
 /* open endpoint for listening */
@@ -72,7 +72,11 @@ int spawn_net_chgrp_getsize(spawn_net_channel_group* chgrp);
 int spawn_net_chgrp_add(spawn_net_channel_group* chgrp, spawn_net_channel* ch);
 
 /* multicast a message to all end-points connected via channel group  */
-int spawn_net_mcast(const void* buf, size_t size, spawn_net_channel_group* chgrp);
+int spawn_net_mcast(const void* buf,
+                    size_t size,
+                    spawn_net_channel* parent_ch,
+                    spawn_net_channel_group* chgrp,
+                    int root);
 
 
 /* TODO: isend/irecv/waitall */

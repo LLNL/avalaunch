@@ -196,8 +196,8 @@ int spawn_net_chgrp_getsize(spawn_net_channel_group* chgrp)
 
 int spawn_net_chgrp_add(spawn_net_channel_group* chgrp, spawn_net_channel* ch)
 {
-  spawn_list_add(&ch->list,&chgrp->chlist);
   ch->type = chgrp->type;
+  spawn_list_add(&ch->list,&chgrp->chlist);
   chgrp->size++;
 
   /* TODO: add error-checking */
@@ -206,9 +206,14 @@ int spawn_net_chgrp_add(spawn_net_channel_group* chgrp, spawn_net_channel* ch)
 
 int spawn_net_mcast(const void* buf,
                         size_t size,
-                        spawn_net_channel_group* chgrp)
+                        spawn_net_channel* parent_ch,
+                        spawn_net_channel_group* chgrp,
+                        int root)
 {
+  spawn_net_channel *mcast_ch = NULL;
 
+  mcast_ch = malloc(sizeof(spawn_net_channel));
+#if 0
   if (chgrp == NULL) {
     SPAWN_ERR("NULL mcast channel group");
     return SPAWN_FAILURE;
@@ -218,15 +223,20 @@ int spawn_net_mcast(const void* buf,
     SPAWN_ERR("Multicast group is empty");
     return SPAWN_FAILURE;
   }
-
-#if 0
-  if ( in channel group ) {
-    spawn_net_read();
-    /* recv data from root */
-  } else {
-    /* send data to each channel */ 
-  }
 #endif
+
+  /* TODO: check for empty list before iterating over it */
+
+
+  if (!root) {
+    /* recv data from root */
+    spawn_net_read(parent_ch, buf, size);
+  } else {
+    spawn_list_for_each_entry(mcast_ch, &chgrp->chlist, list) {
+    /* send data to each channel */ 
+    spawn_net_write(mcast_ch, buf, size); 
+    }
+  }
 
   return SPAWN_SUCCESS;
 }
