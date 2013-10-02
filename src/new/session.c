@@ -26,7 +26,6 @@ struct session_t {
 
 static int call_stop_event_handler = 0;
 static int call_node_finalize = 0;
-static int call_is_local_ipaddr_db_free = 0;
 
 void session_destroy (struct session_t *);
 
@@ -63,9 +62,6 @@ session_init (int argc, char * argv[])
 
     spawn_command = SPAWN_STRDUPF("cd %s && env %s=%s %s",
             spawn_cwd, "MV2_SPAWN_PARENT", s->ep_name, argv[0]);
-
-    is_local_ipaddr_db_init();
-    call_is_local_ipaddr_db_free = 1;
 
     if (node_initialize(spawn_command)) {
         session_destroy(s);
@@ -178,9 +174,5 @@ session_destroy (struct session_t * s)
 
     if (call_node_finalize) {
         node_finalize();
-    }
-
-    if (call_is_local_ipaddr_db_free) {
-        is_local_ipaddr_db_free();
     }
 }

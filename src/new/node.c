@@ -1,7 +1,6 @@
 /*
  * Local Headers
  */
-#include <is_local_ipaddr.h>
 #include <print_errmsg.h>
 #include <pollfds.h>
 
@@ -18,7 +17,6 @@
 static struct node {
     char const  * location;
     pid_t       pid;
-    int         is_local;
 } * node_table = NULL;
 
 static size_t node_index = 0;
@@ -31,17 +29,11 @@ static struct trie {
 static size_t trie_index = 0;
 static size_t trie_alloc = 0;
 
-enum spawn_method {
-    SPAWN_METHOD_FORK,
-    SPAWN_METHOD_SSH,
-};
-
 static char * spawn_command = NULL;
 
 static int create_node (void);
 static int trie_create (void);
 static struct trie * trie_walk (struct trie *, char const *);
-static int create_process (size_t, enum spawn_method);
 static void stdin_handler (size_t, int);
 static void stdout_handler (size_t, int);
 static void stderr_handler (size_t, int);
@@ -89,26 +81,100 @@ node_get_id (char const * location)
          * first time processing this location
          */
         struct trie * t_hostname, * t_ip;
-        int id = create_node();
-        int is_local;
+        int id;
 
-        if (0 > id) {
+
+        id = create_node();
+
+        if (id < 0) {
             return -1;
         }
 
         t->edge[0] = id + 1;
-        
         node_table[id].location = location;
-        node_table[id].is_local = is_local_ipaddr(location);
+
+        return id;
     }
 
-    return id;
+    return id - 1;
 }
 
 extern int
 node_launch (size_t id)
 {
-    return create_process(id, node_table[id].is_local ? SPAWN_METHOD_FORK : SPAWN_METHOD_SSH);
+    int pipe_stdin[2], pipe_stdout[2], pipe_stderr[2];
+    pid_t cpid;
+
+#if 0
+    if (-1 == pipe(pipe_stdin)) {
+        print_errmsg("create_process (pipe)", errno);
+        return -1;
+    }
+
+    if (-1 == pipe(pipe_stdout)) {
+        print_errmsg("create_process (pipe)", errno);
+        return -1;
+    }
+
+    if (-1 == pipe(pipe_stderr)) {
+        print_errmsg("create_process (pipe)", errno);
+        return -1;
+    }
+#endif
+
+    cpid = fork();
+
+    if (-1 == cpid) {
+        print_errmsg("create_process (fork)", errno);
+        return -1;
+    }
+
+    else if (!cpid) {
+#if 0
+        /*
+         * Child
+         */
+        dup2(pipe_stdin[0], STDIN_FILENO);
+        dup2(pipe_stdout[1], STDOUT_FILENO);
+        dup2(pipe_stderr[1], STDERR_FILENO);
+
+        close(pipe_stdin[1]);
+        close(pipe_stdout[0]);
+        close(pipe_stderr[0]);
+#endif
+
+        execlp("ssh", "ssh", node_table[id].location, spawn_command, (char *)NULL);
+        print_errmsg("create_child (execlp)", errno);
+        _exit(EXIT_FAILURE);
+    }
+
+    else {
+        struct pollfds_param stdin_param, stdout_param, stderr_param;
+
+        node_table[id].pid = cpid;
+
+#if 0
+        stdin_param.fd = pipe_stdin[1];
+        stdout_param.fd = pipe_stdout[0];
+        stderr_param.fd = pipe_stderr[0];
+
+        stdin_param.fd_handler = stdin_handler;
+        stdout_param.fd_handler = stdout_handler;
+        stderr_param.fd_handler = stderr_handler;
+
+        fcntl(stdin_param.fd, F_SETFL, O_NONBLOCK);
+        fcntl(stdout_param.fd, F_SETFL, O_NONBLOCK);
+        fcntl(stderr_param.fd, F_SETFL, O_NONBLOCK);
+
+        close(pipe_stdin[0]);
+        close(pipe_stdout[1]);
+        close(pipe_stderr[1]);
+
+        pollfds_add(id, stdin_param, stdout_param, stderr_param);
+#endif
+    }
+
+    return 0;
 }
 
 extern size_t
@@ -186,96 +252,6 @@ trie_walk (struct trie * root, char const * location)
     }
 
     return trie_walk(&trie_table[root->edge[edge_index]], ++location);
-}
-
-static int
-create_process (size_t id, enum spawn_method method)
-{
-    int pipe_stdin[2], pipe_stdout[2], pipe_stderr[2];
-    pid_t cpid;
-
-#if 0
-    if (-1 == pipe(pipe_stdin)) {
-        print_errmsg("create_process (pipe)", errno);
-        return -1;
-    }
-
-    if (-1 == pipe(pipe_stdout)) {
-        print_errmsg("create_process (pipe)", errno);
-        return -1;
-    }
-
-    if (-1 == pipe(pipe_stderr)) {
-        print_errmsg("create_process (pipe)", errno);
-        return -1;
-    }
-#endif
-
-    cpid = fork();
-
-    if (-1 == cpid) {
-        print_errmsg("create_process (fork)", errno);
-        return -1;
-    }
-
-    else if (!cpid) {
-#if 0
-        /*
-         * Child
-         */
-        dup2(pipe_stdin[0], STDIN_FILENO);
-        dup2(pipe_stdout[1], STDOUT_FILENO);
-        dup2(pipe_stderr[1], STDERR_FILENO);
-
-        close(pipe_stdin[1]);
-        close(pipe_stdout[0]);
-        close(pipe_stderr[0]);
-#endif
-
-        /*
-         * Why isn't the second parameter of execvp defined to be an array of
-         * pointers to constant characters?
-         */
-        switch (method) {
-            case SPAWN_METHOD_FORK:
-                execlp("sh", "sh", "-c", spawn_command, (char *)NULL);
-                break;
-            case SPAWN_METHOD_SSH:
-                execlp("ssh", "ssh", node_table[id].location, spawn_command, (char *)NULL);
-                break;
-        }
-
-        print_errmsg("create_child (execlp)", errno);
-        _exit(EXIT_FAILURE);
-    }
-
-    else {
-        struct pollfds_param stdin_param, stdout_param, stderr_param;
-
-        node_table[id].pid = cpid;
-
-#if 0
-        stdin_param.fd = pipe_stdin[1];
-        stdout_param.fd = pipe_stdout[0];
-        stderr_param.fd = pipe_stderr[0];
-
-        stdin_param.fd_handler = stdin_handler;
-        stdout_param.fd_handler = stdout_handler;
-        stderr_param.fd_handler = stderr_handler;
-
-        fcntl(stdin_param.fd, F_SETFL, O_NONBLOCK);
-        fcntl(stdout_param.fd, F_SETFL, O_NONBLOCK);
-        fcntl(stderr_param.fd, F_SETFL, O_NONBLOCK);
-
-        close(pipe_stdin[0]);
-        close(pipe_stdout[1]);
-        close(pipe_stderr[1]);
-
-        pollfds_add(id, stdin_param, stdout_param, stderr_param);
-#endif
-    }
-
-    return 0;
 }
 
 static void
