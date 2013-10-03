@@ -148,6 +148,73 @@ static char* spawn_net_read_str(const spawn_net_channel* ch)
     return str;
 }
 
+typedef struct spawn_tree_struct {
+  int ranks;
+  int rank;
+  int children;
+  int* child_ids;
+  spawn_net_channel* child_chs;
+} spawn_tree;
+
+static create_tree_kary(int rank, int ranks, int k, spawn_tree* t)
+{
+    /* compute the maximum number of children this task may have */
+    int max_children = k;
+
+    /* prepare data structures to store our parent and children */
+    t->ranks = ranks;
+    t->rank  = rank;
+
+    if (max_children > 0) {
+        t->child_ids  = (int*) SPAWN_MALLOC(max_children * sizeof(int));
+        t->child_chs  = (spawn_net_channel*) SPAWN_MALLOC(max_children * sizeof(spawn_net_channel));
+    }
+
+    /* find our parent rank and the ranks of our children */
+    int i;
+    int size = 1;
+    int tree_size = 0;
+    while (1) {
+        /* determine whether we're a parent in the current round */
+        if (tree_size <= rank && rank < tree_size + size) {
+            /* we're a parent in this round, compute ranks of first and last child */
+            int group_id = rank - tree_size;
+            int offset_rank = tree_size + size;
+            int first_child = offset_rank + group_id * k;
+            int last_child = first_child + (k - 1);
+
+            /* compute number of children */
+            t->children = 0;
+            if (first_child < ranks) {
+                /* if our first child is within range,
+                 * check that our last child is too */
+                if (last_child >= ranks) {
+                    last_child = ranks - 1;
+                }
+               t->children = last_child - first_child + 1;
+            }
+
+            /* record ranks of our children */
+            for (i = 0; i < t->children; i++) {
+                t->child_ids[i] = first_child + i;
+                //t->child_chs[i] = NULL_CHANNEL;
+            }
+
+            /* break the while loop */
+            break;
+        }
+
+        /* go to next round */
+        tree_size += size;
+        size *= k;
+    }
+
+    printf("Rank %d has %d children\n", t->rank, t->children);
+    for (i = 0; i < t->children; i++) {
+        printf("Rank %d: Child %d of %d has rank=%d\n", t->rank, (i + 1), t->children, t->child_ids[i]);
+    }
+}
+
 struct session_t *
 session_init (int argc, char * argv[])
 {
@@ -181,11 +248,20 @@ session_init (int argc, char * argv[])
         s->spawn_parent = SPAWN_STRDUP(value);
     } else {
         /* we are the root, build list parameters */
-        int i;
-        int hosts = argc - 1;
+
+        /* we include ourself as a host, plus all hosts listed on command line */
+        int hosts = argc;
         strmap_setf(s->params, "N=%d", hosts);
+        
+        /* list our hostname as the first host */
+        char* hostname = spawn_hostname();
+        strmap_setf(s->params, "%d=%s", 0, hostname);
+        spawn_free(&hostname);
+
+        /* then copy in each host from the command line */
+        int i;
         for (i = 1; i < argc; i++) {
-            strmap_setf(s->params, "%d=%s", (i - 1), argv[i]);
+            strmap_setf(s->params, "%d=%s", i, argv[i]);
         }
     }
 
@@ -231,39 +307,53 @@ session_start (struct session_t * s)
         strmap_print(s->params);
     }
 
-    char* spawn_cwd = spawn_getcwd();
-
     /* identify children */
     /* for now, we have a flat tree at root */
+    spawn_tree t;
     int children = 0;
-    char* hosts = strmap_get(s->params, "N");
+    const char* hosts = strmap_get(s->params, "N");
     if (hosts != NULL) {
+        /* currently using our id as a rank */
+        int rank = 0;
+        if (s->spawn_id != NULL) {
+            rank = atoi(s->spawn_id);
+        }
+
+        int ranks = atoi(hosts);
+        create_tree_kary(rank, ranks, 3, &t);
         if (s->spawn_parent == NULL) {
-            children = atoi(hosts);
+            children = t.children;
         }
     }
 
     /* launch children */
+    char* spawn_cwd = spawn_getcwd();
     for (i = 0; i < children; i++) {
-        char* host = strmap_getf(s->params, "%d", i);
+        /* get rank of child */
+        int child_id = t.child_ids[i];
+
+        /* lookup hostname of child from parameters */
+        const char* host = strmap_getf(s->params, "%d", child_id);
         if (host == NULL) {
             spawn_free(&spawn_cwd);
             session_destroy(s);
             return -1;
         }
 
-        if (0 > node_get_id(host)) {
+        /* create structure for this child */
+        int node_id = node_get_id(host);
+        if (node_id < 0) {
             spawn_free(&spawn_cwd);
             session_destroy(s);
             return -1;
         }
 
+        /* launch child process */
         char* spawn_command = SPAWN_STRDUPF("cd %s && env MV2_SPAWN_PARENT=%s MV2_SPAWN_ID=%d %s",
-            spawn_cwd, s->ep_name, i, s->spawn_exe);
+            spawn_cwd, s->ep_name, child_id, s->spawn_exe);
         node_launch(i, spawn_command);
         spawn_free(&spawn_command);
     }
-
     spawn_free(&spawn_cwd);
 
     /*

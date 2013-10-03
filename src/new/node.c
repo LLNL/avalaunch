@@ -140,6 +140,7 @@ node_launch (size_t id, const char* spawn_command)
         close(pipe_stderr[0]);
 #endif
 
+        printf("rsh %s %s\n", node_table[id].location, spawn_command);  fflush(stdout);
         //execlp("ssh", "ssh", node_table[id].location, spawn_command, (char *)NULL);
         execlp("rsh", "rsh", node_table[id].location, spawn_command, (char *)NULL);
         SPAWN_ERR("create_child (execlp errno=%d %s)", errno, strerror(errno));
