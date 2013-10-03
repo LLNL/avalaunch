@@ -637,7 +637,9 @@ const char* strmap_get(const strmap* tree, const char* key)
     int child;
     strmap_node* parent;
     strmap_node* node = strmap_node_search(tree->root, key, &parent, &child);
-    return node->value;
+    if (node != NULL) {
+      return node->value;
+    }
   }
   return NULL;
 }
