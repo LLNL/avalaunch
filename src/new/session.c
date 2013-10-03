@@ -209,10 +209,89 @@ static create_tree_kary(int rank, int ranks, int k, spawn_tree* t)
         size *= k;
     }
 
-    printf("Rank %d has %d children\n", t->rank, t->children);
+    SPAWN_DBG("Rank %d has %d children", t->rank, t->children);
     for (i = 0; i < t->children; i++) {
-        printf("Rank %d: Child %d of %d has rank=%d\n", t->rank, (i + 1), t->children, t->child_ids[i]);
+        SPAWN_DBG("Rank %d: Child %d of %d has rank=%d", t->rank, (i + 1), t->children, t->child_ids[i]);
     }
+}
+
+static int temp_launch (spawn_tree* t, int index, const char* host, const char* spawn_command)
+{
+    int pipe_stdin[2], pipe_stdout[2], pipe_stderr[2];
+    pid_t cpid;
+
+#if 0
+    if (-1 == pipe(pipe_stdin)) {
+        print_errmsg("create_process (pipe)", errno);
+        return -1;
+    }
+
+    if (-1 == pipe(pipe_stdout)) {
+        print_errmsg("create_process (pipe)", errno);
+        return -1;
+    }
+
+    if (-1 == pipe(pipe_stderr)) {
+        print_errmsg("create_process (pipe)", errno);
+        return -1;
+    }
+#endif
+
+    cpid = fork();
+
+    if (-1 == cpid) {
+        SPAWN_ERR("create_process (fork() errno=%d %s)", errno, strerror(errno));
+        return -1;
+    }
+
+    else if (!cpid) {
+#if 0
+        /*
+         * Child
+         */
+        dup2(pipe_stdin[0], STDIN_FILENO);
+        dup2(pipe_stdout[1], STDOUT_FILENO);
+        dup2(pipe_stderr[1], STDERR_FILENO);
+
+        close(pipe_stdin[1]);
+        close(pipe_stdout[0]);
+        close(pipe_stderr[0]);
+#endif
+
+        SPAWN_DBG("Rank %d: rsh %s '%s'", t->rank, host, spawn_command);
+        //execlp("ssh", "ssh", host, spawn_command, (char *)NULL);
+        execlp("rsh", "rsh", host, spawn_command, (char *)NULL);
+        SPAWN_ERR("create_child (execlp errno=%d %s)", errno, strerror(errno));
+        _exit(EXIT_FAILURE);
+    }
+
+    else {
+        //struct pollfds_param stdin_param, stdout_param, stderr_param;
+
+//        t.child_pids[index] = cpid;
+
+#if 0
+        stdin_param.fd = pipe_stdin[1];
+        stdout_param.fd = pipe_stdout[0];
+        stderr_param.fd = pipe_stderr[0];
+
+        stdin_param.fd_handler = stdin_handler;
+        stdout_param.fd_handler = stdout_handler;
+        stderr_param.fd_handler = stderr_handler;
+
+        fcntl(stdin_param.fd, F_SETFL, O_NONBLOCK);
+        fcntl(stdout_param.fd, F_SETFL, O_NONBLOCK);
+        fcntl(stderr_param.fd, F_SETFL, O_NONBLOCK);
+
+        close(pipe_stdin[0]);
+        close(pipe_stdout[1]);
+        close(pipe_stderr[1]);
+
+        pollfds_add(id, stdin_param, stdout_param, stderr_param);
+#endif
+    }
+
+    return 0;
 }
 
 struct session_t *
@@ -263,6 +342,12 @@ session_init (int argc, char * argv[])
         for (i = 1; i < argc; i++) {
             strmap_setf(s->params, "%d=%s", i, argv[i]);
         }
+
+        /* TODO: read this in from command line or via some other method */
+        /* specify degree of tree */
+        strmap_setf(s->params, "DEG=%d", 2);
+
+        strmap_print(s->params);
     }
 
     /* get our name */
@@ -279,12 +364,14 @@ session_start (struct session_t * s)
 {
     int i;
 
+#if 0
     if (node_initialize()) {
         session_destroy(s);
         return -1;
     }
 
     call_node_finalize = 1;
+#endif
 
     if (start_event_handler()) {
         session_destroy(s);
@@ -303,27 +390,28 @@ session_start (struct session_t * s)
 
         /* read parameters */
         spawn_net_read_strmap(&(s->parent_ch), s->params);
-
-        strmap_print(s->params);
     }
 
-    /* identify children */
-    /* for now, we have a flat tree at root */
+    /* identify our children */
     spawn_tree t;
     int children = 0;
     const char* hosts = strmap_get(s->params, "N");
     if (hosts != NULL) {
-        /* currently using our id as a rank */
+        /* we currently using our id as a rank in the tree */
         int rank = 0;
         if (s->spawn_id != NULL) {
             rank = atoi(s->spawn_id);
         }
 
-        int ranks = atoi(hosts);
-        create_tree_kary(rank, ranks, 3, &t);
-        if (s->spawn_parent == NULL) {
-            children = t.children;
+        int degree = 2;
+        const char* value = strmap_get(s->params, "DEG");
+        if (value != NULL) {
+            degree=atoi(value);
         }
+
+        int ranks = atoi(hosts);
+        create_tree_kary(rank, ranks, degree, &t);
+        children = t.children;
     }
 
     /* launch children */
@@ -341,17 +429,20 @@ session_start (struct session_t * s)
         }
 
         /* create structure for this child */
+#if 0
         int node_id = node_get_id(host);
         if (node_id < 0) {
             spawn_free(&spawn_cwd);
             session_destroy(s);
             return -1;
         }
+#endif
 
         /* launch child process */
         char* spawn_command = SPAWN_STRDUPF("cd %s && env MV2_SPAWN_PARENT=%s MV2_SPAWN_ID=%d %s",
             spawn_cwd, s->ep_name, child_id, s->spawn_exe);
-        node_launch(i, spawn_command);
+        //node_launch(node_id, spawn_command);
+        temp_launch(&t, i, host, spawn_command);
         spawn_free(&spawn_command);
     }
     spawn_free(&spawn_cwd);
@@ -362,13 +453,15 @@ session_start (struct session_t * s)
      * and connect back properly.
      */
     for (i = 0; i < children; i++) {
+        /* TODO: once we determine which child we're accepting,
+         * save pointer to connection in tree structure */
         /* accept child connection */
         spawn_net_channel ch;
         spawn_net_accept(&(s->ep), &ch);
 
         /* read id from child */
         char* str = spawn_net_read_str(&ch);
-        printf("received %s\n", str);
+        SPAWN_DBG("Rank %d: received %s", t.rank, str);
         spawn_free(&str);
 
         /* send parameters to child */
