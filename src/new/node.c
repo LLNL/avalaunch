@@ -3,6 +3,7 @@
  */
 #include <print_errmsg.h>
 #include <pollfds.h>
+#include <spawn_internal.h>
 
 /*
  * System Headers
@@ -143,8 +144,9 @@ node_launch (size_t id)
         close(pipe_stderr[0]);
 #endif
 
-        execlp("ssh", "ssh", node_table[id].location, spawn_command, (char *)NULL);
-        print_errmsg("create_child (execlp)", errno);
+        //execlp("ssh", "ssh", node_table[id].location, spawn_command, (char *)NULL);
+        execlp("rsh", "rsh", node_table[id].location, spawn_command, (char *)NULL);
+        SPAWN_ERR("create_child (execlp errno=%d %s)", errno, strerror(errno));
         _exit(EXIT_FAILURE);
     }
 
