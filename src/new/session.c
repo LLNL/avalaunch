@@ -16,14 +16,13 @@
 #include <sys/utsname.h>
 
 struct session_t {
-    int is_root;
-    int num_children;
-    char const * ep_name;
-    char const * parent_name;
-    spawn_net_endpoint ep;
-    spawn_net_channel ch;
-    spawn_net_channel parent_ch;
-    strmap* hosts;
+    char const * spawn_exe;      /* executable path */
+    char const * spawn_parent;   /* name of our parent's endpoint */
+    char const * spawn_id;       /* id given to us by parent, we echo this back on connect */
+    char const * ep_name;        /* name of our endpoint */
+    spawn_net_channel parent_ch; /* channel to our parent (if we have one) */
+    spawn_net_endpoint ep;       /* our endpoint */
+    strmap* params;              /* spawn parameters sent from parent after connect */
 };
 
 static int call_stop_event_handler = 0;
@@ -67,55 +66,6 @@ static char* spawn_hostname()
     uname(&buf);
     char* name = SPAWN_STRDUP(buf.nodename);
     return name;
-}
-
-struct session_t *
-session_init (int argc, char * argv[])
-{
-    struct session_t * s = SPAWN_MALLOC(sizeof(struct session_t));
-
-    s->is_root      = 0;
-    s->num_children = 0;
-    s->parent_name  = NULL;
-    s->ep_name      = NULL;
-    s->hosts        = NULL;
-
-    s->hosts = strmap_new();
-
-    spawn_net_open(SPAWN_NET_TYPE_TCP, &(s->ep));
-    s->ep_name = spawn_net_name(&(s->ep));
-
-    char* spawn_cwd = spawn_getcwd();
-
-    char* spawn_command = SPAWN_STRDUPF("cd %s && env %s=%s %s",
-            spawn_cwd, "MV2_SPAWN_PARENT", s->ep_name, argv[0]);
-
-    if (node_initialize(spawn_command)) {
-        session_destroy(s);
-        return NULL;
-    }
-
-    call_node_finalize = 1;
-
-    char* value;
-    if ((value = getenv("MV2_SPAWN_PARENT")) != NULL) {
-        s->parent_name = SPAWN_STRDUP(value);
-    } else {
-        int i, n;
-        s->is_root = 1;
-
-        strmap_setf(s->hosts, "N=%d", (argc - 1));
-        for (i = 1, n = 0; i < argc; i++) {
-            strmap_setf(s->hosts, "%d=%s", i, argv[i]);
-
-            if (0 > node_get_id(argv[i])) {
-                session_destroy(s);
-                return NULL;
-            }
-        }
-    }
-
-    return s;
 }
 
 static void spawn_net_write_strmap(const spawn_net_channel* ch, const strmap* map)
@@ -198,10 +148,67 @@ static char* spawn_net_read_str(const spawn_net_channel* ch)
     return str;
 }
 
+struct session_t *
+session_init (int argc, char * argv[])
+{
+    struct session_t * s = SPAWN_MALLOC(sizeof(struct session_t));
+
+    /* intialize session fields */
+    s->spawn_exe    = NULL;
+    s->spawn_parent = NULL;
+    s->spawn_id     = NULL;
+    s->ep_name      = NULL;
+    //s->parent_channel = NULL_CHANNEL;
+    //s->ep         = NULL_EP;
+    s->params       = NULL;
+
+    /* create empty params strmap */
+    s->params = strmap_new();
+
+    /* TODO: perhaps move this if this operation is expensive */
+    /* open our endpoint */
+    spawn_net_open(SPAWN_NET_TYPE_TCP, &(s->ep));
+    s->ep_name = spawn_net_name(&(s->ep));
+
+    /* get our executable name */
+    s->spawn_exe = SPAWN_STRDUP(argv[0]);
+
+    char* value;
+
+    /* check whether we have a parent */
+    if ((value = getenv("MV2_SPAWN_PARENT")) != NULL) {
+        /* we have a parent, record its address */
+        s->spawn_parent = SPAWN_STRDUP(value);
+    } else {
+        /* we are the root, build list parameters */
+        int i;
+        int hosts = argc - 1;
+        strmap_setf(s->params, "N=%d", hosts);
+        for (i = 1; i < argc; i++) {
+            strmap_setf(s->params, "%d=%s", (i - 1), argv[i]);
+        }
+    }
+
+    /* get our name */
+    if ((value = getenv("MV2_SPAWN_ID")) != NULL) {
+        /* we have a parent, record its address */
+        s->spawn_id = SPAWN_STRDUP(value);
+    }
+
+    return s;
+}
+
 int
 session_start (struct session_t * s)
 {
     int i;
+
+    if (node_initialize()) {
+        session_destroy(s);
+        return -1;
+    }
+
+    call_node_finalize = 1;
 
     if (start_event_handler()) {
         session_destroy(s);
@@ -211,51 +218,78 @@ session_start (struct session_t * s)
     call_stop_event_handler = 1;
 
     /* if we have a parent, connect back to him */
-    if (s->parent_name != NULL) {
+    if (s->spawn_parent != NULL) {
         /* connect to parent */
-        spawn_net_connect(s->parent_name, &(s->parent_ch));
+        spawn_net_connect(s->spawn_parent, &(s->parent_ch));
 
-        /* send our hostname */
-        int param_size;
-        char* myhost = spawn_hostname();
-        spawn_net_write_str(&(s->parent_ch), myhost);
-        spawn_free(&myhost);
+        /* send our id */
+        spawn_net_write_str(&(s->parent_ch), s->spawn_id);
 
-        /* read host list */
-        spawn_net_read_strmap(&(s->parent_ch), s->hosts);
+        /* read parameters */
+        spawn_net_read_strmap(&(s->parent_ch), s->params);
 
-        strmap_print(s->hosts);
+        strmap_print(s->params);
+    }
+
+    char* spawn_cwd = spawn_getcwd();
+
+    /* identify children */
+    /* for now, we have a flat tree at root */
+    int children = 0;
+    char* hosts = strmap_get(s->params, "N");
+    if (hosts != NULL) {
+        if (s->spawn_parent == NULL) {
+            children = atoi(hosts);
+        }
     }
 
     /* launch children */
-    int n = node_count();
-    for (i = 0; i < n; i++) {
-        node_launch(i);
+    for (i = 0; i < children; i++) {
+        char* host = strmap_getf(s->params, "%d", i);
+        if (host == NULL) {
+            spawn_free(&spawn_cwd);
+            session_destroy(s);
+            return -1;
+        }
+
+        if (0 > node_get_id(host)) {
+            spawn_free(&spawn_cwd);
+            session_destroy(s);
+            return -1;
+        }
+
+        char* spawn_command = SPAWN_STRDUPF("cd %s && env MV2_SPAWN_PARENT=%s MV2_SPAWN_ID=%d %s",
+            spawn_cwd, s->ep_name, i, s->spawn_exe);
+        node_launch(i, spawn_command);
+        spawn_free(&spawn_command);
     }
+
+    spawn_free(&spawn_cwd);
 
     /*
      * This for loop will be in another thread to overlap and speed up the
      * startup.  This loop also will cause a hang if any nodes do not launch
      * and connect back properly.
      */
-    for (i = 0; i < n; i++) {
+    for (i = 0; i < children; i++) {
         /* accept child connection */
-        spawn_net_accept(&(s->ep), &(s->ch));
+        spawn_net_channel ch;
+        spawn_net_accept(&(s->ep), &ch);
 
-        /* read hostname from child */
-        char* str = spawn_net_read_str(&(s->ch));
+        /* read id from child */
+        char* str = spawn_net_read_str(&ch);
         printf("received %s\n", str);
         spawn_free(&str);
 
-        /* send hostlist to child */
-        spawn_net_write_strmap(&(s->ch), s->hosts);
+        /* send parameters to child */
+        spawn_net_write_strmap(&ch, s->params);
     }
 
     /*
      * This is a busy wait.  I plan on using the state machine from mpirun_rsh
      * in the future which will save cpu with pthread_cond_signal and friends
      */
-    while (n > get_num_exited());
+    while (children > get_num_exited());
 
     return 0;
 }
@@ -263,8 +297,10 @@ session_start (struct session_t * s)
 void
 session_destroy (struct session_t * s)
 {
-    spawn_free(&(s->parent_name));
-    strmap_delete(&s->hosts);
+    spawn_free(&(s->spawn_id));
+    spawn_free(&(s->spawn_parent));
+    spawn_free(&(s->spawn_exe));
+    strmap_delete(&s->params);
     spawn_free(&s);
 
     if (call_stop_event_handler) {

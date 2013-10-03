@@ -30,8 +30,6 @@ static struct trie {
 static size_t trie_index = 0;
 static size_t trie_alloc = 0;
 
-static char * spawn_command = NULL;
-
 static int create_node (void);
 static int trie_create (void);
 static struct trie * trie_walk (struct trie *, char const *);
@@ -40,13 +38,11 @@ static void stdout_handler (size_t, int);
 static void stderr_handler (size_t, int);
 
 extern int
-node_initialize (char const * command)
+node_initialize ()
 {
     if (trie_table) {
         return -1;
     }
-
-    spawn_command = command;
 
     return trie_create();
 }
@@ -101,7 +97,7 @@ node_get_id (char const * location)
 }
 
 extern int
-node_launch (size_t id)
+node_launch (size_t id, const char* spawn_command)
 {
     int pipe_stdin[2], pipe_stdout[2], pipe_stderr[2];
     pid_t cpid;
