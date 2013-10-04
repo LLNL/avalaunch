@@ -10,41 +10,36 @@
 
 #include "spawn_internal.h"
 
-int spawn_net_open(spawn_net_type type, spawn_net_endpoint* ep)
+spawn_net_endpoint* spawn_net_open(spawn_net_type type)
 {
-  /* check that we got a valid pointer */
-  if (ep == NULL) {
-    SPAWN_ERR("Must pass address to endpoint struct");
-    return SPAWN_FAILURE;
-  }
-
-  /* initialize endpoint */
-  ep->type = SPAWN_NET_TYPE_NULL;
-  ep->name = NULL;
-  ep->data = NULL;
-
   /* open endpoint */
   if (type == SPAWN_NET_TYPE_TCP) {
-    return spawn_net_open_tcp(ep);
+    return spawn_net_open_tcp();
   } else {
     SPAWN_ERR("Unknown endpoint type %d", (int)type);
-    return SPAWN_FAILURE;
+    return SPAWN_NET_ENDPOINT_NULL;
   }
 }
 
-int spawn_net_close(spawn_net_endpoint* ep)
+int spawn_net_close(spawn_net_endpoint** pep)
 {
   /* check that we got a valid pointer */
-  if (ep == NULL) {
-    SPAWN_ERR("Must pass address to endpoint struct");
+  if (pep == NULL) {
+    SPAWN_ERR("Must pass pointer to endpoint");
     return SPAWN_FAILURE;
   }
 
-  if (ep->type == SPAWN_NET_TYPE_NULL) {
-    /* nothing to do with a NULL endpoint */
+  /* get pointer to endpoint */
+  spawn_net_endpoint* ep = *pep;
+
+  /* nothing to do with a NULL endpoint */
+  if (ep == SPAWN_NET_ENDPOINT_NULL) {
     return SPAWN_SUCCESS;
-  } else if (ep->type == SPAWN_NET_TYPE_TCP) {
-    return spawn_net_close_tcp(ep);
+  }
+
+  /* otherwise, check the endpoint type */
+  if (ep->type == SPAWN_NET_TYPE_TCP) {
+    return spawn_net_close_tcp(pep);
   } else {
     SPAWN_ERR("Unknown endpoint type %d", (int)ep->type);
     return SPAWN_FAILURE;
@@ -53,129 +48,103 @@ int spawn_net_close(spawn_net_endpoint* ep)
 
 const char* spawn_net_name(const spawn_net_endpoint* ep)
 {
-  /* check that we got a valid pointer */
-  if (ep == NULL) {
-    SPAWN_ERR("Must pass address to endpoint struct");
-    spawn_exit(1);
+  /* return NULL for a NULL endpoint */
+  if (ep == SPAWN_NET_ENDPOINT_NULL) {
+    return NULL;
   }
 
+  /* otherwise, return pointer to real name */
   const char* name = ep->name;
   return name;
 }
 
-int spawn_net_connect(const char* name, spawn_net_channel* ch)
+spawn_net_channel* spawn_net_connect(const char* name)
 {
-  /* check that we got a valid pointer */
+  /* return a NULL channel on connect to NULL name */
   if (name == NULL) {
-    SPAWN_ERR("Must pass pointer to endpoint name");
-    return SPAWN_FAILURE;
-  }
-  if (ch == NULL) {
-    SPAWN_ERR("Must pass address to channel struct");
-    return SPAWN_FAILURE;
+    return SPAWN_NET_CHANNEL_NULL;
   }
 
+  /* otherwise, determine type and call real connect */
   if (strncmp(name, "TCP:", 4) == 0) {
-    return spawn_net_connect_tcp(name, ch);
+    return spawn_net_connect_tcp(name);
   } else {
     SPAWN_ERR("Unknown endpoint name format %s", name);
-    return SPAWN_FAILURE;
+    return SPAWN_NET_CHANNEL_NULL;
   }
-
-  return SPAWN_FAILURE;
 }
 
-int spawn_net_accept(const spawn_net_endpoint* ep, spawn_net_channel* ch)
+spawn_net_channel* spawn_net_accept(const spawn_net_endpoint* ep)
 {
-  /* check that we got a valid pointer */
-  if (ep == NULL) {
-    SPAWN_ERR("Must pass address to endpoint struct");
-    return SPAWN_FAILURE;
-  }
-  if (ch == NULL) {
-    SPAWN_ERR("Must pass address to channel struct");
-    return SPAWN_FAILURE;
+  /* return a NULL channel on accept of NULL endpoint */
+  if (ep == SPAWN_NET_ENDPOINT_NULL) {
+    return SPAWN_NET_CHANNEL_NULL;
   }
 
-  /* initialize channel */
-  ch->type = SPAWN_NET_TYPE_NULL;
-  ch->name = NULL;
-  ch->data = NULL;
-
-  if (ep->type == SPAWN_NET_TYPE_NULL) {
-    /* return a NULL channel for a NULL endpoint */
-    return SPAWN_SUCCESS;
-  } else if (ep->type == SPAWN_NET_TYPE_TCP) {
-    return spawn_net_accept_tcp(ep, ch);
+  /* otherwise, call real accept routine for endpoint type */
+  if (ep->type == SPAWN_NET_TYPE_TCP) {
+    return spawn_net_accept_tcp(ep);
   } else {
     SPAWN_ERR("Unknown endpoint type %d", ep->type);
-    return SPAWN_FAILURE;
+    return SPAWN_NET_CHANNEL_NULL;
   }
-
-  return SPAWN_FAILURE;
 }
 
-int spawn_net_disconnect(spawn_net_channel* ch)
+int spawn_net_disconnect(spawn_net_channel** pch)
 {
   /* check that we got a valid pointer */
-  if (ch == NULL) {
-    SPAWN_ERR("Must pass address to channel struct");
+  if (pch == NULL) {
+    SPAWN_ERR("Must pass pointer to channel");
     return SPAWN_FAILURE;
   }
 
-  if (ch->type == SPAWN_NET_TYPE_NULL) {
-    /* return a NULL channel for a NULL endpoint */
+  /* get pointer to channel */
+  spawn_net_channel* ch = *pch;
+
+  /* nothing to do for a NULL channel */
+  if (ch == SPAWN_NET_CHANNEL_NULL) {
     return SPAWN_SUCCESS;
-  } else if (ch->type == SPAWN_NET_TYPE_TCP) {
-    return spawn_net_disconnect_tcp(ch);
+  }
+
+  /* otherwise, call close routine for channel type */
+  if (ch->type == SPAWN_NET_TYPE_TCP) {
+    return spawn_net_disconnect_tcp(pch);
   } else {
     SPAWN_ERR("Unknown channel type %d", ch->type);
     return SPAWN_FAILURE;
   }
-
-  return SPAWN_FAILURE;
 }
 
 int spawn_net_read(const spawn_net_channel* ch, void* buf, size_t size)
 {
-  /* check that we got a valid pointer */
-  if (ch == NULL) {
-    SPAWN_ERR("Must pass address to channel struct");
-    return SPAWN_FAILURE;
+  /* read is a NOP for a null channel */
+  if (ch == SPAWN_NET_CHANNEL_NULL) {
+    return SPAWN_SUCCESS;
   }
 
-  if (ch->type == SPAWN_NET_TYPE_NULL) {
-    /* return a NULL channel for a NULL endpoint */
-    return SPAWN_SUCCESS;
-  } else if (ch->type == SPAWN_NET_TYPE_TCP) {
+  /* otherwise, call read routine for channel type */
+  if (ch->type == SPAWN_NET_TYPE_TCP) {
     return spawn_net_read_tcp(ch, buf, size);
   } else {
     SPAWN_ERR("Unknown channel type %d", ch->type);
     return SPAWN_FAILURE;
   }
-
-  return SPAWN_FAILURE;
 }
 
 int spawn_net_write(const spawn_net_channel* ch, const void* buf, size_t size)
 {
-  /* check that we got a valid pointer */
-  if (ch == NULL) {
-    SPAWN_ERR("Must pass address to channel struct");
-    return SPAWN_FAILURE;
+  /* write is a NOP for a null channel */
+  if (ch == SPAWN_NET_CHANNEL_NULL) {
+    return SPAWN_SUCCESS;
   }
 
-  if (ch->type == SPAWN_NET_TYPE_NULL) {
-    /* return a NULL channel for a NULL endpoint */
-    return SPAWN_SUCCESS;
-  } else if (ch->type == SPAWN_NET_TYPE_TCP) {
+  /* otherwise, call write routine for channel type */
+  if (ch->type == SPAWN_NET_TYPE_TCP) {
     return spawn_net_write_tcp(ch, buf, size);
   } else {
     SPAWN_ERR("Unknown channel type %d", ch->type);
     return SPAWN_FAILURE;
   }
-
-  return SPAWN_FAILURE;
 }
 
 int spawn_net_chgrp_init(spawn_net_channel_group* chgrp, int type)

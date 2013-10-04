@@ -131,17 +131,17 @@ static int spawn_net_set_tcp_nodelay(int fd)
   return SPAWN_SUCCESS;
 }
 
-int spawn_net_open_tcp(spawn_net_endpoint* ep)
+spawn_net_endpoint* spawn_net_open_tcp()
 {
   /* create a TCP socket */
   int fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
   if (fd < 0) {
-    return SPAWN_FAILURE;
+    return SPAWN_NET_ENDPOINT_NULL;
   }
 
   if (spawn_net_set_tcp_nodelay(fd)) {
     close(fd);
-    return SPAWN_FAILURE;
+    return SPAWN_NET_ENDPOINT_NULL;
   }
 
   /* prepare socket to be bound to ephemeral port - OS will assign us a free port */
@@ -155,14 +155,14 @@ int spawn_net_open_tcp(spawn_net_endpoint* ep)
   if (bind(fd, (struct sockaddr *) &sin, sizeof(sin)) < 0) {
     SPAWN_ERR("Failed to bind socket (bind() errno=%d %s)", errno, strerror(errno));
     close(fd);
-    return SPAWN_FAILURE;
+    return SPAWN_NET_ENDPOINT_NULL;
   }
 
   /* listen for connections */
   if (listen(fd, spawn_net_tcp_backlog) < 0) {
     SPAWN_ERR("Failed to set socket to listen (listen() errno=%d %s)", errno, strerror(errno));
     close(fd);
-    return SPAWN_FAILURE;
+    return SPAWN_NET_ENDPOINT_NULL;
   }
 
   /* get our hostname */
@@ -170,7 +170,7 @@ int spawn_net_open_tcp(spawn_net_endpoint* ep)
   if (gethostname(hostname, sizeof(hostname)) < 0) {
     SPAWN_ERR("Failed gethostname()");
     close(fd);
-    return SPAWN_FAILURE;
+    return SPAWN_NET_ENDPOINT_NULL;
   }
 
   /* get our ip address */
@@ -178,7 +178,7 @@ int spawn_net_open_tcp(spawn_net_endpoint* ep)
   if (he == NULL) {
     SPAWN_ERR("Failed gethostbyname()");
     close(fd);
-    return SPAWN_FAILURE;
+    return SPAWN_NET_ENDPOINT_NULL;
   }
   struct in_addr ip = *(struct in_addr *) *(he->h_addr_list);
 
@@ -188,7 +188,7 @@ int spawn_net_open_tcp(spawn_net_endpoint* ep)
   if (getsockname(fd, (struct sockaddr *) &sin, &len) < 0) {
     SPAWN_ERR("Failed to get socket name (getsockname() errno=%d %s)", errno, strerror(errno));
     close(fd);
-    return SPAWN_FAILURE;
+    return SPAWN_NET_ENDPOINT_NULL;
   }
   unsigned short port = (unsigned short) ntohs(sin.sin_port);
 
@@ -196,37 +196,52 @@ int spawn_net_open_tcp(spawn_net_endpoint* ep)
   int host_len = (int) strlen(hostname);
   char* name = SPAWN_STRDUPF("TCP:%d:%s:%s:%u", host_len, hostname, inet_ntoa(ip), (unsigned int) port);
 
+  /* allocate and endpoint structure */
+  spawn_net_endpoint* ep = (spawn_net_endpoint*) SPAWN_MALLOC(sizeof(spawn_net_endpoint));
+
   /* store values in endpoint struct */
   ep->type = SPAWN_NET_TYPE_TCP;
   ep->name = name;
   ep->data = (void*)fd;
 
-  return SPAWN_SUCCESS;
+  return ep;
 }
 
-int spawn_net_close_tcp(spawn_net_endpoint* ep)
+int spawn_net_close_tcp(spawn_net_endpoint** pep)
 {
+  /* check that we got a valid pointer */
+  if (pep == NULL) {
+    SPAWN_ERR("Endpoint is NULL");
+    return SPAWN_FAILURE;
+  }
+
+  /* get pointer to endpoint */
+  spawn_net_endpoint* ep = *pep;
+
   /* close the socket */
   int fd = (int) ep->data;
   if (fd > 0) {
     close(fd);
   }
-  ep->data = (void*)-1;
 
   /* free the name string */
   spawn_free(&ep->name);
 
-  ep->type = SPAWN_NET_TYPE_NULL;
+  /* free the endpoint structure */
+  spawn_free(&ep);
+
+  /* set caller's pointer to NULL */
+  *pep = SPAWN_NET_ENDPOINT_NULL;
 
   return SPAWN_SUCCESS;
 }
 
-int spawn_net_connect_tcp(const char* name, spawn_net_channel* ch)
+spawn_net_channel* spawn_net_connect_tcp(const char* name)
 {
   /* verify that the address string starts with correct prefix */
   if (strncmp(name, "TCP:", 4) != 0) {
     SPAWN_ERR("Endpoint name is not TCP format %s", name);
-    return SPAWN_FAILURE;
+    return SPAWN_NET_CHANNEL_NULL;
   }
 
   /* make a copy of name that we can modify */
@@ -282,12 +297,12 @@ int spawn_net_connect_tcp(const char* name, spawn_net_channel* ch)
   if (fd < 0) {
     SPAWN_ERR("Failed to create socket for %s (socket() errno=%d %s)", name, errno, strerror(errno));
     free(name_copy);
-    return SPAWN_FAILURE;
+    return SPAWN_NET_CHANNEL_NULL;
   }
 
   if (spawn_net_set_tcp_nodelay(fd)) {
     close(fd);
-    return SPAWN_FAILURE;
+    return SPAWN_NET_CHANNEL_NULL;
   }
 
   /* connect */
@@ -296,7 +311,7 @@ int spawn_net_connect_tcp(const char* name, spawn_net_channel* ch)
     SPAWN_ERR("Failed to connect to %s (connect() errno=%d %s)", name, errno, strerror(errno));
     close(fd);
     free(name_copy);
-    return SPAWN_FAILURE;
+    return SPAWN_NET_CHANNEL_NULL;
   }
 
   /* create channel name */
@@ -316,7 +331,7 @@ int spawn_net_connect_tcp(const char* name, spawn_net_channel* ch)
     SPAWN_ERR("Failed gethostname()");
     free(ch_name);
     close(fd);
-    return SPAWN_FAILURE;
+    return SPAWN_NET_CHANNEL_NULL;
   }
 
   /* tell remote end who we are */
@@ -327,23 +342,26 @@ int spawn_net_connect_tcp(const char* name, spawn_net_channel* ch)
     SPAWN_ERR("Failed to write length of name to %s", ch_name);
     free(ch_name);
     close(fd);
-    return SPAWN_FAILURE;
+    return SPAWN_NET_CHANNEL_NULL;
   }
   if (reliable_write(ch_name, fd, hostname, (size_t)len) != SPAWN_SUCCESS) {
     SPAWN_ERR("Failed to write name to %s", ch_name);
     free(ch_name);
     close(fd);
-    return SPAWN_FAILURE;
+    return SPAWN_NET_CHANNEL_NULL;
   }
+
+  /* allocate a channel structure */
+  spawn_net_channel* ch = (spawn_net_channel*) SPAWN_MALLOC(sizeof(spawn_net_channel));
 
   ch->type = SPAWN_NET_TYPE_TCP;
   ch->name = ch_name;
   ch->data = (void*)fd;
 
-  return SPAWN_SUCCESS;
+  return ch;
 }
 
-int spawn_net_accept_tcp(const spawn_net_endpoint* ep, spawn_net_channel* ch)
+spawn_net_channel* spawn_net_accept_tcp(const spawn_net_endpoint* ep)
 {
   int listenfd = (int)ep->data;
 
@@ -353,12 +371,12 @@ int spawn_net_accept_tcp(const spawn_net_endpoint* ep, spawn_net_channel* ch)
   int fd = accept(listenfd, &incoming_addr, &incoming_len);
   if (fd < 0) {
     SPAWN_ERR("Failed to connect to %s (connect() errno=%d %s)", ep->name, errno, strerror(errno));
-    return SPAWN_FAILURE;
+    return SPAWN_NET_CHANNEL_NULL;
   }
 
   if (spawn_net_set_tcp_nodelay(fd)) {
     close(fd);
-    return SPAWN_FAILURE;
+    return SPAWN_NET_CHANNEL_NULL;
   }
 
   /* TODO: authenticate remote side */
@@ -372,7 +390,7 @@ int spawn_net_accept_tcp(const spawn_net_endpoint* ep, spawn_net_channel* ch)
     SPAWN_ERR("Failed to read length of name from %s", tmp_remote_name);
     spawn_free(&tmp_remote_name);
     close(fd);
-    return SPAWN_FAILURE;
+    return SPAWN_NET_CHANNEL_NULL;
   }
   spawn_unpack_uint64(&len_net, &len);
 
@@ -383,7 +401,7 @@ int spawn_net_accept_tcp(const spawn_net_endpoint* ep, spawn_net_channel* ch)
     spawn_free(&remote);
     spawn_free(&tmp_remote_name);
     close(fd);
-    return SPAWN_FAILURE;
+    return SPAWN_NET_CHANNEL_NULL;
   }
 
   /* free temporary name */
@@ -397,27 +415,41 @@ int spawn_net_accept_tcp(const spawn_net_endpoint* ep, spawn_net_channel* ch)
   spawn_free(&local_name);
   spawn_free(&remote);
 
+  /* allocate channel structure */
+  spawn_net_channel* ch = (spawn_net_channel*) SPAWN_MALLOC(sizeof(spawn_net_channel));
+
   /* set channel parameters */
   ch->type = SPAWN_NET_TYPE_TCP;
   ch->name = ch_name;
   ch->data = (void*)fd;
 
-  return SPAWN_SUCCESS;
+  return ch;
 }
 
-int spawn_net_disconnect_tcp(spawn_net_channel* ch)
+int spawn_net_disconnect_tcp(spawn_net_channel** pch)
 {
+  /* check that we got a valid pointer */
+  if (pch == NULL) {
+      return SPAWN_FAILURE;
+  }
+
+  /* get pointer to channel */
+  spawn_net_channel* ch = *pch;
+
   /* close the socket */
   int fd = (int) ch->data;
   if (fd > 0) {
     close(fd);
   }
-  ch->data = (void*)-1;
 
   /* free the name string */
   spawn_free(&ch->name);
 
-  ch->type = SPAWN_NET_TYPE_NULL;
+  /* free channel structure */
+  spawn_free(&ch);
+
+  /* set caller's pointer to NULL */
+  *pch = SPAWN_NET_CHANNEL_NULL;
 
   return SPAWN_SUCCESS;
 }

@@ -11,6 +11,9 @@ extern "C" {
 #define SPAWN_SUCCESS (0)
 #define SPAWN_FAILURE (1)
 
+#define SPAWN_NET_ENDPOINT_NULL (NULL)
+#define SPAWN_NET_CHANNEL_NULL (NULL)
+
 typedef enum spawn_net_type_enum {
   SPAWN_NET_TYPE_NULL = 0, /* netowrk not defined */
   SPAWN_NET_TYPE_TCP  = 1, /* TCP sockets */
@@ -39,22 +42,22 @@ typedef struct spawn_net_channel_group_struct {
 } spawn_net_channel_group;
 
 /* open endpoint for listening */
-int spawn_net_open(spawn_net_type type, spawn_net_endpoint* ep);
+spawn_net_endpoint* spawn_net_open(spawn_net_type type);
 
 /* close listening endpoint */
-int spawn_net_close(spawn_net_endpoint* ep);
+int spawn_net_close(spawn_net_endpoint** ep);
 
 /* get name of opened endpoint (pass to others for call to connect) */
 const char* spawn_net_name(const spawn_net_endpoint* ep);
 
 /* connect to named endpoint (name comes from spawn_net_name) */
-int spawn_net_connect(const char* name, spawn_net_channel* ch);
+spawn_net_channel* spawn_net_connect(const char* name);
 
 /* accept connection on endpoint */
-int spawn_net_accept(const spawn_net_endpoint* ep, spawn_net_channel* ch);
+spawn_net_channel* spawn_net_accept(const spawn_net_endpoint* ep);
 
 /* close connection */
-int spawn_net_disconnect(spawn_net_channel* ch);
+int spawn_net_disconnect(spawn_net_channel** ch);
 
 /* read size bytes from connection into buffer */
 int spawn_net_read(const spawn_net_channel* ch, void* buf, size_t size);

@@ -24,14 +24,14 @@ typedef struct spawn_tree_struct {
 } spawn_tree;
 
 struct session_t {
-    char const * spawn_exe;      /* executable path */
-    char const * spawn_parent;   /* name of our parent's endpoint */
-    char const * spawn_id;       /* id given to us by parent, we echo this back on connect */
-    char const * ep_name;        /* name of our endpoint */
-    spawn_net_endpoint ep;       /* our endpoint */
-    spawn_tree * tree;           /* data structure that tracks tree info */
-    spawn_net_channel parent_ch; /* channel to our parent (if we have one) */
-    strmap* params;              /* spawn parameters sent from parent after connect */
+    char const * spawn_exe;       /* executable path */
+    char const * spawn_parent;    /* name of our parent's endpoint */
+    char const * spawn_id;        /* id given to us by parent, we echo this back on connect */
+    char const * ep_name;         /* name of our endpoint */
+    spawn_net_endpoint* ep;       /* our endpoint */
+    spawn_net_channel* parent_ch; /* channel to our parent (if we have one) */
+    spawn_tree * tree;            /* data structure that tracks tree info */
+    strmap* params;               /* spawn parameters sent from parent after connect */
 };
 
 static int call_stop_event_handler = 0;
@@ -181,7 +181,7 @@ static void tree_delete(spawn_tree** pt)
     /* free off each child channel if we have them */
     int i;
     for (i = 0; i < t->children; i++) {
-        spawn_free(&(t->child_chs[i]));
+        spawn_net_disconnect(&(t->child_chs[i]));
     }
 
     /* free child ids and channels */
@@ -194,6 +194,8 @@ static void tree_delete(spawn_tree** pt)
 
 static void tree_create_kary(int rank, int ranks, int k, spawn_tree* t)
 {
+    int i;
+
     /* compute the maximum number of children this task may have */
     int max_children = k;
 
@@ -206,8 +208,11 @@ static void tree_create_kary(int rank, int ranks, int k, spawn_tree* t)
         t->child_chs  = (spawn_net_channel**) SPAWN_MALLOC(max_children * sizeof(spawn_net_channel));
     }
 
+    for (i = 0; i < max_children; i++) {
+        t->child_chs[i] = SPAWN_NET_CHANNEL_NULL;
+    }
+
     /* find our parent rank and the ranks of our children */
-    int i;
     int size = 1;
     int tree_size = 0;
     while (1) {
@@ -340,9 +345,9 @@ session_init (int argc, char * argv[])
     s->spawn_parent = NULL;
     s->spawn_id     = NULL;
     s->ep_name      = NULL;
+    s->ep           = SPAWN_NET_ENDPOINT_NULL;
+    s->parent_ch    = SPAWN_NET_CHANNEL_NULL;
     s->tree         = NULL;
-    //s->parent_channel = NULL_CHANNEL;
-    //s->ep         = NULL_EP;
     s->params       = NULL;
 
     /* initialize tree */
@@ -353,8 +358,8 @@ session_init (int argc, char * argv[])
 
     /* TODO: perhaps move this if this operation is expensive */
     /* open our endpoint */
-    spawn_net_open(SPAWN_NET_TYPE_TCP, &(s->ep));
-    s->ep_name = spawn_net_name(&(s->ep));
+    s->ep = spawn_net_open(SPAWN_NET_TYPE_TCP);
+    s->ep_name = spawn_net_name(s->ep);
 
     /* get our executable name */
     s->spawn_exe = SPAWN_STRDUP(argv[0]);
@@ -424,13 +429,13 @@ session_start (struct session_t * s)
     /* if we have a parent, connect back to him */
     if (s->spawn_parent != NULL) {
         /* connect to parent */
-        spawn_net_connect(s->spawn_parent, &(s->parent_ch));
+        s->parent_ch = spawn_net_connect(s->spawn_parent);
 
         /* send our id */
-        spawn_net_write_str(&(s->parent_ch), s->spawn_id);
+        spawn_net_write_str(s->parent_ch, s->spawn_id);
 
         /* read parameters */
-        spawn_net_read_strmap(&(s->parent_ch), s->params);
+        spawn_net_read_strmap(s->parent_ch, s->params);
     }
 
     /* identify our children */
@@ -507,8 +512,7 @@ session_start (struct session_t * s)
         /* TODO: once we determine which child we're accepting,
          * save pointer to connection in tree structure */
         /* accept child connection */
-        spawn_net_channel* ch = SPAWN_MALLOC(sizeof(spawn_net_channel));
-        spawn_net_accept(&(s->ep), ch);
+        spawn_net_channel* ch = spawn_net_accept(s->ep);
 
         /* read global id from child */
         char* str = spawn_net_read_str(ch);
@@ -547,6 +551,8 @@ session_destroy (struct session_t * s)
     spawn_free(&(s->spawn_id));
     spawn_free(&(s->spawn_parent));
     spawn_free(&(s->spawn_exe));
+    spawn_net_disconnect(&(s->parent_ch));
+    spawn_net_close(&(s->ep));
     strmap_delete(&(s->params));
     tree_delete(&(s->tree));
 
