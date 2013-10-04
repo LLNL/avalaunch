@@ -16,11 +16,11 @@
 #include <sys/utsname.h>
 
 typedef struct spawn_tree_struct {
-  int rank;
-  int ranks;
-  int children;
-  int* child_ids;
-  spawn_net_channel** child_chs;
+  int rank;       /* our global rank (0 to ranks-1) */
+  int ranks;      /* number of nodes in tree */
+  int children;   /* number of children we have */
+  int* child_ids; /* global ranks of our children */
+  spawn_net_channel** child_chs; /* channels to children */
 } spawn_tree;
 
 struct session_t {
@@ -28,9 +28,9 @@ struct session_t {
     char const * spawn_parent;   /* name of our parent's endpoint */
     char const * spawn_id;       /* id given to us by parent, we echo this back on connect */
     char const * ep_name;        /* name of our endpoint */
+    spawn_net_endpoint ep;       /* our endpoint */
     spawn_tree * tree;           /* data structure that tracks tree info */
     spawn_net_channel parent_ch; /* channel to our parent (if we have one) */
-    spawn_net_endpoint ep;       /* our endpoint */
     strmap* params;              /* spawn parameters sent from parent after connect */
 };
 
@@ -445,7 +445,7 @@ session_start (struct session_t * s)
             degree = atoi(value);
         }
 
-        /* get our rank, we currently using our id as a rank */
+        /* get our rank, we currently use our id as a rank */
         int rank = 0;
         if (s->spawn_id != NULL) {
             rank = atoi(s->spawn_id);
