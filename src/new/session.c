@@ -15,11 +15,20 @@
 #include <errno.h>
 #include <sys/utsname.h>
 
+typedef struct spawn_tree_struct {
+  int rank;
+  int ranks;
+  int children;
+  int* child_ids;
+  spawn_net_channel** child_chs;
+} spawn_tree;
+
 struct session_t {
     char const * spawn_exe;      /* executable path */
     char const * spawn_parent;   /* name of our parent's endpoint */
     char const * spawn_id;       /* id given to us by parent, we echo this back on connect */
     char const * ep_name;        /* name of our endpoint */
+    spawn_tree * tree;           /* data structure that tracks tree info */
     spawn_net_channel parent_ch; /* channel to our parent (if we have one) */
     spawn_net_endpoint ep;       /* our endpoint */
     strmap* params;              /* spawn parameters sent from parent after connect */
@@ -148,26 +157,53 @@ static char* spawn_net_read_str(const spawn_net_channel* ch)
     return str;
 }
 
-typedef struct spawn_tree_struct {
-  int ranks;
-  int rank;
-  int children;
-  int* child_ids;
-  spawn_net_channel* child_chs;
-} spawn_tree;
+static spawn_tree* tree_new()
+{
+    spawn_tree* t = (spawn_tree*) SPAWN_MALLOC(sizeof(spawn_tree));
 
-static create_tree_kary(int rank, int ranks, int k, spawn_tree* t)
+    t->rank      = -1;
+    t->ranks     = -1;
+    t->children  = 0;
+    t->child_ids = NULL;
+    t->child_chs = NULL;
+
+    return t;
+}
+
+static void tree_delete(spawn_tree** pt)
+{
+    if (pt == NULL) {
+        return;
+    }
+
+    spawn_tree* t = *pt;
+
+    /* free off each child channel if we have them */
+    int i;
+    for (i = 0; i < t->children; i++) {
+        spawn_free(&(t->child_chs[i]));
+    }
+
+    /* free child ids and channels */
+    spawn_free(&(t->child_ids));
+    spawn_free(&(t->child_chs));
+
+    /* free tree structure itself */
+    spawn_free(pt);
+}
+
+static void tree_create_kary(int rank, int ranks, int k, spawn_tree* t)
 {
     /* compute the maximum number of children this task may have */
     int max_children = k;
 
     /* prepare data structures to store our parent and children */
-    t->ranks = ranks;
     t->rank  = rank;
+    t->ranks = ranks;
 
     if (max_children > 0) {
         t->child_ids  = (int*) SPAWN_MALLOC(max_children * sizeof(int));
-        t->child_chs  = (spawn_net_channel*) SPAWN_MALLOC(max_children * sizeof(spawn_net_channel));
+        t->child_chs  = (spawn_net_channel**) SPAWN_MALLOC(max_children * sizeof(spawn_net_channel));
     }
 
     /* find our parent rank and the ranks of our children */
@@ -304,9 +340,13 @@ session_init (int argc, char * argv[])
     s->spawn_parent = NULL;
     s->spawn_id     = NULL;
     s->ep_name      = NULL;
+    s->tree         = NULL;
     //s->parent_channel = NULL_CHANNEL;
     //s->ep         = NULL_EP;
     s->params       = NULL;
+
+    /* initialize tree */
+    s->tree = tree_new();
 
     /* create empty params strmap */
     s->params = strmap_new();
@@ -326,13 +366,14 @@ session_init (int argc, char * argv[])
         /* we have a parent, record its address */
         s->spawn_parent = SPAWN_STRDUP(value);
     } else {
-        /* we are the root, build list parameters */
+        /* no parent, we are the root, create parameters strmap */
 
-        /* we include ourself as a host, plus all hosts listed on command line */
+        /* we include ourself as a host,
+         * plus all hosts listed on command line */
         int hosts = argc;
         strmap_setf(s->params, "N=%d", hosts);
         
-        /* list our hostname as the first host */
+        /* list our own hostname as the first host */
         char* hostname = spawn_hostname();
         strmap_setf(s->params, "%d=%s", 0, hostname);
         spawn_free(&hostname);
@@ -393,32 +434,42 @@ session_start (struct session_t * s)
     }
 
     /* identify our children */
-    spawn_tree t;
+    spawn_tree* t = s->tree;
     int children = 0;
     const char* hosts = strmap_get(s->params, "N");
     if (hosts != NULL) {
-        /* we currently using our id as a rank in the tree */
+        /* get degree of tree */
+        int degree = 2;
+        const char* value = strmap_get(s->params, "DEG");
+        if (value != NULL) {
+            degree = atoi(value);
+        }
+
+        /* get our rank, we currently using our id as a rank */
         int rank = 0;
         if (s->spawn_id != NULL) {
             rank = atoi(s->spawn_id);
         }
 
-        int degree = 2;
-        const char* value = strmap_get(s->params, "DEG");
-        if (value != NULL) {
-            degree=atoi(value);
-        }
-
+        /* get number of ranks in tree */
         int ranks = atoi(hosts);
-        create_tree_kary(rank, ranks, degree, &t);
-        children = t.children;
+
+        /* create the tree and get number of children */
+        tree_create_kary(rank, ranks, degree, t);
+        children = t->children;
     }
+
+    /* we'll map global id to local child id */
+    strmap* childmap = strmap_new();
 
     /* launch children */
     char* spawn_cwd = spawn_getcwd();
     for (i = 0; i < children; i++) {
         /* get rank of child */
-        int child_id = t.child_ids[i];
+        int child_id = t->child_ids[i];
+
+        /* add entry to global-to-local id map */
+        strmap_setf(childmap, "%d=%d", child_id, i);
 
         /* lookup hostname of child from parameters */
         const char* host = strmap_getf(s->params, "%d", child_id);
@@ -442,7 +493,7 @@ session_start (struct session_t * s)
         char* spawn_command = SPAWN_STRDUPF("cd %s && env MV2_SPAWN_PARENT=%s MV2_SPAWN_ID=%d %s",
             spawn_cwd, s->ep_name, child_id, s->spawn_exe);
         //node_launch(node_id, spawn_command);
-        temp_launch(&t, i, host, spawn_command);
+        temp_launch(t, i, host, spawn_command);
         spawn_free(&spawn_command);
     }
     spawn_free(&spawn_cwd);
@@ -456,17 +507,30 @@ session_start (struct session_t * s)
         /* TODO: once we determine which child we're accepting,
          * save pointer to connection in tree structure */
         /* accept child connection */
-        spawn_net_channel ch;
-        spawn_net_accept(&(s->ep), &ch);
+        spawn_net_channel* ch = SPAWN_MALLOC(sizeof(spawn_net_channel));
+        spawn_net_accept(&(s->ep), ch);
 
-        /* read id from child */
-        char* str = spawn_net_read_str(&ch);
-        SPAWN_DBG("Rank %d: received %s", t.rank, str);
+        /* read global id from child */
+        char* str = spawn_net_read_str(ch);
+
+        /* lookup local id from global id */
+        const char* value = strmap_get(childmap, str);
+        if (value == NULL) {
+        }
+        int index = atoi(value);
+        SPAWN_DBG("Rank %d: received id %s --> child %d", t->rank, str, index);
+
         spawn_free(&str);
 
+        /* record channel for child */
+        t->child_chs[index] = ch;
+
         /* send parameters to child */
-        spawn_net_write_strmap(&ch, s->params);
+        spawn_net_write_strmap(ch, s->params);
     }
+
+    /* delete child global-to-local id map */
+    strmap_delete(&childmap);
 
     /*
      * This is a busy wait.  I plan on using the state machine from mpirun_rsh
@@ -483,7 +547,9 @@ session_destroy (struct session_t * s)
     spawn_free(&(s->spawn_id));
     spawn_free(&(s->spawn_parent));
     spawn_free(&(s->spawn_exe));
-    strmap_delete(&s->params);
+    strmap_delete(&(s->params));
+    tree_delete(&(s->tree));
+
     spawn_free(&s);
 
     if (call_stop_event_handler) {
