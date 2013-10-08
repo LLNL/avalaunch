@@ -1,0 +1,18 @@
+1) launch spawn tree
+  a) strmap compression vs none
+  b) thread parallelism on fork/exec and/or accept loop vs single thread
+  c) spawn_net TCP sockets vs multiplex rsh/ssh sockets vs UD
+  d) tree structure k-ary vs k-nomial, best value of k
+  e) bcast vs scatter vs IP or IB multicast
+  f) network topology
+
+2) start application process group
+  a) bcast exe vs not and pt2pt vs IP or IB multicast
+  b) bcast vs scatter of app params
+
+3) connect app processes
+  a) PMI implementation: allgather to each spawn node vs distributed key/value store
+  b) PMI networking: sockets vs UD
+  c) MPI optimization: create single UD addr table per node in shmem vs table per process
+  d) allgather UD addr using UD starting from ring read from PMI
+  e) ring collective: 2 messages per node vs p (for p processes on a node)
