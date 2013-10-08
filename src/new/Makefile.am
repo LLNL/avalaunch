@@ -11,6 +11,7 @@ launcher_SOURCES = \
   spawn_net.c spawn_net.h \
   spawn_net_tcp.c spawn_net_tcp.h \
   spawn_util.c spawn_util.h \
+  timer_util.c timer_util.h\
   strmap.c strmap.h
-launcher_CFLAGS = -pthread
-launcher_LDFLAGS = -lpthread
+launcher_CFLAGS = -pthread -Wall -g
+launcher_LDFLAGS = -lpthread -lrt
