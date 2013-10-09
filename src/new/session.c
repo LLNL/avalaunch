@@ -300,8 +300,8 @@ static int temp_launch (spawn_tree* t, int index, const char* host, const char* 
 #endif
 
         SPAWN_DBG("Rank %d: rsh %s '%s'", t->rank, host, spawn_command);
-        //execlp("ssh", "ssh", host, spawn_command, (char *)NULL);
-        execlp("rsh", "rsh", host, spawn_command, (char *)NULL);
+        execlp("ssh", "ssh", host, spawn_command, (char *)NULL);
+        //execlp("rsh", "rsh", host, spawn_command, (char *)NULL);
         SPAWN_ERR("create_child (execlp errno=%d %s)", errno, strerror(errno));
         _exit(EXIT_FAILURE);
     }
@@ -334,6 +334,16 @@ static int temp_launch (spawn_tree* t, int index, const char* host, const char* 
 
     return 0;
 }
+
+int get_spawn_id(struct session_t* s)
+{
+    if (s->spawn_id == NULL) {
+        /* I am the root of the tree */
+        return 0;
+    }
+    return atoi(s->spawn_id);
+}
+
 
 struct session_t *
 session_init (int argc, char * argv[])
@@ -407,8 +417,9 @@ session_init (int argc, char * argv[])
 
 int
 session_start (struct session_t * s)
-{
-    int i;
+{ 
+    int i, tid;
+    int nodeid = get_spawn_id(s); 
 
 #if 0
     if (node_initialize()) {
@@ -426,6 +437,8 @@ session_start (struct session_t * s)
 
     call_stop_event_handler = 1;
 
+    if (!nodeid) { tid = begin_delta("connect back to parent"); }
+
     /* if we have a parent, connect back to him */
     if (s->spawn_parent != NULL) {
         /* connect to parent */
@@ -437,6 +450,8 @@ session_start (struct session_t * s)
         /* read parameters */
         spawn_net_read_strmap(s->parent_ch, s->params);
     }
+
+    if (!nodeid) { end_delta(tid); }
 
     /* identify our children */
     spawn_tree* t = s->tree;
@@ -459,8 +474,11 @@ session_start (struct session_t * s)
         /* get number of ranks in tree */
         int ranks = atoi(hosts);
 
+        if (!nodeid) { tid = begin_delta("tree_create_kary"); }
         /* create the tree and get number of children */
         tree_create_kary(rank, ranks, degree, t);
+        if (!nodeid) { end_delta(tid); }
+
         children = t->children;
     }
 
@@ -469,6 +487,8 @@ session_start (struct session_t * s)
 
     /* launch children */
     char* spawn_cwd = spawn_getcwd();
+
+    if (!nodeid) { tid = begin_delta("launch children"); }
     for (i = 0; i < children; i++) {
         /* get rank of child */
         int child_id = t->child_ids[i];
@@ -501,6 +521,7 @@ session_start (struct session_t * s)
         temp_launch(t, i, host, spawn_command);
         spawn_free(&spawn_command);
     }
+    if (!nodeid) { end_delta(tid); }
     spawn_free(&spawn_cwd);
 
     /*
@@ -508,6 +529,7 @@ session_start (struct session_t * s)
      * startup.  This loop also will cause a hang if any nodes do not launch
      * and connect back properly.
      */
+    if (!nodeid) { tid = begin_delta("accept child and send params"); }
     for (i = 0; i < children; i++) {
         /* TODO: once we determine which child we're accepting,
          * save pointer to connection in tree structure */
@@ -522,7 +544,6 @@ session_start (struct session_t * s)
         if (value == NULL) {
         }
         int index = atoi(value);
-        SPAWN_DBG("Rank %d: received id %s --> child %d", t->rank, str, index);
 
         spawn_free(&str);
 
@@ -532,6 +553,7 @@ session_start (struct session_t * s)
         /* send parameters to child */
         spawn_net_write_strmap(ch, s->params);
     }
+    if (!nodeid) { end_delta(tid); }
 
     /* delete child global-to-local id map */
     strmap_delete(&childmap);
@@ -540,7 +562,9 @@ session_start (struct session_t * s)
      * This is a busy wait.  I plan on using the state machine from mpirun_rsh
      * in the future which will save cpu with pthread_cond_signal and friends
      */
+    if (!nodeid) { tid = begin_delta("wait for completion"); }
     while (children > get_num_exited());
+    if (!nodeid) { end_delta(tid); }
 
     return 0;
 }

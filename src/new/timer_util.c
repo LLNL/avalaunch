@@ -55,7 +55,7 @@ print_deltas (FILE * fd)
 {
     size_t counter;
 
-    fprintf(fd, "\nMPI Library Timing Info\n%40s%15s\n", "", "Time (sec)");
+    fprintf(fd, "\nLauncher Profiling\n%40s%15s\n", "", "Time (sec)");
 
     for (counter = 0; counter < current_timestamp_delta; counter++) {
         struct timespec temp;

@@ -39,6 +39,7 @@ size_t spawn_unpack_uint64(const void* buf, uint64_t* val);
 void spawn_err(const char* file, int line, const char* format, ...);
 
 /* print debug message */
+#define NDEBUG
 #ifndef NDEBUG
 # define SPAWN_DBG(...) \
     do { spawn_dbg(__FILE__, __LINE__, __VA_ARGS__); } while (0)
