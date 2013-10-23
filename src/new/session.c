@@ -16,11 +16,11 @@
 #include <sys/utsname.h>
 
 typedef struct spawn_tree_struct {
-  int rank;       /* our global rank (0 to ranks-1) */
-  int ranks;      /* number of nodes in tree */
-  int children;   /* number of children we have */
-  int* child_ids; /* global ranks of our children */
-  spawn_net_channel** child_chs; /* channels to children */
+    int rank;                      /* our global rank (0 to ranks-1) */
+    int ranks;                     /* number of nodes in tree */
+    int children;                  /* number of children we have */
+    int* child_ids;                /* global ranks of our children */
+    spawn_net_channel** child_chs; /* channels to children */
 } spawn_tree;
 
 struct session_t {
@@ -300,8 +300,8 @@ static int temp_launch (spawn_tree* t, int index, const char* host, const char* 
 #endif
 
         SPAWN_DBG("Rank %d: rsh %s '%s'", t->rank, host, spawn_command);
-        execlp("ssh", "ssh", host, spawn_command, (char *)NULL);
-        //execlp("rsh", "rsh", host, spawn_command, (char *)NULL);
+        //execlp("ssh", "ssh", host, spawn_command, (char *)NULL);
+        execlp("rsh", "rsh", host, spawn_command, (char *)NULL);
         SPAWN_ERR("create_child (execlp errno=%d %s)", errno, strerror(errno));
         _exit(EXIT_FAILURE);
     }
@@ -344,6 +344,78 @@ int get_spawn_id(struct session_t* s)
     return atoi(s->spawn_id);
 }
 
+static void signal_to_root(const struct session_t* s)
+{
+    spawn_tree* t = s->tree;
+    int children = t->children;
+
+    /* doesn't really matter what we send yet */
+    char signal = 'A';
+
+    /* wait for signal from all children */
+    int i;
+    for (i = 0; i < children; i++) {
+        spawn_net_channel* ch = t->child_chs[i];
+        spawn_net_read(ch, &signal, sizeof(char));
+    }
+
+    /* forward signal to parent */
+    if (s->parent_ch != SPAWN_NET_CHANNEL_NULL) {
+        spawn_net_write(s->parent_ch, &signal, sizeof(char));
+    }
+
+    return;
+}
+
+static void signal_from_root(const struct session_t* s)
+{
+    spawn_tree* t = s->tree;
+    int children = t->children;
+
+    /* doesn't really matter what we send yet */
+    char signal = 'A';
+
+    /* wait for signal from parent */
+    if (s->parent_ch != SPAWN_NET_CHANNEL_NULL) {
+        spawn_net_read(s->parent_ch, &signal, sizeof(char));
+    }
+
+    /* forward signal to children */
+    int i;
+    for (i = 0; i < children; i++) {
+        spawn_net_channel* ch = t->child_chs[i];
+        spawn_net_write(ch, &signal, sizeof(char));
+    }
+
+    return;
+}
+
+static void allgather_strmap(strmap* map, const struct session_t* s)
+{
+    spawn_tree* t = s->tree;
+    int children = t->children;
+
+    /* gather input from children if we have any */
+    int i;
+    for (i = 0; i < children; i++) {
+        spawn_net_channel* ch = t->child_chs[i];
+        spawn_net_read_strmap(ch, map);
+    }
+
+    /* forward map to parent, and wait for response */
+    if (s->parent_ch != SPAWN_NET_CHANNEL_NULL) {
+        spawn_net_write_strmap(s->parent_ch, map);
+        spawn_net_read_strmap(s->parent_ch, map);
+    }
+
+    /* send map to children */
+    for (i = 0; i < children; i++) {
+        spawn_net_channel* ch = t->child_chs[i];
+        spawn_net_write_strmap(ch, map);
+    }
+
+    return;
+}
 
 struct session_t *
 session_init (int argc, char * argv[])
@@ -401,9 +473,14 @@ session_init (int argc, char * argv[])
 
         /* TODO: read this in from command line or via some other method */
         /* specify degree of tree */
-        strmap_setf(s->params, "DEG=%d", 2);
+        if ((value = getenv("MV2_SPAWN_DEGREE")) != NULL) {
+            int degree = atoi(value);
+            strmap_setf(s->params, "DEG=%d", degree);
+        } else {
+            strmap_setf(s->params, "DEG=%d", 2);
+        }
 
-        strmap_print(s->params);
+        //strmap_print(s->params);
     }
 
     /* get our name */
@@ -419,7 +496,7 @@ int
 session_start (struct session_t * s)
 { 
     int i, tid;
-    int nodeid = get_spawn_id(s); 
+    int nodeid;
 
 #if 0
     if (node_initialize()) {
@@ -437,7 +514,7 @@ session_start (struct session_t * s)
 
     call_stop_event_handler = 1;
 
-    if (!nodeid) { tid = begin_delta("connect back to parent"); }
+    tid = begin_delta("connect back to parent");
 
     /* if we have a parent, connect back to him */
     if (s->spawn_parent != NULL) {
@@ -451,7 +528,7 @@ session_start (struct session_t * s)
         spawn_net_read_strmap(s->parent_ch, s->params);
     }
 
-    if (!nodeid) { end_delta(tid); }
+    end_delta(tid);
 
     /* identify our children */
     spawn_tree* t = s->tree;
@@ -470,6 +547,7 @@ session_start (struct session_t * s)
         if (s->spawn_id != NULL) {
             rank = atoi(s->spawn_id);
         }
+        nodeid = rank;
 
         /* get number of ranks in tree */
         int ranks = atoi(hosts);
@@ -558,11 +636,34 @@ session_start (struct session_t * s)
     /* delete child global-to-local id map */
     strmap_delete(&childmap);
 
+    /* signal root to let it know tree is done */
+    signal_to_root(s);
+
+    /* wait for signal from root before we start PMI exchange */
+    if (!nodeid) { tid = begin_delta("PMI exchange"); }
+    signal_from_root(s);
+
+    /* emulate PMI key/value exchange */
+    strmap* pmi_strmap = strmap_new();
+    strmap_setf(pmi_strmap, "%d=%s", s->tree->rank, s->ep_name);
+    allgather_strmap(pmi_strmap, s);
+    if (nodeid == s->tree->ranks - 1) {
+      strmap_print(pmi_strmap);
+    }
+    strmap_delete(&pmi_strmap);
+
+    /* signal root to let it know PMI bcast has completed */
+    signal_to_root(s);
+    if (!nodeid) { end_delta(tid); }
+
+    /* wait for signal from root before we start to shut down */
+    if (!nodeid) { tid = begin_delta("wait for completion"); }
+    signal_from_root(s);
+
     /*
      * This is a busy wait.  I plan on using the state machine from mpirun_rsh
      * in the future which will save cpu with pthread_cond_signal and friends
      */
-    if (!nodeid) { tid = begin_delta("wait for completion"); }
     while (children > get_num_exited());
     if (!nodeid) { end_delta(tid); }
 
