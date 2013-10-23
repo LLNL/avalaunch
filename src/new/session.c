@@ -256,7 +256,12 @@ static void tree_create_kary(int rank, int ranks, int k, spawn_tree* t)
     }
 }
 
-static int temp_launch (spawn_tree* t, int index, const char* host, const char* spawn_command)
+static int temp_launch(
+    spawn_tree* t,
+    int index,
+    const char* host,
+    const char* spawn_sh,
+    const char* spawn_command)
 {
     int pipe_stdin[2], pipe_stdout[2], pipe_stderr[2];
     pid_t cpid;
@@ -299,9 +304,8 @@ static int temp_launch (spawn_tree* t, int index, const char* host, const char* 
         close(pipe_stderr[0]);
 #endif
 
-        SPAWN_DBG("Rank %d: rsh %s '%s'", t->rank, host, spawn_command);
-        //execlp("ssh", "ssh", host, spawn_command, (char *)NULL);
-        execlp("rsh", "rsh", host, spawn_command, (char *)NULL);
+        SPAWN_DBG("Rank %d: %s %s '%s'", t->rank, spawn_sh, host, spawn_command);
+        execlp(spawn_sh, spawn_sh, host, spawn_command, (char *)NULL);
         SPAWN_ERR("create_child (execlp errno=%d %s)", errno, strerror(errno));
         _exit(EXIT_FAILURE);
     }
@@ -480,7 +484,16 @@ session_init (int argc, char * argv[])
             strmap_setf(s->params, "DEG=%d", 2);
         }
 
-        //strmap_print(s->params);
+        /* record the shell command (rsh or ssh) to start remote procs */
+        if ((value = getenv("MV2_SPAWN_SH")) != NULL) {
+            strmap_setf(s->params, "SH=%s", value);
+        } else {
+            strmap_setf(s->params, "SH=rsh");
+        }
+
+        printf("Params string map:\n");
+        strmap_print(s->params);
+        printf("\n");
     }
 
     /* get our name */
@@ -560,6 +573,9 @@ session_start (struct session_t * s)
         children = t->children;
     }
 
+    /* get shell command we should use to launch children */
+    const char* spawn_sh = strmap_get(s->params, "SH");
+
     /* we'll map global id to local child id */
     strmap* childmap = strmap_new();
 
@@ -596,7 +612,7 @@ session_start (struct session_t * s)
         char* spawn_command = SPAWN_STRDUPF("cd %s && env MV2_SPAWN_PARENT=%s MV2_SPAWN_ID=%d %s",
             spawn_cwd, s->ep_name, child_id, s->spawn_exe);
         //node_launch(node_id, spawn_command);
-        temp_launch(t, i, host, spawn_command);
+        temp_launch(t, i, host, spawn_sh, spawn_command);
         spawn_free(&spawn_command);
     }
     if (!nodeid) { end_delta(tid); }
@@ -647,8 +663,10 @@ session_start (struct session_t * s)
     strmap* pmi_strmap = strmap_new();
     strmap_setf(pmi_strmap, "%d=%s", s->tree->rank, s->ep_name);
     allgather_strmap(pmi_strmap, s);
-    if (nodeid == s->tree->ranks - 1) {
-      strmap_print(pmi_strmap);
+    if (nodeid == 0) {
+        printf("PMI string map:\n");
+        strmap_print(pmi_strmap);
+        printf("\n");
     }
     strmap_delete(&pmi_strmap);
 
