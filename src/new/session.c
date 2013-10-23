@@ -508,7 +508,7 @@ session_init (int argc, char * argv[])
 int
 session_start (struct session_t * s)
 { 
-    int i, tid;
+    int i, tid, tid_tree;
     int nodeid;
 
 #if 0
@@ -526,6 +526,12 @@ session_start (struct session_t * s)
     }
 
     call_stop_event_handler = 1;
+
+    /**********************
+     * Create spawn tree
+     **********************/
+
+    tid_tree = begin_delta("unfurl tree");
 
     tid = begin_delta("connect back to parent");
 
@@ -654,7 +660,18 @@ session_start (struct session_t * s)
 
     /* signal root to let it know tree is done */
     signal_to_root(s);
+    if (!nodeid) { end_delta(tid_tree); }
 
+    /**********************
+     * Create app procs
+     **********************/
+
+    // TODO
+
+    /**********************
+     * PMI exchange
+     **********************/
+ 
     /* wait for signal from root before we start PMI exchange */
     if (!nodeid) { tid = begin_delta("PMI exchange"); }
     signal_from_root(s);
@@ -668,20 +685,51 @@ session_start (struct session_t * s)
         strmap_print(pmi_strmap);
         printf("\n");
     }
-    strmap_delete(&pmi_strmap);
 
     /* signal root to let it know PMI bcast has completed */
     signal_to_root(s);
     if (!nodeid) { end_delta(tid); }
 
-    /* wait for signal from root before we start to shut down */
-    if (!nodeid) { tid = begin_delta("wait for completion"); }
-    signal_from_root(s);
+    /* measure pack/unpack cost of PMI strmap */
+    if (nodeid == 0) {
+    if (!nodeid) { tid = begin_delta("pack/unpack strmap x1000"); }
+    for (i = 0; i < 1000; i++) {
+        size_t pack_size = strmap_pack_size(pmi_strmap);
+        void* pack_buf = SPAWN_MALLOC(pack_size);
 
+        strmap_pack(pack_buf, pmi_strmap);
+
+        strmap* tmpmap = strmap_new();
+        strmap_unpack(pack_buf, tmpmap);
+        strmap_delete(&tmpmap);
+
+        spawn_free(&pack_buf);
+    }
+    if (!nodeid) { end_delta(tid); }
+    }
+
+    strmap_delete(&pmi_strmap);
+
+    /* measure cost of signal propogation */
+    signal_from_root(s);
+    if (!nodeid) { tid = begin_delta("signal costs x1000"); }
+    for (i = 0; i < 1000; i++) {
+        signal_to_root(s);
+        signal_from_root(s);
+    }
+    if (!nodeid) { end_delta(tid); }
+
+    /**********************
+     * Tear down
+     **********************/
+ 
     /*
      * This is a busy wait.  I plan on using the state machine from mpirun_rsh
      * in the future which will save cpu with pthread_cond_signal and friends
      */
+    /* wait for signal from root before we start to shut down */
+    if (!nodeid) { tid = begin_delta("wait for completion"); }
+    signal_from_root(s);
     while (children > get_num_exited());
     if (!nodeid) { end_delta(tid); }
 
