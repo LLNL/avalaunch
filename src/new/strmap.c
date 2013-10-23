@@ -102,6 +102,21 @@ void strmap_delete(strmap** ptree)
   return;
 }
 
+/* copies entries from src into dst */
+void strmap_merge(strmap* dst, const strmap* src)
+{
+  strmap_node* node;
+  for (node = strmap_node_first(src);
+       node != NULL;
+       node = strmap_node_next(node))
+  {
+    const char* key = strmap_node_key(node);
+    const char* val = strmap_node_value(node);
+    strmap_set(dst, key, val);
+  }
+  return;
+}
+
 /*
 =========================================
 set, get, unset functions
@@ -865,10 +880,12 @@ void strmap_print(const strmap* map)
   {
     const char* key = strmap_node_key(node);
     const char* val = strmap_node_value(node);
+    printf("%d: %s --> %s\n", i, key, val);
     i++;
   }
 
   size_t bytes = strmap_pack_size(map);
+  printf("%d entries, %llu bytes packed\n", i, (unsigned long long) bytes);
 
   return;
 }

@@ -56,6 +56,9 @@ strmap* strmap_new();
 /* frees a map */
 void strmap_delete(strmap** map);
 
+/* copies entries from src to dst strmap */
+void strmap_merge(strmap* dst, const strmap* src);
+
 /*
 =========================================
 iterate over key/value pairs
