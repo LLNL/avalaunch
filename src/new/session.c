@@ -384,7 +384,7 @@ static void pmi_exchange(struct session_t* s, const strmap* params)
     strmap* pmi_strmap = strmap_new();
 
     /* get number of procs we should here from */
-    const char* app_procs_str = strmap_get(params, "PROCS");
+    const char* app_procs_str = strmap_get(params, "PPN");
     int numprocs = atoi(app_procs_str);
 
     /* get total number of procs in job */
@@ -464,7 +464,7 @@ static void app_start(struct session_t* s, const strmap* params)
     /* read executable name and number of procs */
     const char* app_exe = strmap_get(params, "EXE");
     const char* app_dir = strmap_get(params, "CWD");
-    const char* app_procs_str = strmap_get(params, "PROCS");
+    const char* app_procs_str = strmap_get(params, "PPN");
     int numprocs = atoi(app_procs_str);
 
     /* TODO: bcast application executables */
@@ -483,6 +483,13 @@ static void app_start(struct session_t* s, const strmap* params)
     }
     signal_to_root(s);
     if (!rank) { end_delta(tid); }
+
+    /* check flag for whether we should initiate PMI exchange */
+    const char* use_pmi_str = strmap_get(params, "PMI");
+    int use_pmi = atoi(use_pmi_str);
+    if (use_pmi) {
+        pmi_exchange(s, params);
+    }
 
     return;
 }
@@ -557,7 +564,7 @@ session_init (int argc, char * argv[])
             strmap_setf(s->params, "SH=rsh");
         }
 
-        printf("Params string map:\n");
+        printf("Spawn parameters map:\n");
         strmap_print(s->params);
         printf("\n");
     }
@@ -745,7 +752,7 @@ session_start (struct session_t * s)
 
     /* print map from rank 0 */
     if (nodeid == 0) {
-        printf("spawn endpoint map:\n");
+        printf("Spawn endpoints map:\n");
         strmap_print(spawnep_strmap);
         printf("\n");
     }
@@ -806,7 +813,25 @@ session_start (struct session_t * s)
         spawn_free(&appcwd);
 
         /* set number of procs each spawn should start */
-        strmap_set(appmap, "PROCS", "1");
+        value = getenv("MV2_SPAWN_PPN");
+        if (value != NULL) {
+            strmap_set(appmap, "PPN", value);
+        } else {
+            strmap_set(appmap, "PPN", "1");
+        }
+
+        /* detect whether we should run PMI */
+        value = getenv("MV2_SPAWN_PMI");
+        if (value != NULL) {
+            strmap_set(appmap, "PMI", value);
+        } else {
+            strmap_set(appmap, "PMI", "0");
+        }
+
+        /* print map for debugging */
+        printf("Application parameters map:\n");
+        strmap_print(appmap);
+        printf("\n");
     }
 
     /* broadcast parameters to start app procs */
@@ -816,8 +841,6 @@ session_start (struct session_t * s)
     if (!nodeid) { end_delta(tid); }
 
     app_start(s, appmap);
-
-    //pmi_exchange(s, appmap);
 
     strmap_delete(&appmap);
 
