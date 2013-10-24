@@ -1,6 +1,8 @@
 ACLOCAL_AMFLAGS = -I m4
 
 bin_PROGRAMS = launcher
+lib_LTLIBRARIES = libpmi.la
+
 launcher_SOURCES = \
   main.c \
   node.c \
@@ -13,7 +15,14 @@ launcher_SOURCES = \
   spawn_net_util.c spawn_net_util.h \
   spawn_util.c spawn_util.h \
   timer_util.c timer_util.h\
-  strmap.c strmap.h \
-  pmi.c pmi.h
+  strmap.c strmap.h
 launcher_CFLAGS = -pthread -Wall -g
 launcher_LDFLAGS = -lpthread -lrt
+
+libpmi_la_SOURCES = \
+  spawn_net.c spawn_net.h \
+  spawn_net_tcp.c spawn_net_tcp.h \
+  spawn_net_util.c spawn_net_util.h \
+  spawn_util.c spawn_util.h \
+  strmap.c strmap.h \
+  pmi.c pmi.h

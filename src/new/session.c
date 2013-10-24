@@ -180,13 +180,12 @@ static int temp_launch(
     spawn_tree* t,
     int index,
     const char* host,
-    const char* spawn_sh,
-    const char* spawn_command)
+    const char* sh,
+    const char* command)
 {
-    int pipe_stdin[2], pipe_stdout[2], pipe_stderr[2];
-    pid_t cpid;
-
 #if 0
+    int pipe_stdin[2], pipe_stdout[2], pipe_stderr[2];
+
     if (-1 == pipe(pipe_stdin)) {
         print_errmsg("create_process (pipe)", errno);
         return -1;
@@ -203,7 +202,7 @@ static int temp_launch(
     }
 #endif
 
-    cpid = fork();
+    pid_t cpid = fork();
 
     if (-1 == cpid) {
         SPAWN_ERR("create_process (fork() errno=%d %s)", errno, strerror(errno));
@@ -224,8 +223,23 @@ static int temp_launch(
         close(pipe_stderr[0]);
 #endif
 
-        SPAWN_DBG("Rank %d: %s %s '%s'", t->rank, spawn_sh, host, spawn_command);
-        execlp(spawn_sh, spawn_sh, host, spawn_command, (char *)NULL);
+        /* TODO: execlp searches the user's path looking for the launch command,
+         * so this could create a bunch of traffic on the file system if there
+         * are lots of extra entries in user's path */
+        char* args;
+        if (strcmp(sh, "rsh") == 0) {
+            args = SPAWN_STRDUP(host);
+        } else if (strcmp(sh, "ssh") == 0) {
+            args = SPAWN_STRDUP(host);
+        } else if (strcmp(sh, "sh") == 0) {
+            args = SPAWN_STRDUP("-c");
+        } else {
+            SPAWN_ERR("unknown launch shell: `%s'", sh);
+            _exit(EXIT_FAILURE);
+        }
+
+        SPAWN_DBG("Rank %d: %s %s '%s'", t->rank, sh, args, command);
+        execlp(sh, sh, args, command, (char *)NULL);
         SPAWN_ERR("create_child (execlp errno=%d %s)", errno, strerror(errno));
         _exit(EXIT_FAILURE);
     }
@@ -314,6 +328,26 @@ static void signal_from_root(const struct session_t* s)
     return;
 }
 
+static void bcast_strmap(strmap* map, const struct session_t* s)
+{
+    spawn_tree* t = s->tree;
+    int children = t->children;
+
+    /* read map from parent, if we have one */
+    if (s->parent_ch != SPAWN_NET_CHANNEL_NULL) {
+        spawn_net_read_strmap(s->parent_ch, map);
+    }
+
+    /* send map to children */
+    int i;
+    for (i = 0; i < children; i++) {
+        spawn_net_channel* ch = t->child_chs[i];
+        spawn_net_write_strmap(ch, map);
+    }
+
+    return;
+}
+
 static void allgather_strmap(strmap* map, const struct session_t* s)
 {
     spawn_tree* t = s->tree;
@@ -329,14 +363,45 @@ static void allgather_strmap(strmap* map, const struct session_t* s)
     /* forward map to parent, and wait for response */
     if (s->parent_ch != SPAWN_NET_CHANNEL_NULL) {
         spawn_net_write_strmap(s->parent_ch, map);
-        spawn_net_read_strmap(s->parent_ch, map);
     }
 
-    /* send map to children */
-    for (i = 0; i < children; i++) {
-        spawn_net_channel* ch = t->child_chs[i];
-        spawn_net_write_strmap(ch, map);
+    /* broadcast map from root to tree */
+    bcast_strmap(map, s);
+
+    return;
+}
+
+static void app_start(struct session_t* s, const strmap* params)
+{
+    /* TODO: for each process group we start, we'll want to
+     * create a data structure to record number, pids, comm
+     * channels, and initial parameters, etc */
+
+    int i, tid;
+    int rank = s->tree->rank;
+
+    /* read executable name and number of procs */
+    const char* app_exe = strmap_get(params, "EXE");
+    const char* app_dir = strmap_get(params, "CWD");
+    const char* app_procs_str = strmap_get(params, "PROCS");
+    int numprocs = atoi(app_procs_str);
+
+    /* TODO: bcast application executables */
+
+    char host[] = "";
+
+    /* launch app procs */
+    if (!rank) { tid = begin_delta("launch app procs"); }
+    signal_from_root(s);
+    for (i = 0; i < numprocs; i++) {
+        /* launch child process */
+        char* app_command = SPAWN_STRDUPF("cd %s && env MV2_PMI_ADDR=%s %s",
+            app_dir, s->ep_name, app_exe);
+        temp_launch(s->tree, i, host, "sh", app_command);
+        spawn_free(&app_command);
     }
+    signal_to_root(s);
+    if (!rank) { end_delta(tid); }
 
     return;
 }
@@ -491,8 +556,8 @@ session_start (struct session_t * s)
         /* get number of ranks in tree */
         int ranks = atoi(hosts);
 
-        if (!nodeid) { tid = begin_delta("tree_create_kary"); }
         /* create the tree and get number of children */
+        if (!nodeid) { tid = begin_delta("tree_create_kary"); }
         tree_create_kary(rank, ranks, degree, t);
         if (!nodeid) { end_delta(tid); }
 
@@ -502,12 +567,13 @@ session_start (struct session_t * s)
     /* get shell command we should use to launch children */
     const char* spawn_sh = strmap_get(s->params, "SH");
 
+    /* get the current working directory */
+    char* spawn_cwd = spawn_getcwd();
+
     /* we'll map global id to local child id */
     strmap* childmap = strmap_new();
 
     /* launch children */
-    char* spawn_cwd = spawn_getcwd();
-
     if (!nodeid) { tid = begin_delta("launch children"); }
     for (i = 0; i < children; i++) {
         /* get rank of child */
@@ -586,7 +652,27 @@ session_start (struct session_t * s)
      * Create app procs
      **********************/
 
-    // TODO
+    /* create map to set/receive app parameters */
+    strmap* appmap = strmap_new();
+
+    /* for now, have the root fill in the parameters */
+    if (s->spawn_parent == NULL) {
+        char* appcwd = spawn_getcwd();
+        strmap_set(appmap, "EXE", "/bin/hostname");
+        strmap_set(appmap, "CWD", appcwd);
+        strmap_set(appmap, "PROCS", "1");
+        spawn_free(&appcwd);
+    }
+
+    /* broadcast parameters to start app procs */
+    if (!nodeid) { tid = begin_delta("Broadcast app params"); }
+    bcast_strmap(appmap, s);
+    signal_to_root(s);
+    if (!nodeid) { end_delta(tid); }
+
+    app_start(s, appmap);
+
+    strmap_delete(&appmap);
 
     /**********************
      * PMI exchange
@@ -630,7 +716,7 @@ session_start (struct session_t * s)
 
     strmap_delete(&pmi_strmap);
 
-    /* measure cost of signal propogation */
+    /* measure cost of signal propagation */
     signal_from_root(s);
     if (!nodeid) { tid = begin_delta("signal costs x1000"); }
     for (i = 0; i < 1000; i++) {

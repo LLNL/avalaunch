@@ -20,7 +20,7 @@ AC_PROG_LN_S
 AC_PROG_MAKE_SET
 
 AM_PROG_CC_C_O
-
+AM_PROG_AR
 
 # Checks for libraries.
 
