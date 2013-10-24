@@ -54,14 +54,14 @@ int PMI_Init( int *spawned )
   }
 
   /* connect to server */
-  spawn_net_channel* ch = spawn_net_connect(server_name);
-  if (ch == SPAWN_NET_CHANNEL_NULL) {
+  server_ch = spawn_net_connect(server_name);
+  if (server_ch == SPAWN_NET_CHANNEL_NULL) {
     return PMI_FAIL;
   }
 
   /* read parameters from server */
   strmap* params = strmap_new();
-  spawn_net_read_strmap(ch, params);
+  spawn_net_read_strmap(server_ch, params);
 
   /* get rank, ranks, and jobid */
   const char* ranks_str = strmap_get(params, "RANKS");
@@ -72,6 +72,9 @@ int PMI_Init( int *spawned )
 
   const char* jobid_str = strmap_get(params, "JOBID");
   global_jobid = atoi(jobid_str);
+
+  /* create something for our KVS name */
+  snprintf(kvs_name, sizeof(kvs_name), "jobid.%d", global_jobid);
 
   /* delete parameters */
   strmap_delete(&params);

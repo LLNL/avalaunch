@@ -1,5 +1,6 @@
 ACLOCAL_AMFLAGS = -I m4
 
+include_HEADERS = pmi.h
 bin_PROGRAMS = launcher
 lib_LTLIBRARIES = libpmi.la
 
