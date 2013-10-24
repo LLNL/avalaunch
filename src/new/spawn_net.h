@@ -81,7 +81,6 @@ int spawn_net_mcast(const void* buf,
                     spawn_net_channel_group* chgrp,
                     int root);
 
-
 /* TODO: isend/irecv/waitall */
 
 #ifdef __cplusplus

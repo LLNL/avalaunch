@@ -10,8 +10,10 @@ launcher_SOURCES = \
   session.c session.h \
   spawn_net.c spawn_net.h \
   spawn_net_tcp.c spawn_net_tcp.h \
+  spawn_net_util.c spawn_net_util.h \
   spawn_util.c spawn_util.h \
   timer_util.c timer_util.h\
-  strmap.c strmap.h
+  strmap.c strmap.h \
+  pmi.c pmi.h
 launcher_CFLAGS = -pthread -Wall -g
 launcher_LDFLAGS = -lpthread -lrt

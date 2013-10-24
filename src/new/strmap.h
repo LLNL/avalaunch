@@ -8,7 +8,7 @@
 #include <sys/types.h>
 #include <string.h>
 
-#include "spawn_internal.h"
+#include "spawn_util.h"
 
 #ifdef __cplusplus
 extern "C" {
