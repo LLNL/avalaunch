@@ -34,7 +34,9 @@ char* spawn_net_read_str(const spawn_net_channel* ch)
     /* TODO: pack size in network order */
     /* recv the length of the string */
     uint64_t len;
-    spawn_net_read(ch, &len, sizeof(uint64_t));
+    if (spawn_net_read(ch, &len, sizeof(uint64_t)) != SPAWN_SUCCESS) {
+        return NULL;
+    }
 
     /* allocate space */
     size_t bytes = (size_t) len;
@@ -42,7 +44,10 @@ char* spawn_net_read_str(const spawn_net_channel* ch)
 
     /* recv the string */
     if (bytes > 0) {
-        spawn_net_read(ch, str, bytes);
+        if (spawn_net_read(ch, str, bytes) != SPAWN_SUCCESS) {
+            spawn_free(&str);
+            return NULL;
+        }
     }
 
     return str;
@@ -74,7 +79,9 @@ void spawn_net_read_strmap(const spawn_net_channel* ch, strmap* map)
     /* TODO: convert from network order */
     /* read size */
     uint64_t len;
-    spawn_net_read(ch, &len, sizeof(uint64_t));
+    if (spawn_net_read(ch, &len, sizeof(uint64_t)) != SPAWN_SUCCESS) {
+        return;
+    }
 
     if (len > 0) {
         /* allocate buffer */
@@ -82,10 +89,10 @@ void spawn_net_read_strmap(const spawn_net_channel* ch, strmap* map)
         void* buf = SPAWN_MALLOC(bytes);
 
         /* read data */
-        spawn_net_read(ch, buf, bytes);
-
-        /* unpack map */
-        strmap_unpack(buf, map);
+        if (spawn_net_read(ch, buf, bytes) == SPAWN_SUCCESS) {
+            /* unpack map */
+            strmap_unpack(buf, map);
+        }
 
         /* free buffer */
         spawn_free(&buf);
