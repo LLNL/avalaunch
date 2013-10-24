@@ -371,6 +371,87 @@ static void allgather_strmap(strmap* map, const struct session_t* s)
     return;
 }
 
+static void pmi_exchange(struct session_t* s, const strmap* params)
+{
+    int i, tid;
+    int rank = s->tree->rank;
+
+    /* wait for signal from root before we start PMI exchange */
+    if (!rank) { tid = begin_delta("pmi exchange"); }
+    signal_from_root(s);
+
+    /* allocate strmap */
+    strmap* pmi_strmap = strmap_new();
+
+    /* get number of procs we should here from */
+    const char* app_procs_str = strmap_get(params, "PROCS");
+    int numprocs = atoi(app_procs_str);
+
+    /* get total number of procs in job */
+    int ranks = s->tree->ranks * numprocs;
+
+    /* get global jobid */
+    int jobid = 0;
+
+    /* allocate a channel for each child */
+    spawn_net_channel** chs = (spawn_net_channel**) SPAWN_MALLOC(numprocs * sizeof(spawn_net_channel*));
+
+    /* wait for children to connect */
+    for (i = 0; i < numprocs; i++) {
+        /* wait for connect */
+        chs[i] = spawn_net_accept(s->ep);
+
+        /* since each spawn proc is creating the same number of tasks,
+         * we can hardcode a child rank relative to the spawn rank */
+        int child_rank = rank * numprocs + i;
+
+        /* send init info */
+        strmap* init = strmap_new();
+        strmap_setf(init, "RANK=%d",  child_rank);
+        strmap_setf(init, "RANKS=%d", ranks);
+        strmap_setf(init, "JOBID=%d", jobid);
+        spawn_net_write_strmap(chs[i], init);
+        strmap_delete(&init);
+    }
+
+    /* wait for BARRIER messages */
+    for (i = 0; i < numprocs; i++) {
+        spawn_net_channel* ch = chs[i];
+        char* cmd = spawn_net_read_str(ch);
+        //printf("spawn %d received cmd %s from child %d\n", rank, cmd, i);
+        spawn_net_read_strmap(ch, pmi_strmap);
+        spawn_free(&cmd);
+    }
+
+    /* allgather strmaps across spawn processes */
+    allgather_strmap(pmi_strmap, s);
+
+    /* forward strmap to each child */
+    for (i = 0; i < numprocs; i++) {
+        spawn_net_channel* ch = chs[i];
+        spawn_net_write_strmap(ch, pmi_strmap);
+    }
+
+    /* wait for FINALIZE */
+    for (i = 0; i < numprocs; i++) {
+        spawn_net_channel* ch = chs[i];
+        char* cmd = spawn_net_read_str(ch);
+        //printf("spawn %d received cmd %s from child %d\n", rank, cmd, i);
+        spawn_net_disconnect(&chs[i]);
+        spawn_free(&cmd);
+    }
+
+    spawn_free(&chs);
+
+    strmap_delete(&pmi_strmap);
+
+    /* signal root to let it know PMI bcast has completed */
+    signal_to_root(s);
+    if (!rank) { end_delta(tid); }
+
+    return;
+}
+
 static void app_start(struct session_t* s, const strmap* params)
 {
     /* TODO: for each process group we start, we'll want to
@@ -649,72 +730,49 @@ session_start (struct session_t * s)
     if (!nodeid) { end_delta(tid_tree); }
 
     /**********************
-     * Create app procs
+     * Gather endpoints of all spawns
+     * (unnecessary, but interesting to measure anyway)
      **********************/
 
-    /* create map to set/receive app parameters */
-    strmap* appmap = strmap_new();
-
-    /* for now, have the root fill in the parameters */
-    if (s->spawn_parent == NULL) {
-        char* appcwd = spawn_getcwd();
-        strmap_set(appmap, "EXE", "/bin/hostname");
-        strmap_set(appmap, "CWD", appcwd);
-        strmap_set(appmap, "PROCS", "1");
-        spawn_free(&appcwd);
-    }
-
-    /* broadcast parameters to start app procs */
-    if (!nodeid) { tid = begin_delta("Broadcast app params"); }
-    bcast_strmap(appmap, s);
-    signal_to_root(s);
-    if (!nodeid) { end_delta(tid); }
-
-    app_start(s, appmap);
-
-    strmap_delete(&appmap);
-
-    /**********************
-     * PMI exchange
-     **********************/
- 
-    /* wait for signal from root before we start PMI exchange */
-    if (!nodeid) { tid = begin_delta("PMI exchange"); }
+    /* wait for signal from root before we start spawn ep exchange */
+    if (!nodeid) { tid = begin_delta("spawn endpoint exchange"); }
     signal_from_root(s);
 
-    /* emulate PMI key/value exchange */
-    strmap* pmi_strmap = strmap_new();
-    strmap_setf(pmi_strmap, "%d=%s", s->tree->rank, s->ep_name);
-    allgather_strmap(pmi_strmap, s);
+    /* add our endpoint into strmap and do an allgather */
+    strmap* spawnep_strmap = strmap_new();
+    strmap_setf(spawnep_strmap, "%d=%s", s->tree->rank, s->ep_name);
+    allgather_strmap(spawnep_strmap, s);
+
+    /* print map from rank 0 */
     if (nodeid == 0) {
-        printf("PMI string map:\n");
-        strmap_print(pmi_strmap);
+        printf("spawn endpoint map:\n");
+        strmap_print(spawnep_strmap);
         printf("\n");
     }
 
-    /* signal root to let it know PMI bcast has completed */
+    /* signal root to let it know spawn ep bcast has completed */
     signal_to_root(s);
     if (!nodeid) { end_delta(tid); }
 
-    /* measure pack/unpack cost of PMI strmap */
+    /* measure pack/unpack cost of strmap */
     if (nodeid == 0) {
-    if (!nodeid) { tid = begin_delta("pack/unpack strmap x1000"); }
-    for (i = 0; i < 1000; i++) {
-        size_t pack_size = strmap_pack_size(pmi_strmap);
-        void* pack_buf = SPAWN_MALLOC(pack_size);
+        if (!nodeid) { tid = begin_delta("pack/unpack strmap x1000"); }
+        for (i = 0; i < 1000; i++) {
+            size_t pack_size = strmap_pack_size(spawnep_strmap);
+            void* pack_buf = SPAWN_MALLOC(pack_size);
 
-        strmap_pack(pack_buf, pmi_strmap);
+            strmap_pack(pack_buf, spawnep_strmap);
 
-        strmap* tmpmap = strmap_new();
-        strmap_unpack(pack_buf, tmpmap);
-        strmap_delete(&tmpmap);
+            strmap* tmpmap = strmap_new();
+            strmap_unpack(pack_buf, tmpmap);
+            strmap_delete(&tmpmap);
 
-        spawn_free(&pack_buf);
+            spawn_free(&pack_buf);
+        }
+        if (!nodeid) { end_delta(tid); }
     }
-    if (!nodeid) { end_delta(tid); }
-    }
 
-    strmap_delete(&pmi_strmap);
+    strmap_delete(&spawnep_strmap);
 
     /* measure cost of signal propagation */
     signal_from_root(s);
@@ -724,6 +782,44 @@ session_start (struct session_t * s)
         signal_from_root(s);
     }
     if (!nodeid) { end_delta(tid); }
+
+    /**********************
+     * Create app procs
+     **********************/
+
+    /* create map to set/receive app parameters */
+    strmap* appmap = strmap_new();
+
+    /* for now, have the root fill in the parameters */
+    if (s->spawn_parent == NULL) {
+        /* set executable path */
+        char* value = getenv("MV2_SPAWN_EXE");
+        if (value != NULL) {
+            strmap_set(appmap, "EXE", value);
+        } else {
+            strmap_set(appmap, "EXE", "/bin/hostname");
+        }
+
+        /* set current working directory */
+        char* appcwd = spawn_getcwd();
+        strmap_set(appmap, "CWD", appcwd);
+        spawn_free(&appcwd);
+
+        /* set number of procs each spawn should start */
+        strmap_set(appmap, "PROCS", "1");
+    }
+
+    /* broadcast parameters to start app procs */
+    if (!nodeid) { tid = begin_delta("broadcast app params"); }
+    bcast_strmap(appmap, s);
+    signal_to_root(s);
+    if (!nodeid) { end_delta(tid); }
+
+    app_start(s, appmap);
+
+    //pmi_exchange(s, appmap);
+
+    strmap_delete(&appmap);
 
     /**********************
      * Tear down
