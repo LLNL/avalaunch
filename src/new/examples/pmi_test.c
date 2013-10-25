@@ -15,8 +15,8 @@ int main(int argc, char* argv[])
   PMI_Get_size(&ranks);
   PMI_Get_appnum(&jobid);
 
-  printf("Rank %d, Size %d, Num %d\n", rank, ranks, jobid);
-  fflush(stdout);
+  //printf("Rank %d, Size %d, Num %d\n", rank, ranks, jobid);
+  //fflush(stdout);
 
   int kvs_len, key_len, val_len;
   PMI_KVS_Get_name_length_max(&kvs_len);
@@ -77,8 +77,8 @@ int main(int argc, char* argv[])
     fflush(stdout);
   }
 
-  printf("Rank %d Left=%s Right=%s\n", rank, leftval, rightval);
-  fflush(stdout);
+  //printf("Rank %d Left=%s Right=%s\n", rank, leftval, rightval);
+  //fflush(stdout);
 
   free(leftkey);
   free(rightkey);

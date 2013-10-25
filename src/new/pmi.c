@@ -22,9 +22,9 @@ static char kvs_name[MAX_KVS_LEN];
 
 static strmap* put;
 static strmap* commit;
-static strmap* global;
 
 static const char command_barrier[]  = "BARRIER";
+static const char command_get[]      = "GET";
 static const char command_finalize[] = "FINALIZE";
 
 int PMI_Init( int *spawned )
@@ -40,7 +40,6 @@ int PMI_Init( int *spawned )
   /* allocate new strmaps */
   put = strmap_new();
   commit = strmap_new();
-  global = strmap_new();
 
   const char* value;
 
@@ -103,8 +102,7 @@ int PMI_Finalize( void )
 {
   int rc = PMI_SUCCESS;
 
-  /* clear put, commit, and global */
-  strmap_delete(&global);
+  /* clear put and commit maps */
   strmap_delete(&commit);
   strmap_delete(&put);
 
@@ -347,8 +345,9 @@ int PMI_Barrier( void )
   strmap_delete(&commit);
   commit = strmap_new();
 
-  /* recv values in global */
-  spawn_net_read_strmap(server_ch, global);
+  /* wait for signal from server to complete barrier */
+  char* cmd = spawn_net_read_str(server_ch);
+  spawn_free(&cmd);
 
   return PMI_SUCCESS; 
 }
@@ -380,8 +379,12 @@ int PMI_KVS_Get( const char kvsname[], const char key[], char value[], int lengt
     return PMI_ERR_INVALID_VAL;
   }
 
-  /* lookup entry from global */
-  const char* str = strmap_get(global, key);
+  /* send request to server for key */
+  spawn_net_write_str(server_ch, command_get);
+  spawn_net_write_str(server_ch, key);
+
+  /* get reply from server */
+  char* str = spawn_net_read_str(server_ch);
   if (str == NULL) {
     /* failed to find the key */
     return PMI_FAIL;
@@ -390,11 +393,15 @@ int PMI_KVS_Get( const char kvsname[], const char key[], char value[], int lengt
   /* check that the user's buffer is large enough */
   int len = strlen(str) + 1;
   if (length < len) {
+    spawn_free(&str);
     return PMI_ERR_INVALID_LENGTH;
   }
 
   /* copy the value into user's buffer */
   strcpy(value, str);
+
+  /* free the string */
+  spawn_free(&str);
 
   return PMI_SUCCESS;
 }

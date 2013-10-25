@@ -455,10 +455,31 @@ static void pmi_exchange(struct session_t* s, const strmap* params)
     if (!rank) { tid = begin_delta("pmi write children"); }
     signal_from_root(s);
 
-    /* forward strmap to each child */
+    /* wait for 2 GET messages from each child */
+    char cmd_barrier[] = "BARRIER";
     for (i = 0; i < numprocs; i++) {
         spawn_net_channel* ch = chs[i];
-        spawn_net_write_strmap(ch, pmi_strmap);
+
+        /* send BARRIER message */
+        spawn_net_write_str(ch, cmd_barrier);
+
+        /* handle first GET request */
+        char* cmd = spawn_net_read_str(ch);
+        char* key = spawn_net_read_str(ch);
+        char* val = strmap_get(pmi_strmap, key);
+        //printf("cmd=%s key=%s val=%s\n", cmd, key, val);
+        spawn_net_write_str(ch, val);
+        spawn_free(&key);
+        spawn_free(&cmd);
+
+        /* handle second GET request */
+        cmd = spawn_net_read_str(ch);
+        key = spawn_net_read_str(ch);
+        val = strmap_get(pmi_strmap, key);
+        //printf("cmd=%s key=%s val=%s\n", cmd, key, val);
+        spawn_net_write_str(ch, val);
+        spawn_free(&key);
+        spawn_free(&cmd);
     }
 
     /* signal root to let it know PMI write has completed */
