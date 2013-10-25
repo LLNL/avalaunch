@@ -1,0 +1,20 @@
+#!/bin/bash
+
+set -x
+
+#num=75
+num=646
+hosts=`glob-hosts -s $num -e -a -h 'apex[41-231,233-240,586-719,726-859,861-863,870-961,1080-1087,1089-1147,1249-1264]'`
+#hosts=`glob-hosts -s $num -e -a -h 'apex[41-240,586-719,726-859,861-863,870-961,1080-1087,1089-1147,1249-1264]'`
+#hosts=`glob-hosts -s $num -e -a -h 'apex[41-240,586-719,726-800,900-961,1080-1087,1089-1147,1249-1264]'`
+echo $hosts
+#exit 0
+
+export MV2_SPAWN_DEGREE=64
+export MV2_SPAWN_PPN=1
+export MV2_SPAWN_PMI=0
+
+export MV2_SPAWN_EXE=src/new/examples/pmi_test
+export MV2_SPAWN_PMI=1
+
+src/new/launcher $hosts
