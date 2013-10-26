@@ -458,12 +458,14 @@ static void pmi_exchange(struct session_t* s, const strmap* params)
     /* wait for 2 GET messages from each child */
     char cmd_barrier[] = "BARRIER";
     for (i = 0; i < numprocs; i++) {
-        spawn_net_channel* ch = chs[i];
-
         /* send BARRIER message */
+        spawn_net_channel* ch = chs[i];
         spawn_net_write_str(ch, cmd_barrier);
+    }
 
-        /* handle first GET request */
+    /* handle first GET request */
+    for (i = 0; i < numprocs; i++) {
+        spawn_net_channel* ch = chs[i];
         char* cmd = spawn_net_read_str(ch);
         char* key = spawn_net_read_str(ch);
         char* val = strmap_get(pmi_strmap, key);
@@ -471,11 +473,14 @@ static void pmi_exchange(struct session_t* s, const strmap* params)
         spawn_net_write_str(ch, val);
         spawn_free(&key);
         spawn_free(&cmd);
+    }
 
-        /* handle second GET request */
-        cmd = spawn_net_read_str(ch);
-        key = spawn_net_read_str(ch);
-        val = strmap_get(pmi_strmap, key);
+    /* handle second GET request */
+    for (i = 0; i < numprocs; i++) {
+        spawn_net_channel* ch = chs[i];
+        char* cmd = spawn_net_read_str(ch);
+        char* key = spawn_net_read_str(ch);
+        char* val = strmap_get(pmi_strmap, key);
         //printf("cmd=%s key=%s val=%s\n", cmd, key, val);
         spawn_net_write_str(ch, val);
         spawn_free(&key);
