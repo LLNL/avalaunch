@@ -8,15 +8,13 @@
 extern "C" {
 #endif
 
-#define SPAWN_SUCCESS (0)
-#define SPAWN_FAILURE (1)
-
 #define SPAWN_NET_ENDPOINT_NULL (NULL)
 #define SPAWN_NET_CHANNEL_NULL (NULL)
 
 typedef enum spawn_net_type_enum {
   SPAWN_NET_TYPE_NULL = 0, /* netowrk not defined */
   SPAWN_NET_TYPE_TCP  = 1, /* TCP sockets */
+  SPAWN_NET_TYPE_FIFO = 2, /* FIFO/pipe */
 } spawn_net_type;
 
 /* represents an endpoint which others may connect to */
@@ -40,6 +38,9 @@ typedef struct spawn_net_channel_group_struct {
   int size;                     /* size of channel group */
   struct list_head chlist;      /* pointer to list of channels in group*/
 } spawn_net_channel_group;
+
+/* given an endpoint name, identify and return its type */
+spawn_net_type spawn_net_infer_type(const char* name);
 
 /* open endpoint for listening */
 spawn_net_endpoint* spawn_net_open(spawn_net_type type);

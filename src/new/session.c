@@ -18,8 +18,9 @@
 typedef struct spawn_tree_struct {
     int rank;                      /* our global rank (0 to ranks-1) */
     int ranks;                     /* number of nodes in tree */
+    spawn_net_channel* parent_ch;  /* channel to our parent */
     int children;                  /* number of children we have */
-    int* child_ids;                /* global ranks of our children */
+    int* child_ranks;              /* global ranks of our children */
     spawn_net_channel** child_chs; /* channels to children */
 } spawn_tree;
 
@@ -29,7 +30,6 @@ struct session_t {
     char const * spawn_id;        /* id given to us by parent, we echo this back on connect */
     char const * ep_name;         /* name of our endpoint */
     spawn_net_endpoint* ep;       /* our endpoint */
-    spawn_net_channel* parent_ch; /* channel to our parent (if we have one) */
     spawn_tree * tree;            /* data structure that tracks tree info */
     strmap* params;               /* spawn parameters sent from parent after connect */
 };
@@ -81,11 +81,12 @@ static spawn_tree* tree_new()
 {
     spawn_tree* t = (spawn_tree*) SPAWN_MALLOC(sizeof(spawn_tree));
 
-    t->rank      = -1;
-    t->ranks     = -1;
-    t->children  = 0;
-    t->child_ids = NULL;
-    t->child_chs = NULL;
+    t->rank        = -1;
+    t->ranks       = -1;
+    t->parent_ch   = SPAWN_NET_CHANNEL_NULL;
+    t->children    = 0;
+    t->child_ranks = NULL;
+    t->child_chs   = NULL;
 
     return t;
 }
@@ -105,8 +106,11 @@ static void tree_delete(spawn_tree** pt)
     }
 
     /* free child ids and channels */
-    spawn_free(&(t->child_ids));
+    spawn_free(&(t->child_ranks));
     spawn_free(&(t->child_chs));
+
+    /* free connection to parent */
+    spawn_net_disconnect(&(t->parent_ch));
 
     /* free tree structure itself */
     spawn_free(pt);
@@ -124,7 +128,7 @@ static void tree_create_kary(int rank, int ranks, int k, spawn_tree* t)
     t->ranks = ranks;
 
     if (max_children > 0) {
-        t->child_ids  = (int*) SPAWN_MALLOC(max_children * sizeof(int));
+        t->child_ranks  = (int*) SPAWN_MALLOC(max_children * sizeof(int));
         t->child_chs  = (spawn_net_channel**) SPAWN_MALLOC(max_children * sizeof(spawn_net_channel));
     }
 
@@ -157,7 +161,7 @@ static void tree_create_kary(int rank, int ranks, int k, spawn_tree* t)
 
             /* record ranks of our children */
             for (i = 0; i < t->children; i++) {
-                t->child_ids[i] = first_child + i;
+                t->child_ranks[i] = first_child + i;
                 //t->child_chs[i] = NULL_CHANNEL;
             }
 
@@ -172,7 +176,7 @@ static void tree_create_kary(int rank, int ranks, int k, spawn_tree* t)
 
     SPAWN_DBG("Rank %d has %d children", t->rank, t->children);
     for (i = 0; i < t->children; i++) {
-        SPAWN_DBG("Rank %d: Child %d of %d has rank=%d", t->rank, (i + 1), t->children, t->child_ids[i]);
+        SPAWN_DBG("Rank %d: Child %d of %d has rank=%d", t->rank, (i + 1), t->children, t->child_ranks[i]);
     }
 }
 
@@ -298,8 +302,8 @@ static void signal_to_root(const struct session_t* s)
     }
 
     /* forward signal to parent */
-    if (s->parent_ch != SPAWN_NET_CHANNEL_NULL) {
-        spawn_net_write(s->parent_ch, &signal, sizeof(char));
+    if (t->parent_ch != SPAWN_NET_CHANNEL_NULL) {
+        spawn_net_write(t->parent_ch, &signal, sizeof(char));
     }
 
     return;
@@ -314,8 +318,8 @@ static void signal_from_root(const struct session_t* s)
     char signal = 'A';
 
     /* wait for signal from parent */
-    if (s->parent_ch != SPAWN_NET_CHANNEL_NULL) {
-        spawn_net_read(s->parent_ch, &signal, sizeof(char));
+    if (t->parent_ch != SPAWN_NET_CHANNEL_NULL) {
+        spawn_net_read(t->parent_ch, &signal, sizeof(char));
     }
 
     /* forward signal to children */
@@ -334,8 +338,8 @@ static void bcast_strmap(strmap* map, const struct session_t* s)
     int children = t->children;
 
     /* read map from parent, if we have one */
-    if (s->parent_ch != SPAWN_NET_CHANNEL_NULL) {
-        spawn_net_read_strmap(s->parent_ch, map);
+    if (t->parent_ch != SPAWN_NET_CHANNEL_NULL) {
+        spawn_net_read_strmap(t->parent_ch, map);
     }
 
     /* send map to children */
@@ -361,8 +365,8 @@ static void allgather_strmap(strmap* map, const struct session_t* s)
     }
 
     /* forward map to parent, and wait for response */
-    if (s->parent_ch != SPAWN_NET_CHANNEL_NULL) {
-        spawn_net_write_strmap(s->parent_ch, map);
+    if (t->parent_ch != SPAWN_NET_CHANNEL_NULL) {
+        spawn_net_write_strmap(t->parent_ch, map);
     }
 
     /* broadcast map from root to tree */
@@ -371,7 +375,7 @@ static void allgather_strmap(strmap* map, const struct session_t* s)
     return;
 }
 
-static void pmi_exchange(struct session_t* s, const strmap* params)
+static void pmi_exchange(struct session_t* s, const strmap* params, const spawn_net_endpoint* ep)
 {
     int i, tid, tid_pmi;
     int rank = s->tree->rank;
@@ -404,7 +408,7 @@ static void pmi_exchange(struct session_t* s, const strmap* params)
     /* wait for children to connect */
     for (i = 0; i < numprocs; i++) {
         /* wait for connect */
-        chs[i] = spawn_net_accept(s->ep);
+        chs[i] = spawn_net_accept(ep);
 
         /* since each spawn proc is creating the same number of tasks,
          * we can hardcode a child rank relative to the spawn rank */
@@ -455,10 +459,9 @@ static void pmi_exchange(struct session_t* s, const strmap* params)
     if (!rank) { tid = begin_delta("pmi write children"); }
     signal_from_root(s);
 
-    /* wait for 2 GET messages from each child */
+    /* send BARRIER message */
     char cmd_barrier[] = "BARRIER";
     for (i = 0; i < numprocs; i++) {
-        /* send BARRIER message */
         spawn_net_channel* ch = chs[i];
         spawn_net_write_str(ch, cmd_barrier);
     }
@@ -544,25 +547,56 @@ static void app_start(struct session_t* s, const strmap* params)
 
     char host[] = "";
 
+    /* check flag for whether we should initiate PMI exchange */
+    const char* use_pmi_str = strmap_get(params, "PMI");
+    int use_pmi = atoi(use_pmi_str);
+
+    /* check for flag on whether we should use FIFO */
+    const char* use_pmi_fifo_str = strmap_get(params, "FIFO");
+    int use_pmi_fifo = atoi(use_pmi_fifo_str);
+
+    /* create endpoint for PMI */
+    if (!rank) { tid = begin_delta("open pmi endpoint"); }
+    signal_from_root(s);
+    spawn_net_endpoint* ep = s->ep;
+    const char* ep_name = spawn_net_name(ep);
+    if (use_pmi) {
+      if (use_pmi_fifo) {
+        ep = spawn_net_open(SPAWN_NET_TYPE_FIFO);
+        ep_name = spawn_net_name(ep);
+      }
+    }
+    signal_to_root(s);
+    if (!rank) { end_delta(tid); }
+
     /* launch app procs */
     if (!rank) { tid = begin_delta("launch app procs"); }
     signal_from_root(s);
     for (i = 0; i < numprocs; i++) {
         /* launch child process */
         char* app_command = SPAWN_STRDUPF("cd %s && env MV2_PMI_ADDR=%s %s",
-            app_dir, s->ep_name, app_exe);
+            app_dir, ep_name, app_exe);
         temp_launch(s->tree, i, host, "sh", app_command);
         spawn_free(&app_command);
     }
     signal_to_root(s);
     if (!rank) { end_delta(tid); }
 
-    /* check flag for whether we should initiate PMI exchange */
-    const char* use_pmi_str = strmap_get(params, "PMI");
-    int use_pmi = atoi(use_pmi_str);
+    /* execute PMI exchange */
     if (use_pmi) {
-        pmi_exchange(s, params);
+        pmi_exchange(s, params, ep);
     }
+
+    /* close PMI channels */
+    if (!rank) { tid = begin_delta("close pmi endpoint"); }
+    signal_from_root(s);
+    if (use_pmi) {
+      if (use_pmi_fifo) {
+        spawn_net_close(&ep);
+      }
+    }
+    signal_to_root(s);
+    if (!rank) { end_delta(tid); }
 
     return;
 }
@@ -578,7 +612,6 @@ session_init (int argc, char * argv[])
     s->spawn_id     = NULL;
     s->ep_name      = NULL;
     s->ep           = SPAWN_NET_ENDPOINT_NULL;
-    s->parent_ch    = SPAWN_NET_CHANNEL_NULL;
     s->tree         = NULL;
     s->params       = NULL;
 
@@ -681,22 +714,24 @@ session_start (struct session_t * s)
 
     tid = begin_delta("connect back to parent");
 
+    /* get pointer to spawn tree data structure */
+    spawn_tree* t = s->tree;
+
     /* if we have a parent, connect back to him */
     if (s->spawn_parent != NULL) {
         /* connect to parent */
-        s->parent_ch = spawn_net_connect(s->spawn_parent);
+        t->parent_ch = spawn_net_connect(s->spawn_parent);
 
         /* send our id */
-        spawn_net_write_str(s->parent_ch, s->spawn_id);
+        spawn_net_write_str(t->parent_ch, s->spawn_id);
 
         /* read parameters */
-        spawn_net_read_strmap(s->parent_ch, s->params);
+        spawn_net_read_strmap(t->parent_ch, s->params);
     }
 
     end_delta(tid);
 
     /* identify our children */
-    spawn_tree* t = s->tree;
     int children = 0;
     const char* hosts = strmap_get(s->params, "N");
     if (hosts != NULL) {
@@ -738,13 +773,13 @@ session_start (struct session_t * s)
     if (!nodeid) { tid = begin_delta("launch children"); }
     for (i = 0; i < children; i++) {
         /* get rank of child */
-        int child_id = t->child_ids[i];
+        int child_rank = t->child_ranks[i];
 
         /* add entry to global-to-local id map */
-        strmap_setf(childmap, "%d=%d", child_id, i);
+        strmap_setf(childmap, "%d=%d", child_rank, i);
 
         /* lookup hostname of child from parameters */
-        const char* host = strmap_getf(s->params, "%d", child_id);
+        const char* host = strmap_getf(s->params, "%d", child_rank);
         if (host == NULL) {
             spawn_free(&spawn_cwd);
             session_destroy(s);
@@ -763,7 +798,7 @@ session_start (struct session_t * s)
 
         /* launch child process */
         char* spawn_command = SPAWN_STRDUPF("cd %s && env MV2_SPAWN_PARENT=%s MV2_SPAWN_ID=%d %s",
-            spawn_cwd, s->ep_name, child_id, s->spawn_exe);
+            spawn_cwd, s->ep_name, child_rank, s->spawn_exe);
         //node_launch(node_id, spawn_command);
         temp_launch(t, i, host, spawn_sh, spawn_command);
         spawn_free(&spawn_command);
@@ -901,6 +936,14 @@ session_start (struct session_t * s)
             strmap_set(appmap, "PMI", "0");
         }
 
+        /* detect whether we should use FIFO for PMI */
+        value = getenv("MV2_SPAWN_FIFO");
+        if (value != NULL) {
+            strmap_set(appmap, "FIFO", value);
+        } else {
+            strmap_set(appmap, "FIFO", "0");
+        }
+
         /* print map for debugging */
         printf("Application parameters map:\n");
         strmap_print(appmap);
@@ -940,7 +983,6 @@ session_destroy (struct session_t * s)
     spawn_free(&(s->spawn_id));
     spawn_free(&(s->spawn_parent));
     spawn_free(&(s->spawn_exe));
-    spawn_net_disconnect(&(s->parent_ch));
     spawn_net_close(&(s->ep));
     strmap_delete(&(s->params));
     tree_delete(&(s->tree));

@@ -8,6 +8,7 @@
 #include <string.h>
 
 static int initialized  = 0;
+spawn_net_endpoint* global_ep = SPAWN_NET_ENDPOINT_NULL;
 static char* server_name = NULL;
 spawn_net_channel* server_ch = SPAWN_NET_CHANNEL_NULL;
 static int global_ranks;
@@ -51,6 +52,10 @@ int PMI_Init( int *spawned )
   if (server_name == NULL) {
     return PMI_FAIL;
   }
+
+  /* create an endpoint */
+  spawn_net_type type = spawn_net_infer_type(server_name);
+  global_ep = spawn_net_open(type);
 
   /* connect to server */
   server_ch = spawn_net_connect(server_name);
@@ -111,6 +116,9 @@ int PMI_Finalize( void )
 
   /* disconnect from parent */
   spawn_net_disconnect(&server_ch);
+
+  /* close down our endpoint */
+  spawn_net_close(&global_ep);
 
   return rc;
 }
