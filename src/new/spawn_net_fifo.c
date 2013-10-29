@@ -12,18 +12,98 @@
 
 #include "spawn_internal.h"
 
+/* This transport can be used for procs on the same node.  As a single
+ * receiving endpoint, each process creates a FIFO named pipe that it
+ * opens as O_RDONLY.  It encodes the file name of the pipe as its
+ * endpoint name.  In spawn_net_connect, any process may open the
+ * pipe for writing.  The read end is opened as O_NONBLOCK so that
+ * a process does not block in open waiting for a writer when
+ * opening the pipe.  This also means that a read call may return
+ * 0 or errno=EAGAIN if there is no data in the pipe.
+ *
+ * Messages are constructed as variable length packets, up to a max
+ * size of PIPE_BUF.  Writes to the pipe are atomic so long as
+ * the write size is no bigger than PIPE_BUF.  Beyond this size, bytes
+ * written by one process may be interleaved with bytes written by
+ * another process.  Messages larger than PIPE_BUF size are broken
+ * into multiple packets all of which are are most PIPE_BUF bytes long.
+ * POSIX ensures that PIPE_BUF is at least 512 bytes, but Linux uses
+ * something like 4096.
+ *
+ * The packet consists of 3 uint64_t fields followed by 0 or more
+ * (up to PIPE_BUF - 3*8) bytes of data payload.  The header fields
+ * are written in network order and consist of:
+ *   packet type,
+ *   source id,
+ *   and payload size in bytes.
+ *
+ * There are four packet types:
+ *   PKT_CONNECT    - sent to request a new connection
+ *   PKT_ACCEPT     - sent to accept a new connection
+ *   PKT_MESSAGE    - carries message data
+ *   PKT_DISCONNECT - sent to end a connection
+ *
+ * Since multiple procs may write to the endpoint, the receiver
+ * uses the source id to distinguish among senders.  The sender
+ * specifies a uint64_t id assigned to it by the receiver
+ * when the connection was established.  Both the sender and receiver
+ * cache this id as part of the spawn_net_channel state.  Thus, each
+ * channel caches a read id (used to identify incoming messages as
+ * belonging to the channel) and a write id (written as source field
+ * on outgoing messages of that channel).
+ *
+ * When requesting a new connection, the requestor sends the id the
+ * acceptor should use when sending messages back to the requestor
+ * on the accepted connection.  It also sends the endpoint name of
+ * the requestor's pipe.  Both items are packed as payload data in a
+ * PKT_CONNECT message.  When accepting a connection, the acceptor
+ * sends a PKT_ACCEPT message to the requestor whose data payload
+ * specifies the id that the requestor should when sending messages
+ * to the acceptor on the accepted channel.  The PKT_DISCONNECT
+ * message has no payload.  Thus the different messages look
+ * like the following:
+ *
+ * Connect: PKT_CONNECT, src ignored, size, data=(id, pipe name)
+ * Accept: PKT_ACCEPT, src id from connect, size, data=(id)
+ * Message: PKT_MESSAGE, src id from connect or accept, size, data
+ * Disconnect: PKT_DISCONNECT, src id from connect or accept, size=0
+ *
+ * Linux pipes have a limitted capacity.  Since multiple procs may
+ * write to the pipe, a process eagerly reads packets from its pipe
+ * and appends them to a queue in order to avoid head-of-queue deadlock.
+ * The packet queue is searched when matching packets on a
+ * spawn_net_read call.  A packet data structure provides access to
+ * the header fields along with a pointer to the data payload (if any).
+ * Functions exist to extract packets from the queue.  The pipe is
+ * drained frequently in order to avoid blocking writers.
+ *
+ * If the read end of a pipe is closed while some procs still have
+ * the pipe open for writing, the procs that can write to the pipe
+ * are passed SIGPIPE.  In order to avoid this signal, the read end
+ * of a pipe is not closed until all connections have been closed.
+ * Two global reference counts are kept with each pipe.  One counts
+ * the number of times a process has opened its endpoint with
+ * spawn_net_open and decrements the count each time spawn_net_close
+ * is called (g_open_count).  The second (g_writer_count) counts the
+ * number of active connections, and it decrements each time a remote
+ * task calls spawn_net_disconnect.  A pipe is not unlinked on
+ * spawn_net_close until both counts are 0.  The final call to
+ * spawn_net_close blocks until a process receives disconnect messages
+ * from all open procs. */
+
 /* using current API and FIFOs we can only have one receiving
  * FIFO, so store it as a global */
-static char* g_name = NULL;
-static char* g_path = NULL;
-static int g_fd     = -1;
-static int g_open_count   = 0;
-static int g_writer_count = 0;
-static uint64_t g_next_id = 1;
+static char* g_name = NULL;    /* name of our read pipe */
+static char* g_path = NULL;    /* path of our read pipe */
+static int g_fd     = -1;      /* file descriptor of our read pipe */
+static int g_open_count   = 0; /* number of times proc has opened read pipe */
+static int g_writer_count = 0; /* number of procs holding active connections to read pipe */
+static uint64_t g_next_id = 1; /* start assigning ids at 1, increment with each new connection */
 
 /* packet header is 3 unit64_t fields: type, src, size */
 const static size_t HDR_SIZE = 3 * 8;
 
+/* TODO: could make this an enum */
 /* packet types */
 const static uint64_t PKT_NULL       = 0;
 const static uint64_t PKT_CONNECT    = 1;
@@ -39,26 +119,28 @@ typedef struct spawn_packet_t {
   struct spawn_packet_t* next /* pointer used for queue linked list */
 } spawn_packet;
 
+/* packet queue */
 static spawn_packet* queue_head = NULL;
 static spawn_packet* queue_tail = NULL;
 
+/* structure allocated and stored as extra state in spawn_net_endpoint */
 typedef struct spawn_epdata_t {
-  int fd;
+  int fd; /* file descriptor of our read pipe */
 } spawn_epdata;
 
+/* structure allocated and stored as extra state in spawn_net_channel */
 typedef struct spawn_chdata_t {
-  int readfd;
-  int readid;
-  int writefd;
-  int writeid;
-  char* readname;
-  char* writename;
+  int readfd;  /* file descriptor of pipe we read for this channel */
+  int readid;  /* id to identify packets as belonging to this channel */
+  int writefd; /* file descriptor of pipe we write to for this channel */
+  int writeid; /* id to assign to packets we write */
+  char* readname;  /* name of read pipe */
+  char* writename; /* name of write pipe */
 } spawn_chdata;
 
-/* TODO: keep linked list of messages */
-
-/* TODO: chunk data up into packets of size PIPE_BUF for read/write */
-
+/* reads size bytes from file descriptor and stores in buf,
+ * retries read on EINTR, returns SPAWN_SUCCESS if valid,
+ * returns SPAWN_FAILURE and sets errno otherwise */
 static int reliable_read(const char* name, int fd, void* buf, size_t size)
 {
   /* read from fifo */
@@ -92,6 +174,8 @@ static int reliable_read(const char* name, int fd, void* buf, size_t size)
   return SPAWN_SUCCESS;
 }
 
+/* blocking write size bytes in buf to file descriptor,
+ * retries on EINTR or EAGAIN */
 static int reliable_write(const char* name, int fd, const void* buf, size_t size)
 {
   /* write to socket */
@@ -120,6 +204,7 @@ static int reliable_write(const char* name, int fd, const void* buf, size_t size
   return SPAWN_SUCCESS;
 }
 
+/* allocate and initialize fields of a new packet data structure */
 static spawn_packet* packet_new()
 {
   /* allocate a new packet */
@@ -135,6 +220,7 @@ static spawn_packet* packet_new()
   return p;
 }
 
+/* free a packet data structure and its associated memory */
 static int packet_free(spawn_packet** ppacket)
 {
   /* don't need to do anything if we got a NULL value */
@@ -155,6 +241,8 @@ static int packet_free(spawn_packet** ppacket)
   return SPAWN_SUCCESS;
 }
 
+/* attempt to read one packet from pipe, returns newly allocated packet
+ * if one exists, NULL otherwise */
 static spawn_packet* packet_poll(const char* name, int fd)
 {
   /* read the header */
@@ -200,6 +288,7 @@ static spawn_packet* packet_poll(const char* name, int fd)
   return p;
 }
 
+/* drain all packets from pipe and append to packet queue */
 static void queue_progress()
 {
   /* pull all incoming packets and append to queue */
@@ -233,6 +322,8 @@ static void queue_progress()
   return;
 }
 
+/* given pointer to current packet and one before it in queue,
+ * extract current packet from queue */
 static void queue_extract(spawn_packet* prev, spawn_packet* curr)
 {
   if (queue_head == curr) {
@@ -262,6 +353,7 @@ static void queue_extract(spawn_packet* prev, spawn_packet* curr)
   return;
 }
 
+/* determine whether specified packet matches type and source id */
 static int packet_match(spawn_packet* p, uint64_t type, uint64_t src)
 {
   /* assume packet does not match */
@@ -281,6 +373,7 @@ static int packet_match(spawn_packet* p, uint64_t type, uint64_t src)
   return match;
 }
 
+/* block until a matching packet is extracted from queue */
 static spawn_packet* packet_read(const char* name, int fd, uint64_t type, uint64_t src)
 {
   /* we set p to the matched packet when we find it */
@@ -345,6 +438,7 @@ static spawn_packet* packet_read(const char* name, int fd, uint64_t type, uint64
   return p;
 }
 
+/* create a named pipe FIFO and open it for reading */
 spawn_net_endpoint* spawn_net_open_fifo()
 {
   /* create fifo file if needed */
@@ -393,6 +487,8 @@ spawn_net_endpoint* spawn_net_open_fifo()
   return ep;
 }
 
+/* closed a named pipe opened for reading, unlink it if there are no
+ * more references to it */
 int spawn_net_close_fifo(spawn_net_endpoint** pep)
 {
   /* check that we got a valid pointer */
@@ -446,6 +542,7 @@ int spawn_net_close_fifo(spawn_net_endpoint** pep)
   return SPAWN_SUCCESS;
 }
 
+/* open a named pipe for writing */
 static int open_for_write(const char* name)
 {
   /* verify that the address string starts with correct prefix */
@@ -468,6 +565,8 @@ static int open_for_write(const char* name)
   return fd;
 }
 
+/* send connection request to named endpoint, wait for
+ * accept message as reply and return new connection */
 spawn_net_channel* spawn_net_connect_fifo(const char* name)
 {
   /* open FIFO for writing */
@@ -548,6 +647,8 @@ spawn_net_channel* spawn_net_connect_fifo(const char* name)
   return ch;
 }
 
+/* accept a connection request and reply with accept message,
+ * return newly created connection */
 spawn_net_channel* spawn_net_accept_fifo(const spawn_net_endpoint* ep)
 {
   /* get FIFO endpoint data */
@@ -636,6 +737,7 @@ spawn_net_channel* spawn_net_accept_fifo(const spawn_net_endpoint* ep)
   return ch;
 }
 
+/* send disconnect message on channel and close write end of pipe */
 int spawn_net_disconnect_fifo(spawn_net_channel** pch)
 {
   /* check that we got a valid pointer */
@@ -692,6 +794,7 @@ int spawn_net_disconnect_fifo(spawn_net_channel** pch)
   return SPAWN_SUCCESS;
 }
 
+/* read sizes bytes of data from channel into buffer */
 int spawn_net_read_fifo(const spawn_net_channel* ch, void* buf, size_t size)
 {
   /* get FIFO channel data */
@@ -734,6 +837,7 @@ int spawn_net_read_fifo(const spawn_net_channel* ch, void* buf, size_t size)
   return rc;
 }
 
+/* write size bytes from buffer into channel */
 int spawn_net_write_fifo(const spawn_net_channel* ch, const void* buf, size_t size)
 {
   /* get FIFO channel data */
