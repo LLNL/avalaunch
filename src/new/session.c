@@ -400,16 +400,19 @@ static void pmi_exchange(struct session_t* s, const strmap* params, const spawn_
     /* allocate a channel for each child */
     spawn_net_channel** chs = (spawn_net_channel**) SPAWN_MALLOC(numprocs * sizeof(spawn_net_channel*));
 
-    /* wait for signal from root before we start PMI exchange */
-    if (!rank) { tid = begin_delta("pmi init"); }
-    signal_from_root(s);
-
-    signal_from_root(s);
     /* wait for children to connect */
+    if (!rank) { tid = begin_delta("pmi accept"); }
+    signal_from_root(s);
     for (i = 0; i < numprocs; i++) {
-        /* wait for connect */
         chs[i] = spawn_net_accept(ep);
+    }
+    signal_to_root(s);
+    if (!rank) { end_delta(tid); }
 
+    /* send init data to children */
+    if (!rank) { tid = begin_delta("pmi init info"); }
+    signal_from_root(s);
+    for (i = 0; i < numprocs; i++) {
         /* since each spawn proc is creating the same number of tasks,
          * we can hardcode a child rank relative to the spawn rank */
         int child_rank = rank * numprocs + i;
@@ -422,16 +425,12 @@ static void pmi_exchange(struct session_t* s, const strmap* params, const spawn_
         spawn_net_write_strmap(chs[i], init);
         strmap_delete(&init);
     }
-
-    /* signal root to let it know PMI init has completed */
     signal_to_root(s);
     if (!rank) { end_delta(tid); }
 
-    /* wait for signal from root before we start PMI exchange */
+    /* wait for BARRIER messages */
     if (!rank) { tid = begin_delta("pmi read children"); }
     signal_from_root(s);
-
-    /* wait for BARRIER messages */
     for (i = 0; i < numprocs; i++) {
         spawn_net_channel* ch = chs[i];
         char* cmd = spawn_net_read_str(ch);
@@ -439,23 +438,17 @@ static void pmi_exchange(struct session_t* s, const strmap* params, const spawn_
         spawn_net_read_strmap(ch, pmi_strmap);
         spawn_free(&cmd);
     }
-
-    /* signal root to let it know PMI read has completed */
     signal_to_root(s);
     if (!rank) { end_delta(tid); }
-
-    /* wait for signal from root before we start PMI exchange */
-    if (!rank) { tid = begin_delta("pmi allgather"); }
-    signal_from_root(s);
 
     /* allgather strmaps across spawn processes */
+    if (!rank) { tid = begin_delta("pmi allgather"); }
+    signal_from_root(s);
     allgather_strmap(pmi_strmap, s);
-
-    /* signal root to let it know PMI allgather has completed */
     signal_to_root(s);
     if (!rank) { end_delta(tid); }
 
-    /* wait for signal from root before we start PMI exchange */
+    /* wait for signal before starting next phase */
     if (!rank) { tid = begin_delta("pmi write children"); }
     signal_from_root(s);
 
@@ -494,11 +487,9 @@ static void pmi_exchange(struct session_t* s, const strmap* params, const spawn_
     signal_to_root(s);
     if (!rank) { end_delta(tid); }
 
-    /* wait for signal from root before we start PMI exchange */
+    /* wait for FINALIZE */
     if (!rank) { tid = begin_delta("pmi finalize"); }
     signal_from_root(s);
-
-    /* wait for FINALIZE */
     for (i = 0; i < numprocs; i++) {
         spawn_net_channel* ch = chs[i];
         char* cmd = spawn_net_read_str(ch);
@@ -506,8 +497,6 @@ static void pmi_exchange(struct session_t* s, const strmap* params, const spawn_
         spawn_net_disconnect(&chs[i]);
         spawn_free(&cmd);
     }
-
-    /* signal root to let it know PMI finalize has completed */
     signal_to_root(s);
     if (!rank) { end_delta(tid); }
 
