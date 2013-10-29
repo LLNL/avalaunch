@@ -10,11 +10,12 @@ hosts=`glob-hosts -s $num -e -a -h 'apex[41-231,233-240,586-719,726-859,861-863,
 echo $hosts
 #exit 0
 
-export MV2_SPAWN_DEGREE=64
-export MV2_SPAWN_PPN=1
-export MV2_SPAWN_PMI=0
+#export MV2_SPAWN_SH=ssh # use ssh to launch spawn procs
+export MV2_SPAWN_DEGREE=64 # degree of k-ary tree
+export MV2_SPAWN_PPN=1     # number of app procs per node
 
 export MV2_SPAWN_EXE=src/new/examples/pmi_test
-export MV2_SPAWN_PMI=1
+export MV2_SPAWN_PMI=1   # whether to enable PMI
+#export MV2_SPAWN_FIFO=1 # whether to use FIFO vs TCP for PMI
 
 src/new/launcher $hosts
