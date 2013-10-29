@@ -15,3 +15,7 @@ export CFLAGS="-g -O0"
 make
 
 make VERBOSE=1 V=1 install
+
+pushd src/new/examples
+  make
+popd
