@@ -13,6 +13,14 @@
 
 static int spawn_net_tcp_backlog = 64;
 
+typedef struct spawn_epdata_t {
+    int fd; /* file descriptor of listening socket */
+} spawn_epdata;
+
+typedef struct spawn_chdata_t {
+    int fd; /* file descriptor of connected TCP socket */
+} spawn_chdata;
+
 static int reliable_read(const char* name, int fd, void* buf, size_t size)
 {
   /* read from socket */
@@ -196,13 +204,17 @@ spawn_net_endpoint* spawn_net_open_tcp()
   int host_len = (int) strlen(hostname);
   char* name = SPAWN_STRDUPF("TCP:%d:%s:%s:%u", host_len, hostname, inet_ntoa(ip), (unsigned int) port);
 
+  /* allocate TCP-specific endpoint data structure */
+  spawn_epdata* epdata = (spawn_epdata*) SPAWN_MALLOC(sizeof(spawn_epdata));
+  epdata->fd = fd;
+
   /* allocate and endpoint structure */
   spawn_net_endpoint* ep = (spawn_net_endpoint*) SPAWN_MALLOC(sizeof(spawn_net_endpoint));
 
   /* store values in endpoint struct */
   ep->type = SPAWN_NET_TYPE_TCP;
   ep->name = name;
-  ep->data = (void*)fd;
+  ep->data = (void*)epdata;
 
   return ep;
 }
@@ -218,11 +230,19 @@ int spawn_net_close_tcp(spawn_net_endpoint** pep)
   /* get pointer to endpoint */
   spawn_net_endpoint* ep = *pep;
 
-  /* close the socket */
-  int fd = (int) ep->data;
-  if (fd > 0) {
-    close(fd);
+  /* get pointer to TCP-specific endpoint data structure */
+  spawn_epdata* epdata = (spawn_epdata*) ep->data;
+
+  if (epdata != NULL) {
+    /* close the socket */
+    int fd = epdata->fd;
+    if (fd > 0) {
+      close(fd);
+    }
   }
+
+  /* free the TCP-specific data */
+  spawn_free(&ep->data);
 
   /* free the name string */
   spawn_free(&ep->name);
@@ -351,19 +371,27 @@ spawn_net_channel* spawn_net_connect_tcp(const char* name)
     return SPAWN_NET_CHANNEL_NULL;
   }
 
+  /* allocate TCP-specific channel data */
+  spawn_chdata* chdata = (spawn_chdata*) SPAWN_MALLOC(sizeof(spawn_chdata));
+  chdata->fd = fd;
+
   /* allocate a channel structure */
   spawn_net_channel* ch = (spawn_net_channel*) SPAWN_MALLOC(sizeof(spawn_net_channel));
 
   ch->type = SPAWN_NET_TYPE_TCP;
   ch->name = ch_name;
-  ch->data = (void*)fd;
+  ch->data = (void*)chdata;
 
   return ch;
 }
 
 spawn_net_channel* spawn_net_accept_tcp(const spawn_net_endpoint* ep)
 {
-  int listenfd = (int)ep->data;
+  /* get pointer to TCP-specific endpoint data structure */
+  spawn_epdata* epdata = (spawn_epdata*) ep->data;
+
+  /* get listening socket */
+  int listenfd = epdata->fd;
 
   /* accept an incoming connection request */
   struct sockaddr incoming_addr;
@@ -415,13 +443,17 @@ spawn_net_channel* spawn_net_accept_tcp(const spawn_net_endpoint* ep)
   spawn_free(&local_name);
   spawn_free(&remote);
 
+  /* allocate TCP-specific channel data */
+  spawn_chdata* chdata = (spawn_chdata*) SPAWN_MALLOC(sizeof(spawn_chdata));
+  chdata->fd = fd;
+
   /* allocate channel structure */
   spawn_net_channel* ch = (spawn_net_channel*) SPAWN_MALLOC(sizeof(spawn_net_channel));
 
   /* set channel parameters */
   ch->type = SPAWN_NET_TYPE_TCP;
   ch->name = ch_name;
-  ch->data = (void*)fd;
+  ch->data = (void*)chdata;
 
   return ch;
 }
@@ -436,11 +468,19 @@ int spawn_net_disconnect_tcp(spawn_net_channel** pch)
   /* get pointer to channel */
   spawn_net_channel* ch = *pch;
 
-  /* close the socket */
-  int fd = (int) ch->data;
-  if (fd > 0) {
-    close(fd);
+  /* get pointer to TCP-specific channel data */
+  spawn_chdata* chdata = (spawn_chdata*) ch->data;
+
+  if (chdata != NULL) {
+    /* close the socket */
+    int fd = chdata->fd;
+    if (fd > 0) {
+      close(fd);
+    }
   }
+
+  /* free the TCP-specific channel data */
+  spawn_free(&ch->data);
 
   /* free the name string */
   spawn_free(&ch->name);
@@ -456,8 +496,11 @@ int spawn_net_disconnect_tcp(spawn_net_channel** pch)
 
 int spawn_net_read_tcp(const spawn_net_channel* ch, void* buf, size_t size)
 {
+  /* get pointer to TCP-specific channel data */
+  spawn_chdata* chdata = (spawn_chdata*) ch->data;
+
   /* close the socket */
-  int fd = (int) ch->data;
+  int fd = chdata->fd;
   if (fd > 0) {
     return reliable_read(ch->name, fd, buf, size);
   }
@@ -466,8 +509,11 @@ int spawn_net_read_tcp(const spawn_net_channel* ch, void* buf, size_t size)
 
 int spawn_net_write_tcp(const spawn_net_channel* ch, const void* buf, size_t size)
 {
+  /* get pointer to TCP-specific channel data */
+  spawn_chdata* chdata = (spawn_chdata*) ch->data;
+
   /* write to socket */
-  int fd = (int) ch->data;
+  int fd = chdata->fd;
   if (fd > 0) {
     return reliable_write(ch->name, fd, buf, size);
   }
