@@ -461,6 +461,7 @@ spawn_net_endpoint* spawn_net_open_fifo()
     g_fd = open(g_path, O_RDONLY | O_NONBLOCK);
     if (g_fd < 0) {
       SPAWN_ERR("Failed to open fifo at '%s'", g_path);
+      unlink(g_path);
       spawn_free(&g_path);
       spawn_free(&g_name);
       return SPAWN_NET_ENDPOINT_NULL;
