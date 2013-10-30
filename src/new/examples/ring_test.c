@@ -27,5 +27,9 @@ int main(int argc, char* argv[])
   fflush(stdout);
 #endif
 
+  /* free left and right strings allocated in ring_create */
+  free(left);
+  free(right);
+
   return 0;
 }

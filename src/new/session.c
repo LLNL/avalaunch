@@ -375,6 +375,255 @@ static void allgather_strmap(strmap* map, const struct session_t* s)
     return;
 }
 
+static void ring_scan(strmap* input, strmap* output, const spawn_tree* t)
+{
+    int i;
+    int children = t->children;
+    spawn_net_channel* parent_ch = t->parent_ch;
+
+    /* allocate strmap for each child */
+    strmap** maps  = (strmap**) SPAWN_MALLOC(children * sizeof(strmap*));
+    for (i = 0; i < children; i++) {
+        maps[i] = strmap_new();
+    }
+
+    /* gather input from children if we have any */
+    for (i = 0; i < children; i++) {
+        spawn_net_channel* ch = t->child_chs[i];
+        spawn_net_read_strmap(ch, maps[i]);
+    }
+
+    /* compute our leftmost and right most address */
+    const char* leftmost  = strmap_get(input, "LEFT");
+    const char* rightmost = NULL;
+    for (i = 0; i < children; i++) {
+        /* scan children left-to-right for leftmost value */
+        if (leftmost == NULL) {
+            leftmost = strmap_get(maps[i], "LEFT");
+        }
+
+        /* scan children right-to-left for rightmost value */
+        if (rightmost == NULL) {
+            int right_index = children - 1 - i;
+            rightmost = strmap_get(maps[right_index], "RIGHT");
+        }
+    }
+    if (rightmost == NULL) {
+        rightmost = strmap_get(input, "RIGHT");
+    }
+
+    strmap* recv = strmap_new();
+    if (parent_ch != SPAWN_NET_CHANNEL_NULL) {
+        /* construct strmap to send to parent */
+        strmap* send = strmap_new();
+        if (leftmost != NULL && rightmost != NULL) {
+            strmap_set(send, "LEFT",  leftmost);
+            strmap_set(send, "RIGHT", rightmost);
+        }
+        spawn_net_write_strmap(parent_ch, send);
+        strmap_delete(&send);
+
+        /* receive map from parent */
+        spawn_net_read_strmap(parent_ch, recv);
+    } else {
+        /* we are the root, so build recv,
+         * note that we wrap the ends to create a ring */
+        if (leftmost != NULL && rightmost != NULL) {
+            strmap_set(recv, "LEFT",  rightmost);
+            strmap_set(recv, "RIGHT", leftmost);
+        }
+    }
+
+    /* TODO: handle empty maps */
+
+    /* send output to each child */
+    for (i = 0; i < children; i++) {
+        spawn_net_channel* ch = t->child_chs[i];
+
+        /* construct strmap to send to child */
+        strmap* send = strmap_new();
+
+        const char* left;
+        if (i == 0) {
+            /* first child uses right address from us, its parent */
+            left = strmap_get(input, "RIGHT");
+        } else {
+            /* otherwise, use right address of child's left sibling */
+            left = strmap_get(maps[i-1], "RIGHT");
+        }
+        strmap_set(send, "LEFT", left);
+
+        const char* right;
+        if (i < children-1) {
+            /* get left address on child's right sibling */
+            right = strmap_get(maps[i+1], "LEFT");
+        } else {
+            /* for last child, get the address our parent says is our right */
+            right = strmap_get(recv, "RIGHT");
+        }
+        strmap_set(send, "RIGHT", right);
+
+        spawn_net_write_strmap(ch, send);
+        strmap_delete(&send);
+    }
+
+    /* set left address in our output */
+    const char* left  = strmap_get(recv, "LEFT");
+    strmap_set(output, "LEFT", left);
+
+    /* set right address in our output */
+    const char* right = strmap_get(recv, "RIGHT");
+    if (children > 0) {
+        /* use left address of our first child if we have one */
+        right = strmap_get(maps[0], "LEFT");
+    }
+    strmap_set(output, "RIGHT", right);
+
+    /* delete map from parent */
+    strmap_delete(&recv);
+
+    /* delete strmaps */
+    for (i = 0; i < children; i++) {
+        strmap_delete(&maps[i]);
+    }
+    spawn_free(&maps);
+
+    return;
+}
+
+static void ring_exchange(struct session_t* s, const strmap* params, const spawn_net_endpoint* ep)
+{
+    int i, tid, tid_ring;
+    spawn_tree* t = s->tree;
+    int rank = t->rank;
+
+    /* wait for signal from root before we start exchange */
+    if (!rank) { tid_ring = begin_delta("ring exchange"); }
+    signal_from_root(s);
+
+    /* get number of procs we should here from */
+    const char* app_procs_str = strmap_get(params, "PPN");
+    int numprocs = atoi(app_procs_str);
+
+    /* get total number of procs in job */
+    int ranks = t->ranks * numprocs;
+
+    /* allocate a strmap for each child */
+    strmap** maps = (strmap**) SPAWN_MALLOC(numprocs * sizeof(strmap*));
+    for (i = 0; i < numprocs; i++) {
+        maps[i] = strmap_new();
+    }
+
+    /* allocate a channel for each child */
+    spawn_net_channel** chs = (spawn_net_channel**) SPAWN_MALLOC(numprocs * sizeof(spawn_net_channel*));
+
+    /* wait for children to connect */
+    if (!rank) { tid = begin_delta("ring accept"); }
+    signal_from_root(s);
+    for (i = 0; i < numprocs; i++) {
+        chs[i] = spawn_net_accept(ep);
+    }
+    signal_to_root(s);
+    if (!rank) { end_delta(tid); }
+
+    /* wait for address from each child */
+    if (!rank) { tid = begin_delta("ring read children"); }
+    signal_from_root(s);
+    for (i = 0; i < numprocs; i++) {
+        spawn_net_read_strmap(chs[i], maps[i]);
+    }
+    signal_to_root(s);
+    if (!rank) { end_delta(tid); }
+
+
+    /* compute scan on tree */
+    if (!rank) { tid = begin_delta("ring scan"); }
+    signal_from_root(s);
+
+    strmap* output = strmap_new();
+
+    /* get addresses of our left-most and right-most children */
+    strmap* input = strmap_new();
+    if (numprocs > 0) {
+        const char* leftmost  = strmap_get(maps[0], "ADDR");
+        const char* rightmost = strmap_get(maps[numprocs-1], "ADDR");
+        strmap_set(input, "LEFT",  leftmost);
+        strmap_set(input, "RIGHT", rightmost);
+    }
+
+    /* execute the scan */
+    ring_scan(input, output, t);
+
+    /* free the input */
+    strmap_delete(&input);
+
+    signal_to_root(s);
+    if (!rank) { end_delta(tid); }
+
+    /* compute left and right addresses for each of our children */
+    if (!rank) { tid = begin_delta("ring write children"); }
+    signal_from_root(s);
+    for (i = 0; i < numprocs; i++) {
+        /* since each spawn proc is creating the same number of tasks,
+         * we can hardcode a child rank relative to the spawn rank */
+        int child_rank = rank * numprocs + i;
+
+        /* send init info */
+        strmap* init = strmap_new();
+        strmap_setf(init, "RANK=%d",  child_rank);
+        strmap_setf(init, "RANKS=%d", ranks);
+
+        const char* left;
+        if (i == 0) {
+            /* get the address our parent says is our left */
+            left = strmap_get(output, "LEFT");
+        } else {
+            /* get rightmost address on left side */
+            left = strmap_get(maps[i-1], "ADDR");
+        }
+        strmap_set(init, "LEFT", left);
+
+        const char* right;
+        if (i < numprocs-1) {
+            /* get leftmost address on right side */
+            right = strmap_get(maps[i+1], "ADDR");
+        } else {
+            /* get the address our parent says is our right */
+            right = strmap_get(output, "RIGHT");
+        }
+        strmap_set(init, "RIGHT", right);
+
+        spawn_net_write_strmap(chs[i], init);
+        strmap_delete(&init);
+    }
+
+    /* delete strmap from parent */
+    strmap_delete(&output);
+
+    signal_to_root(s);
+    if (!rank) { end_delta(tid); }
+
+    /* disconnect from each child */
+    if (!rank) { tid = begin_delta("ring disconnect"); }
+    signal_from_root(s);
+    for (i = 0; i < numprocs; i++) {
+        spawn_net_disconnect(&chs[i]);
+    }
+    signal_to_root(s);
+    if (!rank) { end_delta(tid); }
+
+    /* delete each child strmap */
+    for (i = 0; i < numprocs; i++) {
+        strmap_delete(&maps[i]);
+    }
+
+    /* signal root to let it know PMI bcast has completed */
+    signal_to_root(s);
+    if (!rank) { end_delta(tid_ring); }
+
+    return;
+}
+
 static void pmi_exchange(struct session_t* s, const strmap* params, const spawn_net_endpoint* ep)
 {
     int i, tid, tid_pmi;
@@ -464,7 +713,7 @@ static void pmi_exchange(struct session_t* s, const strmap* params, const spawn_
         spawn_net_channel* ch = chs[i];
         char* cmd = spawn_net_read_str(ch);
         char* key = spawn_net_read_str(ch);
-        char* val = strmap_get(pmi_strmap, key);
+        const char* val = strmap_get(pmi_strmap, key);
         //printf("cmd=%s key=%s val=%s\n", cmd, key, val);
         spawn_net_write_str(ch, val);
         spawn_free(&key);
@@ -476,7 +725,7 @@ static void pmi_exchange(struct session_t* s, const strmap* params, const spawn_
         spawn_net_channel* ch = chs[i];
         char* cmd = spawn_net_read_str(ch);
         char* key = spawn_net_read_str(ch);
-        char* val = strmap_get(pmi_strmap, key);
+        const char* val = strmap_get(pmi_strmap, key);
         //printf("cmd=%s key=%s val=%s\n", cmd, key, val);
         spawn_net_write_str(ch, val);
         spawn_free(&key);
@@ -540,17 +789,21 @@ static void app_start(struct session_t* s, const strmap* params)
     const char* use_pmi_str = strmap_get(params, "PMI");
     int use_pmi = atoi(use_pmi_str);
 
+    /* check flag for whether we should initiate RING exchange */
+    const char* use_ring_str = strmap_get(params, "RING");
+    int use_ring = atoi(use_ring_str);
+
     /* check for flag on whether we should use FIFO */
-    const char* use_pmi_fifo_str = strmap_get(params, "FIFO");
-    int use_pmi_fifo = atoi(use_pmi_fifo_str);
+    const char* use_fifo_str = strmap_get(params, "FIFO");
+    int use_fifo = atoi(use_fifo_str);
 
     /* create endpoint for PMI */
-    if (!rank) { tid = begin_delta("open pmi endpoint"); }
+    if (!rank) { tid = begin_delta("open init endpoint"); }
     signal_from_root(s);
     spawn_net_endpoint* ep = s->ep;
     const char* ep_name = spawn_net_name(ep);
-    if (use_pmi) {
-      if (use_pmi_fifo) {
+    if (use_pmi || use_ring) {
+      if (use_fifo) {
         ep = spawn_net_open(SPAWN_NET_TYPE_FIFO);
         ep_name = spawn_net_name(ep);
       }
@@ -575,12 +828,15 @@ static void app_start(struct session_t* s, const strmap* params)
     if (use_pmi) {
         pmi_exchange(s, params, ep);
     }
+    if (use_ring) {
+        ring_exchange(s, params, ep);
+    }
 
     /* close PMI channels */
-    if (!rank) { tid = begin_delta("close pmi endpoint"); }
+    if (!rank) { tid = begin_delta("close init endpoint"); }
     signal_from_root(s);
-    if (use_pmi) {
-      if (use_pmi_fifo) {
+    if (use_pmi || use_ring) {
+      if (use_fifo) {
         spawn_net_close(&ep);
       }
     }
@@ -925,7 +1181,15 @@ session_start (struct session_t * s)
             strmap_set(appmap, "PMI", "0");
         }
 
-        /* detect whether we should use FIFO for PMI */
+        /* detect whether we should run RING exchange */
+        value = getenv("MV2_SPAWN_RING");
+        if (value != NULL) {
+            strmap_set(appmap, "RING", value);
+        } else {
+            strmap_set(appmap, "RING", "0");
+        }
+
+        /* detect whether we should use FIFO on node exchange */
         value = getenv("MV2_SPAWN_FIFO");
         if (value != NULL) {
             strmap_set(appmap, "FIFO", value);
