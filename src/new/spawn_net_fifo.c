@@ -116,7 +116,7 @@ typedef struct spawn_packet_t {
   uint64_t src;  /* sender id */
   uint64_t size; /* payload size in bytes */
   char* data;    /* pointer to packet payload */
-  struct spawn_packet_t* next /* pointer used for queue linked list */
+  struct spawn_packet_t* next; /* pointer used for queue linked list */
 } spawn_packet;
 
 /* packet queue */
