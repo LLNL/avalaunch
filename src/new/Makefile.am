@@ -1,6 +1,6 @@
 ACLOCAL_AMFLAGS = -I m4
 
-include_HEADERS = pmi.h
+include_HEADERS = pmi.h ring.h
 bin_PROGRAMS = launcher
 lib_LTLIBRARIES = libpmi.la
 
@@ -28,4 +28,5 @@ libpmi_la_SOURCES = \
   spawn_net_util.c spawn_net_util.h \
   spawn_util.c spawn_util.h \
   strmap.c strmap.h \
+  ring.c ring.h \
   pmi.c pmi.h
