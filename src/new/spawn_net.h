@@ -76,7 +76,7 @@ int spawn_net_chgrp_getsize(spawn_net_channel_group* chgrp);
 int spawn_net_chgrp_add(spawn_net_channel_group* chgrp, spawn_net_channel* ch);
 
 /* multicast a message to all end-points connected via channel group  */
-int spawn_net_mcast(const void* buf,
+int spawn_net_mcast(void* buf,
                     size_t size,
                     spawn_net_channel* parent_ch,
                     spawn_net_channel_group* chgrp,
