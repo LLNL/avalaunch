@@ -475,7 +475,7 @@ spawn_net_channel* mv2_ep_connect(const char *name)
     }
 
     ch = SPAWN_MALLOC(sizeof(spawn_net_channel));
-    ch->name = SPAWN_MALLOC(sizeof(char)*16);
+    ch->name = SPAWN_MALLOC(sizeof(char)*RDMA_CONNECTION_INFO_LEN);
     ch->data = SPAWN_MALLOC(sizeof(mv2_ud_exch_info_t));
     if (NULL == ch || NULL == ch->name || NULL == ch->data) {
         fprintf(stderr, "Unable to malloc spawn_net_channel");
