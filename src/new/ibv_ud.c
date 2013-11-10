@@ -10,12 +10,19 @@
  *
  */
 
-#include "rdma_impl.h"
 #include "vbuf.h"
+#include <ib_internal.h>
 
+#ifdef _ENABLE_UD_
 #include "mv2_ud.h"
 #include "mv2_ud_inline.h"
 #include <debug_utils.h>
+
+long rdma_ud_last_check;
+int my_pg_rank;
+int my_pg_size;
+
+extern mv2_proc_info_t proc;
 
 static inline void mv2_ud_flush_ext_window(MPIDI_VC_t *vc)
 {
@@ -24,7 +31,7 @@ static inline void mv2_ud_flush_ext_window(MPIDI_VC_t *vc)
     while (q->head != NULL && 
             vc->mrail.ud.send_window.count < rdma_default_ud_sendwin_size) {
         next = (q->head)->extwin_msg.next;
-        mv2_MPIDI_CH3I_RDMA_Process.post_send(vc, q->head, (q->head)->rail);
+        proc.post_send(vc, q->head, (q->head)->rail, NULL);
         PRINT_DEBUG(DEBUG_UD_verbose>1,"Send ext window message(%p) nextseqno :"
                 "%d\n", next, vc->mrail.seqnum_next_tosend);
         q->head = next;
@@ -32,7 +39,7 @@ static inline void mv2_ud_flush_ext_window(MPIDI_VC_t *vc)
         vc->mrail.ud.ext_win_send_count++;
     }
     if (q->head == NULL) {
-        MPIU_Assert(q->count == 0);
+        assert(q->count == 0);
         q->tail = NULL;
     }
 }
@@ -46,7 +53,7 @@ static inline void mv2_ud_process_ack(MPIDI_VC_t *vc, uint16_t acknum)
             INCL_BETWEEN (acknum, sendwin_head->seqnum, vc->mrail.seqnum_next_tosend))
     {
         mv2_ud_send_window_remove(&vc->mrail.ud.send_window, sendwin_head);
-        mv2_ud_unack_queue_remove(&(mv2_MPIDI_CH3I_RDMA_Process.unack_queue), sendwin_head);
+        mv2_ud_unack_queue_remove(&(proc.unack_queue), sendwin_head);
         MRAILI_Process_send(sendwin_head);
         sendwin_head = vc->mrail.ud.send_window.head;
     }
@@ -117,14 +124,14 @@ int post_ud_send(MPIDI_VC_t* vc, vbuf* v, int rail, mv2_ud_ctx_t *send_ud_ctx)
     mv2_ud_ctx_t *ud_ctx = send_ud_ctx; 
     MPIDI_CH3I_MRAILI_Pkt_comm_header *p = v->pheader;
 
-    MPIU_Assert(v->desc.sg_entry.length <= MRAIL_MAX_UD_SIZE);
+    assert(v->desc.sg_entry.length <= MRAIL_MAX_UD_SIZE);
     if (send_ud_ctx == NULL ) {
-        ud_ctx = mv2_MPIDI_CH3I_RDMA_Process.ud_rails[rail];
+        ud_ctx = proc.ud_ctx;
     }
     v->vc = (void *)vc;
     p->rail = rail;
-    p->src.rank  = MPIDI_Process.my_pg_rank;
-    MPIU_Assert(v->transport == IB_TRANSPORT_UD);
+    p->src.rank  = PG_RANK;
+    assert(v->transport == IB_TRANSPORT_UD);
 
     SEND_WINDOW_CHECK(&vc->mrail.ud, v);
 
@@ -141,7 +148,7 @@ int post_ud_send(MPIDI_VC_t* vc, vbuf* v, int rail, mv2_ud_ctx_t *send_ud_ctx)
 
     IBV_UD_POST_SR(v, vc->mrail.ud, ud_ctx);
 
-    mv2_ud_track_send(&vc->mrail.ud, &mv2_MPIDI_CH3I_RDMA_Process.unack_queue, v);     
+    mv2_ud_track_send(&vc->mrail.ud, &proc.unack_queue, v);     
 
     return 0;
 }
@@ -152,10 +159,10 @@ void mv2_send_control_msg(MPIDI_VC_t *vc, vbuf *v)
     mv2_ud_ctx_t *ud_ctx;
     MPIDI_CH3I_MRAILI_Pkt_comm_header *p = v->pheader;
 
-    ud_ctx = mv2_MPIDI_CH3I_RDMA_Process.ud_rails[p->rail];
+    ud_ctx = proc.ud_ctx;
     v->vc = (void *)vc;
-    p->src.rank  = MPIDI_Process.my_pg_rank;
-    MPIU_Assert(v->transport == IB_TRANSPORT_UD);
+    p->src.rank  = my_pg_rank;
+    assert(v->transport == IB_TRANSPORT_UD);
 
     v->seqnum = p->seqnum = -1;
     MARK_ACK_COMPLETED(vc);
@@ -164,7 +171,6 @@ void mv2_send_control_msg(MPIDI_VC_t *vc, vbuf *v)
     IBV_UD_POST_SR(v, vc->mrail.ud, ud_ctx);
 
     vc->mrail.ud.cntl_acks++;
-
 }
 
 static inline void mv2_ud_ext_sendq_send(MPIDI_VC_t *vc, mv2_ud_ctx_t *ud_ctx)
@@ -188,10 +194,11 @@ static inline void mv2_ud_ext_sendq_send(MPIDI_VC_t *vc, mv2_ud_ctx_t *ud_ctx)
         PRINT_DEBUG(DEBUG_UD_verbose>1,"sending from ext send queue seqnum :%d qlen:%d\n", v->seqnum, ud_ctx->ext_send_queue.count);
     } 
 }
+
 void mv2_ud_update_send_credits(vbuf *v)
 {
     mv2_ud_ctx_t *ud_ctx;
-    ud_ctx = mv2_MPIDI_CH3I_RDMA_Process.ud_rails[v->rail];
+    ud_ctx = proc.ud_ctx;
     ud_ctx->send_wqes_avail++;
     PRINT_DEBUG(DEBUG_UD_verbose>2,"available wqes : %d seqno:%d \n",ud_ctx->send_wqes_avail, v->seqnum);
     if (NULL != ud_ctx->ext_send_queue.head 
@@ -203,11 +210,13 @@ void mv2_ud_update_send_credits(vbuf *v)
 void mv2_send_explicit_ack(MPIDI_VC_t *vc)
 {
     vbuf *v = get_ud_vbuf();
+
     MPIDI_CH3I_MRAILI_Pkt_comm_header *ack_pkt = v->pheader;
     MPIDI_Pkt_init(ack_pkt, MPIDI_CH3_PKT_FLOW_CNTL_UPDATE);
     ack_pkt->acknum = vc->mrail.seqnum_next_toack;
     vbuf_init_send(v, sizeof(MPIDI_CH3I_MRAILI_Pkt_comm_header), 0);
     ack_pkt->rail = v->rail;
+
     mv2_send_control_msg(vc, v);
     PRINT_DEBUG(DEBUG_UD_verbose>1,"Sent explicit ACK to :%d acknum:%d\n", vc->pg_rank, ack_pkt->acknum);
 }
@@ -237,16 +246,19 @@ void mv2_ud_resend(vbuf *v)
 
     p = v->pheader;
     vc = v->vc;
+#if 0
     if (p->type == MPIDI_CH3_PKT_ZCOPY_FINISH) {
         int found;
         int hca_index = ((MPIDI_CH3_Pkt_zcopy_finish_t *)p)->hca_index;
-        ud_ctx = mv2_MPIDI_CH3I_RDMA_Process.zcopy_info.rndv_ud_qps[hca_index];
+        ud_ctx = proc.zcopy_info.rndv_ud_qps[hca_index];
         do {
-            mv2_ud_zcopy_poll_cq(&mv2_MPIDI_CH3I_RDMA_Process.zcopy_info, 
+            mv2_ud_zcopy_poll_cq(&proc.zcopy_info, 
                                             ud_ctx, v, hca_index, &found);
         } while( ud_ctx->send_wqes_avail <=0 || found);
-    } else {
-        ud_ctx = mv2_MPIDI_CH3I_RDMA_Process.ud_rails[v->rail];
+    } else
+#endif
+    {
+        ud_ctx = proc.ud_ctx;
     }
     p->acknum = vc->mrail.seqnum_next_toack;
     MARK_ACK_COMPLETED(vc);
@@ -268,18 +280,6 @@ void MRAILI_Process_recv(vbuf *v)
     MPIDI_CH3I_MRAILI_Pkt_comm_header *p = v->pheader;
 
     mv2_ud_process_ack(v->vc, p->acknum);
-#ifdef _MV2_UD_DROP_PACKET_RATE_
-    static int drop_packet_seq = 0;
-    if (ud_drop_packet_rate && v->transport == IB_TRANSPORT_UD
-            && drop_packet_seq == ud_drop_packet_rate) {
-        drop_packet_seq = 0;
-        PRINT_DEBUG(DEBUG_UD_verbose>1,"UD Packet dropped.seqnum:%d\n",v->seqnum);
-        MPIDI_CH3I_MRAIL_Release_vbuf(v);
-        goto fn_exit;
-    } else if (v->transport == IB_TRANSPORT_UD) {
-        drop_packet_seq++;
-    }
-#endif
 
     if (IS_CNTL_MSG(p)) {
         PRINT_DEBUG(DEBUG_UD_verbose>1,"recv cntl message ack:%d \n", p->acknum);
@@ -296,5 +296,7 @@ fn_exit:
 
 void mv2_check_resend()
 {
-    mv2_ud_unackq_traverse(&mv2_MPIDI_CH3I_RDMA_Process.unack_queue);
+    mv2_ud_unackq_traverse(&proc.unack_queue);
 }
+
+#endif

@@ -9,355 +9,55 @@
  * copyright file COPYRIGHT in the top level MVAPICH2 directory.
  *
  */
+#include <spawn_net.h>
 #include <ib_internal.h>
+#include <mv2_ud.h>
+#include <mv2_ud_inline.h>
+#include <debug_utils.h>
 
+int num_rdma_buffer;
+int rdma_num_rails = 1;
+int rdma_num_hcas = 1;
+int rdma_vbuf_max = -1;
+int rdma_enable_hugepage = 1;
+int rdma_vbuf_total_size;
+uint16_t rdma_default_ud_mtu = 2048;
+uint8_t rdma_enable_hybrid = 1;
+uint8_t rdma_enable_only_ud = 0;
+uint8_t rdma_use_ud_zcopy = 1;
+int rdma_vbuf_secondary_pool_size = RDMA_VBUF_SECONDARY_POOL_SIZE;
+int rdma_max_inline_size = RDMA_DEFAULT_MAX_INLINE_SIZE;
+uint32_t rdma_default_max_ud_send_wqe = RDMA_DEFAULT_MAX_UD_SEND_WQE;
+uint32_t rdma_default_max_ud_recv_wqe = RDMA_DEFAULT_MAX_UD_RECV_WQE;
+uint32_t rdma_ud_num_msg_limit = RDMA_UD_NUM_MSG_LIMIT;
+uint32_t rdma_ud_vbuf_pool_size = RDMA_UD_VBUF_POOL_SIZE;
+/* Maximum number of outstanding buffers (waiting for ACK)*/
+uint32_t rdma_default_ud_sendwin_size = 400;
+/* Maximum number of out-of-order messages that will be buffered */
+uint32_t rdma_default_ud_recvwin_size = 2501;
+/* Time (usec) until ACK status is checked (and ACKs are sent) */
+long rdma_ud_progress_timeout = 48000;
+/* Time (usec) until a message is resent */
+long rdma_ud_retry_timeout = 500000;
+long rdma_ud_max_retry_timeout = 20000000;
+long rdma_ud_last_check;
+long rdma_ud_retransmissions=0;
+uint32_t rdma_ud_zcopy_threshold;
+uint32_t rdma_ud_zcopy_rq_size = 4096;
+uint32_t rdma_hybrid_enable_threshold = 1024;
+uint16_t rdma_ud_progress_spin = 1200;
+uint16_t rdma_ud_max_retry_count = 1000;
+uint16_t rdma_ud_max_ack_pending;
+uint16_t rdma_ud_num_rndv_qps = 64;
+uint16_t rdma_hybrid_max_rc_conn = 64;
+uint16_t rdma_hybrid_pending_rc_conn = 0;
+
+mv2_proc_info_t proc;
 mv2_hca_info_t g_hca_info;
-mv2_ud_ctx_t *ud_ctx;
+mv2_ud_exch_info_t local_ep_info;
+MPIDI_VC_t *ud_vc_info = NULL; 
 
-/* head of list of allocated vbuf regions */
-static vbuf_region *vbuf_region_head = NULL;
-
-static vbuf *ud_free_vbuf_head = NULL;
-int ud_vbuf_n_allocated = 0;
-long ud_num_free_vbuf = 0;
-long ud_num_vbuf_get = 0;
-long ud_num_vbuf_freed = 0;
-static pthread_spinlock_t vbuf_lock;
-
-/* ===== Beign: VBUF Related functions ===== */
-static int alloc_hugepage_region (int *shmid, void **buffer, int *nvbufs,
-                                  int buf_size)
-{
-    int ret = 0;
-    size_t size = *nvbufs * buf_size;
-    MRAILI_ALIGN_LEN(size, HUGEPAGE_ALIGN);
-
-    /* create hugepage shared region */
-    *shmid = shmget(IPC_PRIVATE, size, 
-                        SHM_HUGETLB | IPC_CREAT | SHM_R | SHM_W);
-    if (*shmid < 0) {
-        goto fn_fail;
-    }
-
-    /* attach shared memory */
-    *buffer = (void *) shmat(*shmid, SHMAT_ADDR, SHMAT_FLAGS);
-    if (*buffer == (void *) -1) {
-        goto fn_fail;
-    }
-    
-    /* Mark shmem for removal */
-    if (shmctl(*shmid, IPC_RMID, 0) != 0) {
-        fprintf(stderr, "Failed to mark shm for removal\n");
-    }
-    
-    /* Find max no.of vbufs can fit in allocated buffer */
-    *nvbufs = size / buf_size;
-     
-fn_exit:
-    return ret;
-fn_fail:
-    ret = -1;
-    fprintf(stderr,"Failed to allocate buffer from huge pages. "
-                   "fallback to regular pages. requested buf size:%lu\n", size);
-    goto fn_exit;
-}    
-
-static int allocate_ud_vbuf_region(int nvbufs)
-{
-    struct vbuf_region *reg = NULL;
-    void *mem = NULL;
-    int i = 0;
-    vbuf *cur = NULL;
-    void *vbuf_dma_buffer = NULL;
-    int alignment_vbuf = 64;
-    int alignment_dma = getpagesize();
-    int result = 0;
-
-    //PRINT_DEBUG(DEBUG_UD_verbose>0,"Allocating a UD buf region.\n");
-
-    if (ud_free_vbuf_head != NULL)
-    {
-        fprintf(stderr, "free_vbuf_head = NULL");
-        return -1;
-    }
-
-    reg = (struct vbuf_region *) SPAWN_MALLOC (sizeof(struct vbuf_region));
-
-    if (NULL == reg)
-    {
-        fprintf(stderr, "Unable to malloc a new struct vbuf_region");
-        return -1;
-    }
-    
-    {
-        result = alloc_hugepage_region(&reg->shmid, &vbuf_dma_buffer, &nvbufs,
-                                        RDMA_DEFAULT_UD_MTU);
-    }
-
-    /* do posix_memalign if enable hugepage disabled or failed */
-    if (result != 0 )  
-    {
-        reg->shmid = -1;
-        result = posix_memalign(&vbuf_dma_buffer, 
-            alignment_dma, nvbufs * RDMA_DEFAULT_UD_MTU);
-    }
-
-    if ((result!=0) || (NULL == vbuf_dma_buffer))
-    {
-        fprintf(stderr, "unable to malloc vbufs DMA buffer");
-        return -1;
-    }
-    
-    if (posix_memalign(
-                (void**) &mem,
-                alignment_vbuf,
-                nvbufs * sizeof(vbuf)))
-    {
-        fprintf(stderr, "[%s %d] Cannot allocate vbuf region\n", 
-                __FILE__, __LINE__);
-        return -1;
-    }
-
-    memset(mem, 0, nvbufs * sizeof(vbuf));
-    memset(vbuf_dma_buffer, 0, nvbufs * RDMA_DEFAULT_UD_MTU);
-
-    ud_free_vbuf_head       = mem;
-
-    ud_num_free_vbuf        += nvbufs;
-    ud_vbuf_n_allocated     += nvbufs;
-
-    reg->malloc_start       = mem;
-    reg->malloc_buf_start   = vbuf_dma_buffer;
-    reg->malloc_end         = (void *) ((char *) mem + nvbufs * sizeof(vbuf));
-    reg->malloc_buf_end     = (void *) ((char *) vbuf_dma_buffer + 
-                                nvbufs * RDMA_DEFAULT_UD_MTU);
-    reg->count              = nvbufs;
-    reg->vbuf_head          = ud_free_vbuf_head;
-
-#if 0
-    PRINT_DEBUG(DEBUG_UD_verbose>0,
-            "VBUF REGION ALLOCATION SZ %d TOT %d FREE %ld NF %ld NG %ld\n",
-            RDMA_DEFAULT_UD_MTU,
-            ud_vbuf_n_allocated,
-            ud_num_free_vbuf,
-            ud_num_vbuf_freed,
-            ud_num_vbuf_get);
-#endif
-
-    /* region should be registered with all hcas */
-    {
-        reg->mem_handle[i] = ibv_reg_mr(
-                g_hca_info.pd,
-                vbuf_dma_buffer,
-                nvbufs * RDMA_DEFAULT_UD_MTU,
-                IBV_ACCESS_LOCAL_WRITE);
-
-        if (!reg->mem_handle[i])
-        {
-            fprintf(stderr, "[%s %d] Cannot register vbuf region\n", 
-                    __FILE__, __LINE__);
-            return -1;
-        }
-    }
-
-    /* init the free list */
-    for (i = 0; i < nvbufs; ++i) {
-        cur                 = ud_free_vbuf_head + i;
-        cur->desc.next      = ud_free_vbuf_head + i + 1;
-        if (i == (nvbufs -1)) {
-            cur->desc.next  = NULL;
-        }
-        cur->region         = reg;
-        cur->head_flag      = (VBUF_FLAG_TYPE *) ((char *)vbuf_dma_buffer +
-                    (i + 1) * RDMA_DEFAULT_UD_MTU - sizeof * cur->head_flag);
-        cur->buffer         = (unsigned char *) ((char *)vbuf_dma_buffer +
-                                i * RDMA_DEFAULT_UD_MTU);
-        cur->eager          = 0;
-        cur->content_size   = 0;
-        cur->coalesce       = 0;
-    }
-
-    /* thread region list */
-    reg->next               = vbuf_region_head;
-    vbuf_region_head        = reg;
-
-    return 0;
-}
-
-static int allocate_ud_vbufs(int nvbufs)
-{
-    return allocate_ud_vbuf_region(nvbufs);
-}
-
-vbuf* get_ud_vbuf(void)
-{
-    vbuf* v = NULL;
-
-    {
-        pthread_spin_lock(&vbuf_lock);
-    }
-
-    if (NULL == ud_free_vbuf_head)
-    {
-        if(allocate_ud_vbuf_region(RDMA_VBUF_SECONDARY_POOL_SIZE) != 0) {
-            fprintf(stderr,
-                    "UD VBUF reagion allocation failed. Pool size %d\n", ud_vbuf_n_allocated);
-            return NULL;
-        }
-    }
-
-    v = ud_free_vbuf_head;
-    --ud_num_free_vbuf;
-    ++ud_num_vbuf_get;
-
-    /* this correctly handles removing from single entry free list */
-    ud_free_vbuf_head = ud_free_vbuf_head->desc.next;
-
-    /* need to change this to RPUT_VBUF_FLAG later
-     * if we are doing rput */
-    v->padding = NORMAL_VBUF_FLAG;
-    v->pheader = (void *)v->buffer;
-    v->transport = IB_TRANSPORT_UD;
-    v->retry_count = 0;
-    v->flags = 0;
-    v->pending_send_polls = 0;
-
-    /* this is probably not the right place to initialize shandle to NULL.
-     * Do it here for now because it will make sure it is always initialized.
-     * Otherwise we would need to very carefully add the initialization in
-     * a dozen other places, and probably miss one.
-     */
-    v->sreq = NULL;
-    v->coalesce = 0;
-    v->content_size = 0;
-    v->eager = 0;
-    /* Decide which transport need to assign here */
-
-    {
-        pthread_spin_unlock(&vbuf_lock);
-    }
-
-    return(v);
-}
-
-static void vbuf_init_ud_recv(vbuf* v, unsigned long len, int hca_num)
-{
-    assert(v != NULL);
-
-    v->desc.u.rr.next = NULL;
-    v->desc.u.rr.wr_id = (uintptr_t) v;
-    v->desc.u.rr.num_sge = 1;
-    v->desc.u.rr.sg_list = &(v->desc.sg_entry);
-    v->desc.sg_entry.length = len;
-    v->desc.sg_entry.lkey = v->region->mem_handle[hca_num]->lkey;
-    v->desc.sg_entry.addr = (uintptr_t)(v->buffer);
-    v->padding = NORMAL_VBUF_FLAG;
-    v->rail = hca_num;
-
-    return;
-}
-
-static int init_vbuf_lock(void)
-{
-    if (pthread_spin_init(&vbuf_lock, 0)) {
-        fprintf(stderr, "Cannot init VBUF lock\n");
-        return -1;
-    }
-
-    return 0;
-}
-
-static void MRAILI_Release_vbuf(vbuf* v)
-{
-    /* This message might be in progress. Wait for ib send completion 
-     * to release this buffer to avoid to reusing buffer
-     */
-    {
-        if(v->transport== IB_TRANSPORT_UD 
-                && (v->flags & UD_VBUF_SEND_INPROGRESS)) {
-            v->flags |= UD_VBUF_FREE_PENIDING;
-            return;
-        }
-    }
-
-    {
-        pthread_spin_lock(&vbuf_lock);
-    }
-
-    //DEBUG_PRINT("release_vbuf: releasing %p previous head = %p, padding %d\n", v, free_vbuf_head, v->padding);
-
-    {
-        assert(v != ud_free_vbuf_head);
-        v->desc.next = ud_free_vbuf_head;
-        ud_free_vbuf_head = v;
-        ++ud_num_free_vbuf;
-        ++ud_num_vbuf_freed;
-    } 
-
-    if (v->padding != NORMAL_VBUF_FLAG
-        && v->padding != RPUT_VBUF_FLAG
-        && v->padding != RGET_VBUF_FLAG
-        && v->padding != COLL_VBUF_FLAG
-        && v->padding != RDMA_ONE_SIDED)
-    {
-        fprintf(stderr, "vbuf not correct.\n");
-        exit(-1);
-    }
-
-    *v->head_flag = 0;
-    v->pheader = NULL;
-    v->content_size = 0;
-    v->sreq = NULL;
-    v->vc = NULL;
-
-    {
-        pthread_spin_unlock(&vbuf_lock);
-    }
-}
-
-static int mv2_post_ud_recv_buffers(int num_bufs, mv2_ud_ctx_t *ud_ctx)
-{
-    int i = 0,ret = 0;
-    vbuf* v = NULL;
-    struct ibv_recv_wr* bad_wr = NULL;
-
-    if (num_bufs > RDMA_DEFAULT_MAX_UD_RECV_WQE)
-    {
-        fprintf(stderr,
-                "Try to post %d to UD recv buffers, max %d\n",
-                num_bufs, RDMA_DEFAULT_MAX_UD_RECV_WQE);
-        return -1;
-    }
-
-    for (; i < num_bufs; ++i)
-    {
-        if ((v = get_ud_vbuf()) == NULL)
-        {
-            break;
-        }
-
-        vbuf_init_ud_recv(v, RDMA_DEFAULT_UD_MTU, 0);
-        v->transport = IB_TRANSPORT_UD;
-        if (ud_ctx->qp->srq) {
-            ret = ibv_post_srq_recv(ud_ctx->qp->srq, &v->desc.u.rr, &bad_wr);
-        } else {
-            ret = ibv_post_recv(ud_ctx->qp, &v->desc.u.rr, &bad_wr);
-        }
-        if (ret)
-        {
-            MRAILI_Release_vbuf(v);
-            break;
-        }
-    }
-
-#if 0
-    PRINT_DEBUG(DEBUG_UD_verbose>0 ,"Posted %d buffers of size:%d to UD QP\n",
-                num_bufs, RDMA_DEFAULT_UD_MTU);
-#endif
-
-    return i;
-}
-/* ===== End: VBUF Related functions ===== */
+int mv2_post_ud_recv_buffers(int num_bufs, mv2_ud_ctx_t *ud_ctx);
 
 /* ===== Begin: Initialization functions ===== */
 /* Get HCA parameters */
@@ -436,7 +136,7 @@ int mv2_hca_open()
 }
 
 /* Transition UD QP */
-static int mv2_ud_qp_transition(struct ibv_qp *qp)
+int mv2_ud_qp_transition(struct ibv_qp *qp)
 {
     struct ibv_qp_attr attr;
 
@@ -478,7 +178,7 @@ static int mv2_ud_qp_transition(struct ibv_qp *qp)
 }
 
 /* Create UD QP */
-static struct ibv_qp * mv2_ud_create_qp(mv2_ud_qp_info_t *qp_info)
+struct ibv_qp * mv2_ud_create_qp(mv2_ud_qp_info_t *qp_info)
 {
     struct ibv_qp *qp;
     struct ibv_qp_init_attr init_attr;
@@ -516,7 +216,7 @@ static struct ibv_qp * mv2_ud_create_qp(mv2_ud_qp_info_t *qp_info)
 }
 
 /* Create UD Context */
-static mv2_ud_ctx_t* mv2_ud_create_ctx (mv2_ud_qp_info_t *qp_info)
+mv2_ud_ctx_t* mv2_ud_create_ctx (mv2_ud_qp_info_t *qp_info)
 {
     mv2_ud_ctx_t *ctx;
 
@@ -537,9 +237,10 @@ static mv2_ud_ctx_t* mv2_ud_create_ctx (mv2_ud_qp_info_t *qp_info)
 }
 
 /* Initialize UD Context */
-int mv2_init_ud()
+spawn_net_endpoint* mv2_init_ud(int nchild)
 {
     mv2_ud_qp_info_t qp_info;   
+    spawn_net_endpoint *ep = NULL;
 
     /* Init lock for vbuf */
     init_vbuf_lock();
@@ -558,47 +259,93 @@ int mv2_init_ud()
     qp_info.cap.max_recv_sge    = RDMA_DEFAULT_MAX_SG_LIST;
     qp_info.cap.max_inline_data = RDMA_DEFAULT_MAX_INLINE_SIZE;
 
-    ud_ctx = mv2_ud_create_ctx(&qp_info);
-    if (!ud_ctx) {          
+    proc.ud_ctx = mv2_ud_create_ctx(&qp_info);
+    if (!proc.ud_ctx) {          
         fprintf(stderr, "Error in create UD qp\n");
-        return -1;
+        return NULL;
     }
     
-    ud_ctx->send_wqes_avail     = RDMA_DEFAULT_MAX_UD_SEND_WQE - 50;
-    ud_ctx->ext_sendq_count     = 0;
-    MESSAGE_QUEUE_INIT(&ud_ctx->ext_send_queue);
+    proc.ud_ctx->send_wqes_avail     = RDMA_DEFAULT_MAX_UD_SEND_WQE - 50;
+    proc.ud_ctx->ext_sendq_count     = 0;
+    MESSAGE_QUEUE_INIT(&proc.ud_ctx->ext_send_queue);
 
-    ud_ctx->hca_num             = 0;
-    ud_ctx->num_recvs_posted    = 0;
-    ud_ctx->credit_preserve     = (RDMA_DEFAULT_MAX_UD_RECV_WQE / 4);
-    ud_ctx->num_recvs_posted    += mv2_post_ud_recv_buffers(
-             (RDMA_DEFAULT_MAX_UD_RECV_WQE - ud_ctx->num_recvs_posted), ud_ctx);
-    MESSAGE_QUEUE_INIT(&ud_ctx->unack_queue);
+    proc.ud_ctx->hca_num             = 0;
+    proc.ud_ctx->num_recvs_posted    = 0;
+    proc.ud_ctx->credit_preserve     = (RDMA_DEFAULT_MAX_UD_RECV_WQE / 4);
+    proc.ud_ctx->num_recvs_posted    += mv2_post_ud_recv_buffers(
+             (RDMA_DEFAULT_MAX_UD_RECV_WQE - proc.ud_ctx->num_recvs_posted), proc.ud_ctx);
+    MESSAGE_QUEUE_INIT(&proc.unack_queue);
 
-    return 0;
+    ud_vc_info = SPAWN_MALLOC(sizeof(MPIDI_VC_t) * nchild);
+    if (NULL == ud_vc_info) {
+        fprintf(stderr, "Unable to malloc ud_vc_info");
+        return NULL;
+    }
+
+    proc.post_send = post_ud_send;
+
+    /* Create end point */
+    local_ep_info.lid = g_hca_info.port_attr[0].lid;
+    local_ep_info.qpn = proc.ud_ctx->qp->qp_num;
+
+    ep = SPAWN_MALLOC(sizeof(spawn_net_endpoint));
+    ep->name = SPAWN_MALLOC(sizeof(char)*RDMA_CONNECTION_INFO_LEN);
+    ep->data = SPAWN_MALLOC(sizeof(mv2_ud_exch_info_t));
+    if (NULL == ep || NULL == ep->name || NULL == ep->data) {
+        fprintf(stderr, "Unable to malloc ep");
+        return NULL;
+    }
+
+    /* Populate spawn_net_endpoint with correct data */
+    ep->type = SPAWN_NET_TYPE_IB;
+
+    sprintf(ep->name, "%06x:%04x:%06x", PG_RANK, local_ep_info.lid, local_ep_info.qpn);
+
+    memcpy(ep->data, &local_ep_info, sizeof(mv2_ud_exch_info_t));
+
+    return ep;
 }
 
 /* Create UD VC */
-int mv2_ud_set_vc_info (mv2_ud_vc_info_t *ud_vc_info, mv2_ud_exch_info_t *rem_info, struct ibv_pd *pd, int port)
+int mv2_ud_set_vc_info (int rank, mv2_ud_exch_info_t *rem_info, int port)
 {
     struct ibv_ah_attr ah_attr;
+
+    assert(rank < PG_SIZE);
 
     //PRINT_DEBUG(DEBUG_UD_verbose>0,"lid:%d\n", rem_info->lid );
     
     memset(&ah_attr, 0, sizeof(ah_attr));
-    ah_attr.is_global = 0; 
-    ah_attr.dlid = rem_info->lid;
-    ah_attr.sl = RDMA_DEFAULT_SERVICE_LEVEL;
-    ah_attr.src_path_bits = 0; 
-    ah_attr.port_num = port;
 
-    ud_vc_info->ah = ibv_create_ah(pd, &ah_attr);
-    if(!(ud_vc_info->ah)){    
+    ah_attr.sl              = RDMA_DEFAULT_SERVICE_LEVEL;
+    ah_attr.dlid            = rem_info->lid;
+    ah_attr.port_num        = port;
+    ah_attr.is_global       = 0; 
+    ah_attr.src_path_bits   = 0; 
+
+    ud_vc_info[rank].mrail.ud.ah = ibv_create_ah(g_hca_info.pd, &ah_attr);
+    if(!(ud_vc_info[rank].mrail.ud.ah)){    
         fprintf(stderr, "Error in creating address handle\n");
         return -1;
     }
-    ud_vc_info->lid = rem_info->lid;
-    ud_vc_info->qpn = rem_info->qpn;
+
+    ud_vc_info[rank].mrail.ud.lid = rem_info->lid;
+    ud_vc_info[rank].mrail.ud.qpn = rem_info->qpn;
+
+    ud_vc_info[rank].mrail.ack_need_tosend = 0;
+    ud_vc_info[rank].mrail.seqnum_next_tosend = 0;
+    ud_vc_info[rank].mrail.seqnum_next_torecv = 0;
+    ud_vc_info[rank].mrail.seqnum_next_toack = UINT16_MAX;
+
+    ud_vc_info[rank].mrail.ud.cntl_acks = 0; 
+    ud_vc_info[rank].mrail.ud.ack_pending = 0;
+    ud_vc_info[rank].mrail.ud.resend_count = 0;
+    ud_vc_info[rank].mrail.ud.total_messages = 0;
+    ud_vc_info[rank].mrail.ud.ext_win_send_count = 0;
+
+    MESSAGE_QUEUE_INIT(&ud_vc_info[rank].mrail.ud.send_window);
+    MESSAGE_QUEUE_INIT(&ud_vc_info[rank].mrail.ud.ext_window);
+
     return 0;
 }
 
@@ -609,29 +356,250 @@ void mv2_ud_destroy_ctx (mv2_ud_ctx_t *ctx)
         ibv_destroy_qp(ctx->qp);
     }
     spawn_free(ctx);
+    spawn_free(ud_vc_info);
 }
 /* ===== End: Initialization functions ===== */
 
 /* ===== Begin: Send/Recv functions ===== */
-int mv2_poll_cq()
+int MRAILI_Process_send(void *vbuf_addr)
+{
+    vbuf *v = vbuf_addr;
+
+    if (v->padding == NORMAL_VBUF_FLAG) {
+        MRAILI_Release_vbuf(v);
+    } else {
+        printf("Couldn't release VBUF; v->padding = %d\n", v->padding);
+    }
+
+    return 0;
+}
+
+void MPIDI_CH3I_MRAIL_Release_vbuf(vbuf * v)
+{
+    v->eager = 0;
+    v->coalesce = 0;
+    v->content_size = 0;
+
+    if (v->padding == NORMAL_VBUF_FLAG || v->padding == RPUT_VBUF_FLAG)
+        MRAILI_Release_vbuf(v);
+#if 0
+    else {
+        MRAILI_Release_recv_rdma(v);
+        MRAILI_Send_noop_if_needed((MPIDI_VC_t *) v->vc, v->rail);
+    }
+#endif
+}
+
+int mv2_post_ud_recv_buffers(int num_bufs, mv2_ud_ctx_t *ud_ctx)
+{
+    int i = 0,ret = 0;
+    vbuf* v = NULL;
+    struct ibv_recv_wr* bad_wr = NULL;
+
+    if (num_bufs > rdma_default_max_ud_recv_wqe)
+    {
+        ibv_va_error_abort(
+                GEN_ASSERT_ERR,
+                "Try to post %d to UD recv buffers, max %d\n",
+                num_bufs, rdma_default_max_ud_recv_wqe);
+    }
+
+    for (; i < num_bufs; ++i)
+    {
+        if ((v = get_ud_vbuf()) == NULL)
+        {
+            break;
+        }
+
+        vbuf_init_ud_recv(v, rdma_default_ud_mtu, 0);
+        v->transport = IB_TRANSPORT_UD;
+        if (ud_ctx->qp->srq) {
+            ret = ibv_post_srq_recv(ud_ctx->qp->srq, &v->desc.u.rr, &bad_wr);
+        } else {
+            ret = ibv_post_recv(ud_ctx->qp, &v->desc.u.rr, &bad_wr);
+        }
+        if (ret)
+        {
+            MRAILI_Release_vbuf(v);
+            break;
+        }
+    }
+
+    PRINT_DEBUG(DEBUG_UD_verbose>0 ,"Posted %d buffers of size:%d to UD QP\n",num_bufs, rdma_default_ud_mtu);
+
+    return i;
+}
+
+int mv2_send_connect_message(MPIDI_VC_t *vc)
+{
+    int avail = 0;
+    MPIDI_CH3I_MRAILI_Pkt_comm_header *connect_pkt = NULL;
+    char conn_info[RDMA_CONNECTION_INFO_LEN];
+    vbuf *v = get_ud_vbuf();
+    void *ptr = (v->buffer + v->content_size);
+
+    sprintf(conn_info, "%06x:%04x:%06x", PG_RANK, local_ep_info.lid, local_ep_info.qpn);
+
+    avail = MRAIL_MAX_UD_SIZE - v->content_size;
+
+    assert (avail >= RDMA_CONNECTION_INFO_LEN);
+
+    memcpy(ptr, conn_info, sizeof(conn_info));
+    v->content_size += RDMA_CONNECTION_INFO_LEN;
+
+    connect_pkt = v->pheader;
+
+    MPIDI_Pkt_init(connect_pkt, MPIDI_CH3_PKT_UD_CONNECT);
+    connect_pkt->acknum = vc->mrail.seqnum_next_toack;
+    connect_pkt->rail = v->rail;
+
+    vbuf_init_send(v, sizeof(MPIDI_CH3I_MRAILI_Pkt_comm_header), v->rail);
+
+    proc.post_send(vc, v, 0, NULL);
+
+    return 0;
+}
+
+spawn_net_channel* mv2_ep_connect(const char *name)
+{
+    int parsed = 0;
+    int dest_rank = -1;
+    MPIDI_VC_t *vc = NULL;
+    mv2_ud_exch_info_t ep_info;
+    spawn_net_channel* ch = NULL;
+
+    parsed = sscanf(name, "%06x:%04x:%06x", &dest_rank, &ep_info.lid, &ep_info.qpn);
+    if (parsed != 3) {
+        fprintf(stderr, "Couldn't parse ep info from %s\n", name);
+        return NULL;
+    }
+
+    ch = SPAWN_MALLOC(sizeof(spawn_net_channel));
+    ch->name = SPAWN_MALLOC(sizeof(char)*16);
+    ch->data = SPAWN_MALLOC(sizeof(mv2_ud_exch_info_t));
+    if (NULL == ch || NULL == ch->name || NULL == ch->data) {
+        fprintf(stderr, "Unable to malloc spawn_net_channel");
+        return NULL;
+    }
+
+    /* Populate spawn_net_channel with information */
+    ch->type = SPAWN_NET_TYPE_IB;
+    sprintf(ch->name, "%06x:%04x:%06x", dest_rank, local_ep_info.lid, local_ep_info.qpn);
+    memcpy(ch->data, &ep_info, sizeof(mv2_ud_exch_info_t));
+
+    /* Set VC info */
+    mv2_ud_set_vc_info(dest_rank, &ep_info, RDMA_DEFAULT_PORT);
+
+    MV2_Get_vc(dest_rank, &vc);
+
+    /* Send connect message to destination */
+    mv2_send_connect_message(vc);
+
+    return ch;
+}
+
+int mv2_ud_send_internal(MPIDI_VC_t *vc, const void* buf, size_t size)
+{
+    int avail = 0;
+    MPIDI_CH3I_MRAILI_Pkt_comm_header *pkt = NULL;
+    vbuf *v = get_ud_vbuf();
+    void *ptr = (v->buffer + v->content_size);
+
+    avail = MRAIL_MAX_UD_SIZE - v->content_size;
+
+    assert (avail >= size);
+
+    memcpy(ptr, buf, size);
+    v->content_size += size;
+
+    pkt = v->pheader;
+
+    MPIDI_Pkt_init(pkt, MPIDI_CH3_PKT_UD_DATA);
+    pkt->acknum = vc->mrail.seqnum_next_toack;
+    pkt->rail = v->rail;
+
+    vbuf_init_send(v, sizeof(MPIDI_CH3I_MRAILI_Pkt_comm_header), v->rail);
+
+    proc.post_send(vc, v, 0, NULL);
+
+    return 0;
+}
+
+int mv2_ud_send(const spawn_net_channel* ch, const void* buf, size_t size)
+{
+    int ret = 0;
+    int parsed = 0;
+    int dest_rank = -1;
+    MPIDI_VC_t *vc = NULL;
+    mv2_ud_exch_info_t ep_info;
+
+    parsed = sscanf(ch->name, "%06x:%04x:%06x", &dest_rank, &ep_info.lid, &ep_info.qpn);
+    if (parsed != 3) {
+        fprintf(stderr, "Couldn't parse ep info from %s\n", ch->name);
+        return NULL;
+    }
+
+    MV2_Get_vc(dest_rank, &vc);
+
+    ret = mv2_ud_send_internal(vc, buf, size);
+
+    return ret;
+}
+
+vbuf* mv2_poll_cq()
 {
     int ne = 0;
+    vbuf *v = NULL;
+    mv2_ud_vc_info_t *vc = NULL;
     struct ibv_wc wc;
     struct ibv_cq *cq = g_hca_info.cq_hndl;
+    MPIDI_CH3I_MRAILI_Pkt_comm_header *p = NULL;
 
     /* poll cq */
     ne = ibv_poll_cq(cq, 1, &wc);
     if ( 1 == ne ) {
         if ( IBV_WC_SUCCESS != wc.status ) {
             fprintf(stderr, "IBV_WC_SUCCESS != wc.status (%d)\n", wc.status);
-            return -1;
+            exit(-1);
         }
+        /* Get VBUF */
+        v = (vbuf *) ((uintptr_t) wc.wr_id);
+        /* Get VC from VBUF */
+        vc = (mv2_ud_vc_info_t*) (v->vc);
+
         switch (wc.opcode) {
             case IBV_WC_SEND:
             case IBV_WC_RDMA_READ:
             case IBV_WC_RDMA_WRITE:
+                if (v->pheader && IS_CNTL_MSG(p)) {
+                }
+                mv2_ud_update_send_credits(v);
+                if (v->flags & UD_VBUF_SEND_INPROGRESS) {
+                    v->flags &= ~(UD_VBUF_SEND_INPROGRESS);
+                    if (v->flags & UD_VBUF_FREE_PENIDING) {
+                        v->flags &= ~(UD_VBUF_FREE_PENIDING);
+                        MRAILI_Release_vbuf(v);
+                    }
+                }
+
                 break;
             case IBV_WC_RECV:
+                SET_PKT_LEN_HEADER(v, wc);
+                SET_PKT_HEADER_OFFSET(v);
+
+                p = v->pheader;
+                /* Retrieve the VC */
+                MV2_Get_vc(p->src.rank, &vc);
+
+                v->vc   = vc;
+                v->rail = p->rail;
+
+                proc.ud_ctx->num_recvs_posted--;
+                if(proc.ud_ctx->num_recvs_posted < proc.ud_ctx->credit_preserve) {
+                    proc.ud_ctx->num_recvs_posted += mv2_post_ud_recv_buffers(
+                            (RDMA_DEFAULT_MAX_UD_RECV_WQE - proc.ud_ctx->num_recvs_posted),
+                            proc.ud_ctx);
+                }
                 break;
             default:
                 fprintf(stderr, "Invalid opcode from ibv_poll_cq()\n");
@@ -639,21 +607,27 @@ int mv2_poll_cq()
         }
     } else if ( ne < 0 ){
         fprintf(stderr, "poll cq error\n");
-        return -1;
-    } else {
-        return 1;   /* indicates i got nothing! */
+        exit(-1);
     }
+
+    return NULL;
 }
 
-int mv2_wait_on_channel()
+vbuf* mv2_wait_on_channel()
 {
+    vbuf *v = NULL;
     void *ev_ctx = NULL;
     struct ibv_cq *ev_cq = NULL;
 
+    if (UD_ACK_PROGRESS_TIMEOUT) {
+        mv2_check_resend();
+        MV2_UD_SEND_ACKS();
+        rdma_ud_last_check = mv2_get_time_us();
+    }
+
     /* Wait for the completion event */
     if (ibv_get_cq_event(g_hca_info.comp_channel, &ev_cq, &ev_ctx)) {
-        fprintf(stderr, "Failed to get cq_event\n");
-        return 1;
+        ibv_error_abort(-1, "Failed to get cq_event\n");
     }
 
     /* Ack the event */
@@ -661,11 +635,13 @@ int mv2_wait_on_channel()
 
     /* Request notification upon the next completion event */
     if (ibv_req_notify_cq(ev_cq, 0)) {
-        fprintf(stderr, "Couldn't request CQ notification\n");
-        return 1;
+        ibv_error_abort(-1, "Couldn't request CQ notification\n");
     }
 
-    mv2_poll_cq();
-    return 0;
+    do {
+        v = mv2_poll_cq();
+    } while (NULL == v);
+
+    return v;
 }
 /* ===== End: Send/Recv functions ===== */
