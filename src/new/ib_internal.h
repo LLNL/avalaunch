@@ -174,6 +174,7 @@ extern int rdma_vbuf_secondary_pool_size;
 int mv2_hca_open();
 spawn_net_endpoint* mv2_init_ud(int nchild);
 spawn_net_channel* mv2_ep_connect(const char *name);
+spawn_net_channel* mv2_ep_accept();
 int mv2_ud_send(const spawn_net_channel* ch, const void* buf, size_t size);
 
 #endif /* _IB_INTERNAL_H */

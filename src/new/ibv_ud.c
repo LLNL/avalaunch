@@ -43,6 +43,7 @@ static inline void mv2_ud_flush_ext_window(MPIDI_VC_t *vc)
         q->tail = NULL;
     }
 }
+
 static inline void mv2_ud_process_ack(MPIDI_VC_t *vc, uint16_t acknum)
 {
     vbuf *sendwin_head = vc->mrail.ud.send_window.head;
@@ -283,7 +284,7 @@ void MRAILI_Process_recv(vbuf *v)
 
     if (IS_CNTL_MSG(p)) {
         PRINT_DEBUG(DEBUG_UD_verbose>1,"recv cntl message ack:%d \n", p->acknum);
-        handle_read(v->vc, v);
+        MRAILI_Release_vbuf(v);
         goto fn_exit;
     }
 
