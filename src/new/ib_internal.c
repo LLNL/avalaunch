@@ -56,8 +56,11 @@ mv2_proc_info_t proc;
 mv2_hca_info_t g_hca_info;
 mv2_ud_exch_info_t local_ep_info;
 MPIDI_VC_t *ud_vc_info = NULL; 
+static pthread_mutex_t comm_lock_object;
+static pthread_t comm_thread;
 
 int mv2_ud_init_vc (int rank);
+void* cm_timeout_handler(void *arg);
 int mv2_post_ud_recv_buffers(int num_bufs, mv2_ud_ctx_t *ud_ctx);
 
 /* ===== Begin: Initialization functions ===== */
@@ -241,11 +244,17 @@ mv2_ud_ctx_t* mv2_ud_create_ctx (mv2_ud_qp_info_t *qp_info)
 spawn_net_endpoint* mv2_init_ud(int nchild)
 {
     int i = 0;
+    int ret = 0;
+    pthread_attr_t attr;
     mv2_ud_qp_info_t qp_info;   
     spawn_net_endpoint *ep = NULL;
 
     /* Init lock for vbuf */
     init_vbuf_lock();
+
+    if (pthread_mutex_init(&comm_lock_object, 0)) {
+        ibv_error_abort(-1, "Failed to init comm_lock_object\n");
+    }   
 
     /* Allocate vbufs */
     allocate_ud_vbufs(RDMA_DEFAULT_NUM_VBUFS);
@@ -308,6 +317,20 @@ spawn_net_endpoint* mv2_init_ud(int nchild)
     sprintf(ep->name, "%06x:%04x:%06x", PG_RANK, local_ep_info.lid, local_ep_info.qpn);
 
     memcpy(ep->data, &local_ep_info, sizeof(mv2_ud_exch_info_t));
+
+    /*Spawn comm thread */
+    if (pthread_attr_init(&attr)) {
+        fprintf(stderr, "Unable to init thread attr");
+        return NULL;
+    }
+
+    ret = pthread_attr_setstacksize(&attr, DEFAULT_CM_THREAD_STACKSIZE);
+    if (ret && ret != EINVAL) {
+        fprintf(stderr, "Unable to set stack size");
+        return NULL;
+    }
+
+    pthread_create(&comm_thread, &attr, cm_timeout_handler, NULL);
 
     return ep;
 }
@@ -379,10 +402,45 @@ void mv2_ud_destroy_ctx (mv2_ud_ctx_t *ctx)
     }
     spawn_free(ctx);
     spawn_free(ud_vc_info);
+
+    pthread_cancel(comm_thread);
 }
 /* ===== End: Initialization functions ===== */
 
 /* ===== Begin: Send/Recv functions ===== */
+/*Interface to lock/unlock connection manager*/
+void comm_lock(void)
+{           
+    pthread_mutex_lock(&comm_lock_object);
+}               
+            
+void comm_unlock(void)
+{           
+    pthread_mutex_unlock(&comm_lock_object);
+}               
+
+void* cm_timeout_handler(void *arg)
+{
+    struct timespec cm_timeout;
+    struct timespec remain;
+
+    cm_timeout.tv_sec = rdma_ud_progress_timeout / 1000000;
+    cm_timeout.tv_nsec = (rdma_ud_progress_timeout - cm_timeout.tv_sec * 1000000) * 1000;
+
+    while(1) {
+        comm_unlock();
+        nanosleep(&cm_timeout, &remain);
+        comm_lock();
+        if (UD_ACK_PROGRESS_TIMEOUT) {
+            mv2_check_resend();
+            MV2_UD_SEND_ACKS();
+            rdma_ud_last_check = mv2_get_time_us();
+        }
+    }
+
+    return NULL;
+}
+
 int MRAILI_Process_send(void *vbuf_addr)
 {
     vbuf *v = vbuf_addr;

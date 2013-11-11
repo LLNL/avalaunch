@@ -71,6 +71,7 @@
 #define RDMA_DEFAULT_MAX_INLINE_SIZE    (128)
 #define RDMA_UD_NUM_MSG_LIMIT           (4096)
 #define RDMA_UD_VBUF_POOL_SIZE          (8192)
+#define DEFAULT_CM_THREAD_STACKSIZE     (1024*1024)
 
 #define DEFAULT_NUM_RPOOLS         (1)
 
@@ -172,6 +173,8 @@ extern uint16_t rdma_hybrid_pending_rc_conn;
 extern int rdma_vbuf_secondary_pool_size;
 
 int mv2_hca_open();
+void comm_lock(void);
+void comm_unlock(void);
 spawn_net_endpoint* mv2_init_ud(int nchild);
 spawn_net_channel* mv2_ep_connect(const char *name);
 spawn_net_channel* mv2_ep_accept();
