@@ -332,18 +332,17 @@ static void signal_from_root(const struct session_t* s)
     return;
 }
 
-static void bcast_strmap(strmap* map, const struct session_t* s)
+static void bcast_strmap(strmap* map, const spawn_tree* t)
 {
-    spawn_tree* t = s->tree;
-    int children = t->children;
-
     /* read map from parent, if we have one */
-    if (t->parent_ch != SPAWN_NET_CHANNEL_NULL) {
-        spawn_net_read_strmap(t->parent_ch, map);
+    spawn_net_channel* p = t->parent_ch;
+    if (p != SPAWN_NET_CHANNEL_NULL) {
+        spawn_net_read_strmap(p, map);
     }
 
     /* send map to children */
     int i;
+    int children = t->children;
     for (i = 0; i < children; i++) {
         spawn_net_channel* ch = t->child_chs[i];
         spawn_net_write_strmap(ch, map);
@@ -352,25 +351,24 @@ static void bcast_strmap(strmap* map, const struct session_t* s)
     return;
 }
 
-static void allgather_strmap(strmap* map, const struct session_t* s)
+static void allgather_strmap(strmap* map, const spawn_tree* t)
 {
-    spawn_tree* t = s->tree;
-    int children = t->children;
-
-    /* gather input from children if we have any */
+    /* gather input from children */
     int i;
+    int children = t->children;
     for (i = 0; i < children; i++) {
         spawn_net_channel* ch = t->child_chs[i];
         spawn_net_read_strmap(ch, map);
     }
 
-    /* forward map to parent, and wait for response */
-    if (t->parent_ch != SPAWN_NET_CHANNEL_NULL) {
-        spawn_net_write_strmap(t->parent_ch, map);
+    /* forward map to parent */
+    spawn_net_channel* p = t->parent_ch;
+    if (p != SPAWN_NET_CHANNEL_NULL) {
+        spawn_net_write_strmap(p, map);
     }
 
-    /* broadcast map from root to tree */
-    bcast_strmap(map, s);
+    /* broadcast map from root */
+    bcast_strmap(map, t);
 
     return;
 }
@@ -693,7 +691,7 @@ static void pmi_exchange(struct session_t* s, const strmap* params, const spawn_
     /* allgather strmaps across spawn processes */
     if (!rank) { tid = begin_delta("pmi allgather"); }
     signal_from_root(s);
-    allgather_strmap(pmi_strmap, s);
+    allgather_strmap(pmi_strmap, s->tree);
     signal_to_root(s);
     if (!rank) { end_delta(tid); }
 
@@ -1101,7 +1099,7 @@ session_start (struct session_t * s)
     /* add our endpoint into strmap and do an allgather */
     strmap* spawnep_strmap = strmap_new();
     strmap_setf(spawnep_strmap, "%d=%s", s->tree->rank, s->ep_name);
-    allgather_strmap(spawnep_strmap, s);
+    allgather_strmap(spawnep_strmap, s->tree);
 
     /* print map from rank 0 */
     if (nodeid == 0) {
@@ -1205,7 +1203,7 @@ session_start (struct session_t * s)
 
     /* broadcast parameters to start app procs */
     if (!nodeid) { tid = begin_delta("broadcast app params"); }
-    bcast_strmap(appmap, s);
+    bcast_strmap(appmap, s->tree);
     signal_to_root(s);
     if (!nodeid) { end_delta(tid); }
 
