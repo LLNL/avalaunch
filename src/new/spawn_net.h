@@ -15,6 +15,7 @@ typedef enum spawn_net_type_enum {
   SPAWN_NET_TYPE_NULL = 0, /* netowrk not defined */
   SPAWN_NET_TYPE_TCP  = 1, /* TCP sockets */
   SPAWN_NET_TYPE_FIFO = 2, /* FIFO/pipe */
+  SPAWN_NET_TYPE_IB = 3, /* FIFO/pipe */
 } spawn_net_type;
 
 /* represents an endpoint which others may connect to */
