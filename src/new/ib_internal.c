@@ -87,21 +87,21 @@ static int mv2_get_hca_info(int devnum, mv2_hca_info_t *hca_info)
     /* Open the HCA for communication */
     hca_info->context = ibv_open_device(hca_info->device);
     if (!hca_info->context) {
-        fprintf(stderr, "Cannot create context for HCA\n");
+        SPAWN_ERR("Cannot create context for HCA");
         return -1;
     }
 
     /* Create a protection domain for communication */
     hca_info->pd = ibv_alloc_pd(hca_info->context);
     if (!hca_info->pd) {
-        fprintf(stderr, "Cannot create PD for HCA\n");
+        SPAWN_ERR("Cannot create PD for HCA");
         return -1;
     }
     
     /* Get the attributes of the HCA */
     retval = ibv_query_device(g_hca_info.context, &g_hca_info.device_attr);
     if (retval) {
-        fprintf(stderr, "Cannot query HCA\n");
+        SPAWN_ERR("Cannot query HCA");
         return -1;
     }
 
@@ -113,7 +113,7 @@ static int mv2_get_hca_info(int devnum, mv2_hca_info_t *hca_info)
     /* Create completion channel */
     hca_info->comp_channel = ibv_create_comp_channel(hca_info->context);
     if (!hca_info->comp_channel) {
-        fprintf(stderr, "Cannot create completion channel\n");
+        SPAWN_ERR("Cannot create completion channel");
         return -1;
     }
 
@@ -122,7 +122,7 @@ static int mv2_get_hca_info(int devnum, mv2_hca_info_t *hca_info)
                                       RDMA_DEFAULT_MAX_CQ_SIZE, NULL,
                                       hca_info->comp_channel, 0);
     if (!hca_info->cq_hndl) {
-        fprintf(stderr, "Cannot create completion queue\n");
+        SPAWN_ERR("Cannot create completion queue");
         return -1;
     }
 
@@ -136,7 +136,7 @@ int mv2_hca_open()
 {
     memset(&g_hca_info, 0, sizeof(mv2_hca_info_t));
     if (0!= mv2_get_hca_info(0, &g_hca_info)){
-        fprintf(stderr, "Failed to initialize HCA\n");
+        SPAWN_ERR("Failed to initialize HCA");
         return -1;
     }
     return 0;
@@ -158,7 +158,7 @@ int mv2_ud_qp_transition(struct ibv_qp *qp)
                 IBV_QP_STATE |
                 IBV_QP_PKEY_INDEX |
                 IBV_QP_PORT | IBV_QP_QKEY)) {
-            fprintf(stderr,"Failed to modify QP to INIT\n");
+            SPAWN_ERR("Failed to modify QP to INIT");
             return 1;
     }    
         
@@ -166,7 +166,7 @@ int mv2_ud_qp_transition(struct ibv_qp *qp)
 
     attr.qp_state = IBV_QPS_RTR;
     if (ibv_modify_qp(qp, &attr, IBV_QP_STATE)) {
-            fprintf(stderr, "Failed to modify QP to RTR\n");
+            SPAWN_ERR("Failed to modify QP to RTR");
             return 1;
     }   
 
@@ -176,7 +176,7 @@ int mv2_ud_qp_transition(struct ibv_qp *qp)
     attr.sq_psn = RDMA_DEFAULT_PSN;
     if (ibv_modify_qp(qp, &attr,
                 IBV_QP_STATE | IBV_QP_SQ_PSN)) {
-        fprintf(stderr, "Failed to modify QP to RTS\n");
+        SPAWN_ERR("Failed to modify QP to RTS");
         return 1;
     }
 
@@ -209,7 +209,7 @@ struct ibv_qp * mv2_ud_create_qp(mv2_ud_qp_info_t *qp_info)
 
     qp = ibv_create_qp(qp_info->pd, &init_attr);
     if(!qp) {
-        fprintf(stderr,"error in creating UD qp\n");
+        SPAWN_ERR("error in creating UD qp");
         return NULL;
     }
     
@@ -228,15 +228,11 @@ mv2_ud_ctx_t* mv2_ud_create_ctx (mv2_ud_qp_info_t *qp_info)
     mv2_ud_ctx_t *ctx;
 
     ctx = SPAWN_MALLOC( sizeof(mv2_ud_ctx_t) );
-    if (!ctx){
-        fprintf( stderr, "%s:no memory!\n", __func__ );
-        return NULL;
-    }
     memset( ctx, 0, sizeof(mv2_ud_ctx_t) );
 
     ctx->qp = mv2_ud_create_qp(qp_info);
     if(!ctx->qp) {
-        fprintf(stderr, "Error in creating UD QP\n");
+        SPAWN_ERR("Error in creating UD QP");
         return NULL;
     }
 
@@ -250,7 +246,7 @@ spawn_net_endpoint* mv2_init_ud(int nchild)
     int ret = 0;
     pthread_attr_t attr;
     mv2_ud_qp_info_t qp_info;   
-    spawn_net_endpoint *ep = NULL;
+    spawn_net_endpoint *ep = SPAWN_NET_ENDPOINT_NULL;
 
     /* Init lock for vbuf */
     init_vbuf_lock();
@@ -275,8 +271,8 @@ spawn_net_endpoint* mv2_init_ud(int nchild)
 
     proc.ud_ctx = mv2_ud_create_ctx(&qp_info);
     if (!proc.ud_ctx) {          
-        fprintf(stderr, "Error in create UD qp\n");
-        return NULL;
+        SPAWN_ERR("Error in create UD qp");
+        return SPAWN_NET_ENDPOINT_NULL;
     }
     
     proc.ud_ctx->send_wqes_avail     = RDMA_DEFAULT_MAX_UD_SEND_WQE - 50;
@@ -291,10 +287,6 @@ spawn_net_endpoint* mv2_init_ud(int nchild)
     MESSAGE_QUEUE_INIT(&proc.unack_queue);
 
     ud_vc_info = SPAWN_MALLOC(sizeof(MPIDI_VC_t) * nchild);
-    if (NULL == ud_vc_info) {
-        fprintf(stderr, "Unable to malloc ud_vc_info");
-        return NULL;
-    }
 
     for (i = 0; i < nchild; ++i) {
         mv2_ud_init_vc(i);
@@ -309,10 +301,6 @@ spawn_net_endpoint* mv2_init_ud(int nchild)
     ep = SPAWN_MALLOC(sizeof(spawn_net_endpoint));
     ep->name = SPAWN_MALLOC(sizeof(char)*RDMA_CONNECTION_INFO_LEN);
     ep->data = SPAWN_MALLOC(sizeof(mv2_ud_exch_info_t));
-    if (NULL == ep || NULL == ep->name || NULL == ep->data) {
-        fprintf(stderr, "Unable to malloc ep");
-        return NULL;
-    }
 
     /* Populate spawn_net_endpoint with correct data */
     ep->type = SPAWN_NET_TYPE_IB;
@@ -323,14 +311,14 @@ spawn_net_endpoint* mv2_init_ud(int nchild)
 
     /*Spawn comm thread */
     if (pthread_attr_init(&attr)) {
-        fprintf(stderr, "Unable to init thread attr");
-        return NULL;
+        SPAWN_ERR("Unable to init thread attr");
+        return SPAWN_NET_ENDPOINT_NULL;
     }
 
     ret = pthread_attr_setstacksize(&attr, DEFAULT_CM_THREAD_STACKSIZE);
     if (ret && ret != EINVAL) {
-        fprintf(stderr, "Unable to set stack size");
-        return NULL;
+        SPAWN_ERR("Unable to set stack size");
+        return SPAWN_NET_ENDPOINT_NULL;
     }
 
     pthread_create(&comm_thread, &attr, cm_timeout_handler, NULL);
@@ -386,7 +374,7 @@ int mv2_ud_set_vc_info (int rank, mv2_ud_exch_info_t *rem_info, int port)
 
     ud_vc_info[rank].mrail.ud.ah = ibv_create_ah(g_hca_info.pd, &ah_attr);
     if(!(ud_vc_info[rank].mrail.ud.ah)){    
-        fprintf(stderr, "Error in creating address handle\n");
+        SPAWN_ERR("Error in creating address handle\n");
         return -1;
     }
 
@@ -552,21 +540,17 @@ spawn_net_channel* mv2_ep_connect(const char *name)
     int dest_rank = -1;
     MPIDI_VC_t *vc = NULL;
     mv2_ud_exch_info_t ep_info;
-    spawn_net_channel* ch = NULL;
+    spawn_net_channel* ch = SPAWN_NET_CHANNEL_NULL;
 
     parsed = sscanf(name, "%06x:%04x:%06x", &dest_rank, &ep_info.lid, &ep_info.qpn);
     if (parsed != 3) {
-        fprintf(stderr, "Couldn't parse ep info from %s\n", name);
-        return NULL;
+        SPAWN_ERR("Couldn't parse ep info from %s\n", name);
+        return SPAWN_NET_CHANNEL_NULL;
     }
 
     ch = SPAWN_MALLOC(sizeof(spawn_net_channel));
     ch->name = SPAWN_MALLOC(sizeof(char)*RDMA_CONNECTION_INFO_LEN);
     ch->data = SPAWN_MALLOC(sizeof(mv2_ud_exch_info_t));
-    if (NULL == ch || NULL == ch->name || NULL == ch->data) {
-        fprintf(stderr, "Unable to malloc spawn_net_channel");
-        return NULL;
-    }
 
     /* Populate spawn_net_channel with information */
     ch->type = SPAWN_NET_TYPE_IB;
@@ -632,7 +616,7 @@ int mv2_ud_send(const spawn_net_channel* ch, const void* buf, size_t size)
 
     parsed = sscanf(ch->name, "%06x:%04x:%06x", &dest_rank, &ep_info.lid, &ep_info.qpn);
     if (parsed != 3) {
-        fprintf(stderr, "Couldn't parse ep info from %s\n", ch->name);
+        SPAWN_ERR("Couldn't parse ep info from %s\n", ch->name);
         return NULL;
     }
 
@@ -655,7 +639,7 @@ int mv2_ud_recv(const spawn_net_channel* ch, void* buf, size_t size)
 
     parsed = sscanf(ch->name, "%06x:%04x:%06x", &dest_rank, &ep_info.lid, &ep_info.qpn);
     if (parsed != 3) {
-        fprintf(stderr, "Couldn't parse ep info from %s\n", ch->name);
+        SPAWN_ERR("Couldn't parse ep info from %s\n", ch->name);
         return NULL;
     }
 
@@ -685,7 +669,7 @@ int mv2_ud_recv(const spawn_net_channel* ch, void* buf, size_t size)
 spawn_net_channel* mv2_ep_accept()
 {
     int i = 0;
-    spawn_net_channel* ch = NULL;
+    spawn_net_channel* ch = SPAWN_NET_CHANNEL_NULL;
     mv2_ud_exch_info_t ep_info;
 
     for (i = 0; i < PG_SIZE; ++i) {
@@ -693,10 +677,6 @@ spawn_net_channel* mv2_ep_accept()
             ch = SPAWN_MALLOC(sizeof(spawn_net_channel));
             ch->name = SPAWN_MALLOC(sizeof(char)*RDMA_CONNECTION_INFO_LEN);
             ch->data = SPAWN_MALLOC(sizeof(mv2_ud_exch_info_t));
-            if (NULL == ch || NULL == ch->name || NULL == ch->data) {
-                fprintf(stderr, "Unable to malloc spawn_net_channel");
-                return NULL;
-            }
         
             /* Populate spawn_net_channel with information */
             ch->type = SPAWN_NET_TYPE_IB;
@@ -730,7 +710,7 @@ int mv2_poll_cq()
     ne = ibv_poll_cq(cq, 1, &wc);
     if ( 1 == ne ) {
         if ( IBV_WC_SUCCESS != wc.status ) {
-            fprintf(stderr, "IBV_WC_SUCCESS != wc.status (%d)\n", wc.status);
+            SPAWN_ERR("IBV_WC_SUCCESS != wc.status (%d)\n", wc.status);
             exit(-1);
         }
         /* Get VBUF */
@@ -780,11 +760,11 @@ int mv2_poll_cq()
                 }
                 break;
             default:
-                fprintf(stderr, "Invalid opcode from ibv_poll_cq()\n");
+                SPAWN_ERR("Invalid opcode from ibv_poll_cq()\n");
                 break;
         }
     } else if ( ne < 0 ){
-        fprintf(stderr, "poll cq error\n");
+        SPAWN_ERR("poll cq error\n");
         exit(-1);
     }
 
