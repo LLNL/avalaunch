@@ -180,12 +180,287 @@ static void tree_create_kary(int rank, int ranks, int k, spawn_tree* t)
     }
 }
 
-static int temp_launch(
-    spawn_tree* t,
-    int index,
+/* searches user's path for command executable, returns full path
+ * in newly allocated string, returns NULL if not found */
+char* path_search(const char* command)
+{
+    char* path = NULL;
+
+    /* check that we got a real string for the command */
+    if (command == NULL) {
+        return path;
+    }
+
+    /* if command starts with '/', it's already absolute */
+    if (command[0] == '/') {
+        path = SPAWN_STRDUP(command);
+        return path;
+    }
+
+    /* get user's path */
+    const char* path_env = getenv("PATH");
+    if (path_env == NULL) {
+        /* $PATH is not set, bail out */
+        return path;
+    }
+
+    /* make a copy of path to run strtok */
+    char* path_env_copy = SPAWN_STRDUP(path_env);
+
+    /* search entries in path, breaking on ':' */
+    const char* prefix = strtok(path_env_copy, ":");
+    while (prefix != NULL) {
+        /* create path to candidate item */
+        path = SPAWN_STRDUPF("%s/%s", prefix, command);
+
+        /* break if we find an executable */
+        if (access(path, X_OK) == 0) {
+            /* TODO: should we run realpath here? */
+            break;
+        }
+
+        /* otherwise, free the item and try the next
+         * path entry */
+        spawn_free(&path);
+        prefix = strtok(NULL, ":");
+    }
+
+    /* free copy of path */
+    spawn_free(&path_env_copy);
+
+    return path;
+}
+
+/* serialize an array of values into a newly allocated string */
+static char* serialize_to_str(const strmap* map, const char* key_count, const char* key_prefix)
+{
+    int i;
+
+    /* determine number of arguments */
+    const char* count_str = strmap_get(map, key_count);
+    if (count_str == NULL) {
+        SPAWN_ERR("Failed to read count key `%s'", key_count);
+        return NULL;
+    }
+    int count = atoi(count_str);
+
+    /* total up space to serialize */
+    size_t size = 0;
+    for (i = 0; i < count; i++) {
+        /* get next value */
+        const char* val = strmap_getf(map, "%s%d", key_prefix, i);
+        if (val == NULL) {
+            SPAWN_ERR("Missing key `%s%d'", key_prefix, i);
+            return NULL;
+        }
+
+        /* the +1 is for a single space between entries,
+         * and a terminating NUL after last */
+        size += strlen(val) + 1;
+    }
+
+    /* allocate space to serialize into */
+    char* str = (char*) SPAWN_MALLOC(size);
+
+    /* walk through map again and copy values into buffer */
+    char* ptr = str;
+    for (i = 0; i < count; i++) {
+        /* get value and its length */
+        const char* val = strmap_getf(map, "%s%d", key_prefix, i);
+        size_t len = strlen(val);
+
+        /* copy value to buffer */
+        memcpy(ptr, val, len);
+        ptr += len;
+
+        /* tack on single space or terminating NUL */
+        if (i < count-1) {
+            *ptr = ' ';
+        } else {
+            *ptr = '\0';
+        }
+        ptr++;
+    }
+
+    return str;
+}
+
+/* given a remote host, exec rsh or ssh of specified exe in named
+ * current working directory, using provided arguments and env
+ * variables.  The shell type is selected by the SH key, which
+ * in turn is set via the MV2_SPAWN_SH variable. */
+static int exec_remote(
     const char* host,
-    const char* sh,
-    const char* command)
+    const strmap* params,
+    const char* cwd,
+    const char* exe,
+    const strmap* argmap,
+    const strmap* envmap)
+{
+    /* get name of remote shell */
+    const char* shname = strmap_get(params, "SH");
+    if (shname == NULL) {
+        SPAWN_ERR("Failed to read name of remote shell from SH key");
+        return 1;
+    }
+
+    /* determine whether to use rsh or ssh */
+    if (strcmp(shname, "rsh") != 0 &&
+        strcmp(shname, "ssh") != 0)
+    {
+        SPAWN_ERR("Unknown launch remote shell: `%s'", shname);
+        return 1;
+    }
+
+    /* lookup paths to env and remote sh commands from params */
+    const char* envpath = strmap_get(params, "env");
+    const char* shpath  = strmap_get(params, shname);
+    if (envpath == NULL) {
+        SPAWN_ERR("Path to env command not set");
+        return 1;
+    }
+    if (shpath == NULL) {
+        SPAWN_ERR("Path to sh command not set");
+        return 1;
+    }
+
+    /* create strings for environment variables and arguments */
+    char* envstr = serialize_to_str(envmap, "ENVS", "ENV");
+    char* argstr = serialize_to_str(argmap, "ARGS", "ARG");
+
+    /* create command to execute with shell */
+    char* app_command = SPAWN_STRDUPF("cd %s && %s %s %s",
+        cwd, envpath, envstr, argstr);
+
+    /* exec process, we only return on error */
+    execl(shpath, shname, host, app_command, (char*)0);
+    SPAWN_ERR("Failed to exec program (execl errno=%d %s)", errno, strerror(errno));
+
+    /* clean up in case we do happen to fall through */
+    spawn_free(&app_command);
+    spawn_free(&argstr);
+    spawn_free(&envstr);
+
+    return 1;
+}
+
+/* exec sh shell to run specified exe in named current working
+ * directory, using provided arguments and env variables */
+static int exec_shell(
+    const strmap* params,
+    const char* cwd,
+    const char* exe,
+    const strmap* argmap,
+    const strmap* envmap)
+{
+    /* lookup paths to env and sh commands from params */
+    const char* envpath = strmap_get(params, "env");
+    const char* shpath  = strmap_get(params, "sh");
+    if (envpath == NULL) {
+        SPAWN_ERR("Path to env command not set");
+        return 1;
+    }
+    if (shpath == NULL) {
+        SPAWN_ERR("Path to sh command not set");
+        return 1;
+    }
+
+    /* create strings for environment variables and arguments */
+    char* envstr = serialize_to_str(envmap, "ENVS", "ENV");
+    char* argstr = serialize_to_str(argmap, "ARGS", "ARG");
+
+    /* create command to execute with shell */
+    char* app_command = SPAWN_STRDUPF("cd %s && %s %s %s",
+        cwd, envpath, envstr, argstr);
+
+    /* exec process, we only return on error */
+    execl(shpath, "sh", "-c", app_command, (char*)0);
+    SPAWN_ERR("Failed to exec program (execl errno=%d %s)", errno, strerror(errno));
+
+    /* clean up in case we do happen to fall through */
+    spawn_free(&app_command);
+    spawn_free(&argstr);
+    spawn_free(&envstr);
+
+    return 1;
+}
+
+/* directly exec specified exe in named current working
+ * directory, using provided arguments and env variables */
+static int exec_direct(
+    const strmap* params,
+    const char* cwd,
+    const char* exe,
+    const strmap* argmap,
+    const strmap* envmap)
+{
+    int i;
+
+    /* TODO: setup stdin and friends */
+
+    /* TODO: copy environment from current process? */
+
+    /* change to specified working directory (exec'd process will
+     * inherit this) */
+    if (chdir(cwd) != 0) {
+        SPAWN_ERR("Failed to change directory to `%s' (errno=%d %s)", cwd, errno, strerror(errno));
+        return 1;
+    }
+
+    /* determine number of arguments */
+    const char* args_str = strmap_get(argmap, "ARGS");
+    if (args_str == NULL) {
+        SPAWN_ERR("Failed to read ARGS key");
+        return 1;
+    }
+    int args = atoi(args_str);
+
+    /* allocate memory for argv array (one extra for terminating NULL) */
+    char** argv = (char**) SPAWN_MALLOC((args + 1) * sizeof(char*));
+
+    /* fill in argv array and set last entry to NULL */
+    for (i = 0; i < args; i++) {
+        argv[i] = strmap_getf(argmap, "ARG%d", i);
+    }
+    argv[args] = (char*) NULL;
+
+    /* determine number of environment variables */
+    const char* envs_str = strmap_get(envmap, "ENVS");
+    if (envs_str == NULL) {
+        SPAWN_ERR("Failed to read ENVS key");
+        spawn_free(&argv);
+        return 1;
+    }
+    int envs = atoi(envs_str);
+
+    /* allocate memory for envp array (one extra for terminating NULL) */
+    char** envp = (char**) SPAWN_MALLOC((envs + 1) * sizeof(char*));
+
+    /* fill in envp array and set last entry to NULL */
+    for (i = 0; i < envs; i++) {
+        envp[i] = strmap_getf(envmap, "ENV%d", i);
+    }
+    envp[envs] = (char*) NULL;
+
+    /* exec process, we only return on error */
+    execve(exe, argv, envp);
+    SPAWN_ERR("Failed to exec program (execve errno=%d %s)", errno, strerror(errno));
+
+    /* clean up in case we do happen to fall through */
+    spawn_free(&envp);
+    spawn_free(&argv);
+
+    return 1;
+}
+
+/* fork process, child execs specified command */
+static int temp_launch(
+    const char* host,
+    const strmap* params,
+    const char* cwd,
+    const char* exe,
+    const strmap* argmap,
+    const strmap* envmap)
 {
 #if 0
     int pipe_stdin[2], pipe_stdout[2], pipe_stderr[2];
@@ -230,20 +505,24 @@ static int temp_launch(
         /* TODO: execlp searches the user's path looking for the launch command,
          * so this could create a bunch of traffic on the file system if there
          * are lots of extra entries in user's path */
-        char* args;
-        if (strcmp(sh, "rsh") == 0) {
-            args = SPAWN_STRDUP(host);
-        } else if (strcmp(sh, "ssh") == 0) {
-            args = SPAWN_STRDUP(host);
-        } else if (strcmp(sh, "sh") == 0) {
-            args = SPAWN_STRDUP("-c");
+        if (host == NULL) {
+            /* local launch, use sh or just direct launch */
+            const char* local = strmap_get(params, "LOCAL");
+            if (local == NULL) {
+                SPAWN_ERR("Failed to read LOCAL key");
+            } else {
+                if (strcmp(local, "sh") == 0) {
+                    exec_shell(params, cwd, exe, argmap, envmap);
+                } else if (strcmp(local, "direct") == 0) {
+                    exec_direct(params, cwd, exe, argmap, envmap);
+                } else {
+                    SPAWN_ERR("Unknown LOCAL key value `%s'", local);
+                }
+            }
         } else {
-            SPAWN_ERR("unknown launch shell: `%s'", sh);
-            _exit(EXIT_FAILURE);
+            exec_remote(host, params, cwd, exe, argmap, envmap);
         }
 
-        SPAWN_DBG("Rank %d: %s %s '%s'", t->rank, sh, args, command);
-        execlp(sh, sh, args, command, (char *)NULL);
         SPAWN_ERR("create_child (execlp errno=%d %s)", errno, strerror(errno));
         _exit(EXIT_FAILURE);
     }
@@ -781,8 +1060,6 @@ static void app_start(struct session_t* s, const strmap* params)
 
     /* TODO: bcast application executables */
 
-    char host[] = "";
-
     /* check flag for whether we should initiate PMI exchange */
     const char* use_pmi_str = strmap_get(params, "PMI");
     int use_pmi = atoi(use_pmi_str);
@@ -813,11 +1090,19 @@ static void app_start(struct session_t* s, const strmap* params)
     if (!rank) { tid = begin_delta("launch app procs"); }
     signal_from_root(s);
     for (i = 0; i < numprocs; i++) {
+        strmap* argmap = strmap_new();
+        strmap_setf(argmap, "ARG0=%s", app_exe);
+        strmap_setf(argmap, "ARGS=%d", 1);
+
+        strmap* envmap = strmap_new();
+        strmap_setf(envmap, "ENV0=MV2_PMI_ADDR=%s", ep_name);
+        strmap_setf(envmap, "ENVS=%d", 1);
+
         /* launch child process */
-        char* app_command = SPAWN_STRDUPF("cd %s && env MV2_PMI_ADDR=%s %s",
-            app_dir, ep_name, app_exe);
-        temp_launch(s->tree, i, host, "sh", app_command);
-        spawn_free(&app_command);
+        temp_launch(NULL, s->params, app_dir, app_exe, argmap, envmap);
+
+        strmap_delete(&envmap);
+        strmap_delete(&argmap);
     }
     signal_to_root(s);
     if (!rank) { end_delta(tid); }
@@ -841,6 +1126,20 @@ static void app_start(struct session_t* s, const strmap* params)
     signal_to_root(s);
     if (!rank) { end_delta(tid); }
 
+    return;
+}
+
+/* given the name of a command, search for it in path,
+ * and insert full path in strmap */
+static void find_command(strmap* map, const char* cmd)
+{
+    char* path = path_search(cmd);
+    if (path != NULL) {
+        strmap_set(map, cmd, path);
+    } else {
+        strmap_set(map, cmd, cmd);
+    }
+    spawn_free(&path);
     return;
 }
 
@@ -905,6 +1204,7 @@ session_init (int argc, char * argv[])
         } else {
             strmap_setf(s->params, "DEG=%d", 2);
         }
+        /* TODO: check that degree is >= 2 */
 
         /* record the shell command (rsh or ssh) to start remote procs */
         if ((value = getenv("MV2_SPAWN_SH")) != NULL) {
@@ -912,6 +1212,36 @@ session_init (int argc, char * argv[])
         } else {
             strmap_setf(s->params, "SH=rsh");
         }
+        value = strmap_get(s->params, "SH");
+        if (strcmp(value, "ssh") != 0 &&
+            strcmp(value, "rsh") != 0)
+        {
+            SPAWN_ERR("MV2_SPAWN_SH must be either \"ssh\" or \"rsh\"");
+            _exit(EXIT_FAILURE);
+        }
+
+        /* detect whether we should use direct exec vs sh wrapper to
+         * start local procs */
+        value = getenv("MV2_SPAWN_LOCAL");
+        if (value != NULL) {
+            strmap_set(s->params, "LOCAL", value);
+        } else {
+            strmap_set(s->params, "LOCAL", "sh");
+        }
+        value = strmap_get(s->params, "LOCAL");
+        if (strcmp(value, "sh")     != 0 &&
+            strcmp(value, "direct") != 0)
+        {
+            SPAWN_ERR("MV2_SPAWN_LOCAL must be either \"sh\" or \"direct\"");
+            _exit(EXIT_FAILURE);
+        }
+
+        /* search for following commands in advance if path search
+         * optimization is enabled: ssh, rsh, sh, env */
+        find_command(s->params, "ssh");
+        find_command(s->params, "rsh");
+        find_command(s->params, "sh");
+        find_command(s->params, "env");
 
         printf("Spawn parameters map:\n");
         strmap_print(s->params);
@@ -1003,9 +1333,6 @@ session_start (struct session_t * s)
         children = t->children;
     }
 
-    /* get shell command we should use to launch children */
-    const char* spawn_sh = strmap_get(s->params, "SH");
-
     /* get the current working directory */
     char* spawn_cwd = spawn_getcwd();
 
@@ -1039,12 +1366,20 @@ session_start (struct session_t * s)
         }
 #endif
 
+        strmap* argmap = strmap_new();
+        strmap_setf(argmap, "ARG0=%s", s->spawn_exe);
+        strmap_setf(argmap, "ARGS=%d", 1);
+
+        strmap* envmap = strmap_new();
+        strmap_setf(envmap, "ENV0=MV2_SPAWN_PARENT=%s", s->ep_name);
+        strmap_setf(envmap, "ENV1=MV2_SPAWN_ID=%d", child_rank);
+        strmap_setf(envmap, "ENVS=%d", 2);
+
         /* launch child process */
-        char* spawn_command = SPAWN_STRDUPF("cd %s && env MV2_SPAWN_PARENT=%s MV2_SPAWN_ID=%d %s",
-            spawn_cwd, s->ep_name, child_rank, s->spawn_exe);
-        //node_launch(node_id, spawn_command);
-        temp_launch(t, i, host, spawn_sh, spawn_command);
-        spawn_free(&spawn_command);
+        temp_launch(host, s->params, spawn_cwd, s->spawn_exe, argmap, envmap);
+
+        strmap_delete(&envmap);
+        strmap_delete(&argmap);
     }
     if (!nodeid) { end_delta(tid); }
     spawn_free(&spawn_cwd);
