@@ -52,6 +52,8 @@ uint16_t rdma_ud_num_rndv_qps = 64;
 uint16_t rdma_hybrid_max_rc_conn = 64;
 uint16_t rdma_hybrid_pending_rc_conn = 0;
 
+struct timespec remain;
+struct timespec cm_timeout;
 mv2_proc_info_t proc;
 mv2_hca_info_t g_hca_info;
 mv2_ud_exch_info_t local_ep_info;
@@ -424,8 +426,6 @@ void comm_unlock(void)
 void* cm_timeout_handler(void *arg)
 {
     int nspin = 0;
-    struct timespec cm_timeout;
-    struct timespec remain;
 
     cm_timeout.tv_sec = rdma_ud_progress_timeout / 1000000;
     cm_timeout.tv_nsec = (rdma_ud_progress_timeout - cm_timeout.tv_sec * 1000000) * 1000;
@@ -645,7 +645,6 @@ int mv2_ud_send(const spawn_net_channel* ch, const void* buf, size_t size)
 
 int mv2_ud_recv(const spawn_net_channel* ch, void* buf, size_t size)
 {
-    int ret = 0;
     vbuf *v  = NULL;
     void *ptr = NULL;
     int parsed = 0;
@@ -663,8 +662,10 @@ int mv2_ud_recv(const spawn_net_channel* ch, void* buf, size_t size)
     MV2_Get_vc(dest_rank, &vc);
 
     v = mv2_ud_apprecv_window_retrieve_and_remove(&vc->mrail.app_recv_window);
-    if (v == NULL) {
-        mv2_wait_on_channel();
+    while (v == NULL) {
+        comm_unlock();
+        nanosleep(&cm_timeout, &remain);
+        comm_lock();
         v = mv2_ud_apprecv_window_retrieve_and_remove(&vc->mrail.app_recv_window);
     }
 
@@ -801,10 +802,14 @@ int mv2_wait_on_channel()
         rdma_ud_last_check = mv2_get_time_us();
     }
 
+    /* Unlock before going to sleep */
+    comm_unlock();
     /* Wait for the completion event */
     if (ibv_get_cq_event(g_hca_info.comp_channel, &ev_cq, &ev_ctx)) {
         ibv_error_abort(-1, "Failed to get cq_event\n");
     }
+    /* Get lock before processing */
+    comm_lock();
 
     /* Ack the event */
     ibv_ack_cq_events(ev_cq, 1);
