@@ -285,6 +285,10 @@ static char* serialize_to_str(const strmap* map, const char* key_count, const ch
     return str;
 }
 
+/* given a remote host, exec rsh or ssh of specified exe in named
+ * current working directory, using provided arguments and env
+ * variables.  The shell type is selected by the SH key, which
+ * in turn is set via the MV2_SPAWN_SH variable. */
 static int exec_remote(
     const char* host,
     const strmap* params,
@@ -297,7 +301,7 @@ static int exec_remote(
     const char* shname = strmap_get(params, "SH");
     if (shname == NULL) {
         SPAWN_ERR("Failed to read name of remote shell from SH key");
-        _exit(EXIT_FAILURE);
+        return 1;
     }
 
     /* determine whether to use rsh or ssh */
@@ -305,7 +309,7 @@ static int exec_remote(
         strcmp(shname, "ssh") != 0)
     {
         SPAWN_ERR("Unknown launch remote shell: `%s'", shname);
-        _exit(EXIT_FAILURE);
+        return 1;
     }
 
     /* lookup paths to env and remote sh commands from params */
@@ -313,11 +317,11 @@ static int exec_remote(
     const char* shpath  = strmap_get(params, shname);
     if (envpath == NULL) {
         SPAWN_ERR("Path to env command not set");
-        _exit(EXIT_FAILURE);
+        return 1;
     }
     if (shpath == NULL) {
         SPAWN_ERR("Path to sh command not set");
-        _exit(EXIT_FAILURE);
+        return 1;
     }
 
     /* create strings for environment variables and arguments */
@@ -330,16 +334,18 @@ static int exec_remote(
 
     /* exec process, we only return on error */
     execl(shpath, shname, host, app_command, (char*)0);
-    SPAWN_ERR("create_child (execl errno=%d %s)", errno, strerror(errno));
-    _exit(EXIT_FAILURE);
+    SPAWN_ERR("Failed to exec program (execl errno=%d %s)", errno, strerror(errno));
 
+    /* clean up in case we do happen to fall through */
     spawn_free(&app_command);
     spawn_free(&argstr);
     spawn_free(&envstr);
 
-    return 0;
+    return 1;
 }
 
+/* exec sh shell to run specified exe in named current working
+ * directory, using provided arguments and env variables */
 static int exec_shell(
     const strmap* params,
     const char* cwd,
@@ -352,11 +358,11 @@ static int exec_shell(
     const char* shpath  = strmap_get(params, "sh");
     if (envpath == NULL) {
         SPAWN_ERR("Path to env command not set");
-        _exit(EXIT_FAILURE);
+        return 1;
     }
     if (shpath == NULL) {
         SPAWN_ERR("Path to sh command not set");
-        _exit(EXIT_FAILURE);
+        return 1;
     }
 
     /* create strings for environment variables and arguments */
@@ -369,16 +375,18 @@ static int exec_shell(
 
     /* exec process, we only return on error */
     execl(shpath, "sh", "-c", app_command, (char*)0);
-    SPAWN_ERR("create_child (execl errno=%d %s)", errno, strerror(errno));
-    _exit(EXIT_FAILURE);
+    SPAWN_ERR("Failed to exec program (execl errno=%d %s)", errno, strerror(errno));
 
+    /* clean up in case we do happen to fall through */
     spawn_free(&app_command);
     spawn_free(&argstr);
     spawn_free(&envstr);
 
-    return 0;
+    return 1;
 }
 
+/* directly exec specified exe in named current working
+ * directory, using provided arguments and env variables */
 static int exec_direct(
     const strmap* params,
     const char* cwd,
@@ -396,14 +404,14 @@ static int exec_direct(
      * inherit this) */
     if (chdir(cwd) != 0) {
         SPAWN_ERR("Failed to change directory to `%s' (errno=%d %s)", cwd, errno, strerror(errno));
-        _exit(EXIT_FAILURE);
+        return 1;
     }
 
     /* determine number of arguments */
     const char* args_str = strmap_get(argmap, "ARGS");
     if (args_str == NULL) {
         SPAWN_ERR("Failed to read ARGS key");
-        _exit(EXIT_FAILURE);
+        return 1;
     }
     int args = atoi(args_str);
 
@@ -420,7 +428,8 @@ static int exec_direct(
     const char* envs_str = strmap_get(envmap, "ENVS");
     if (envs_str == NULL) {
         SPAWN_ERR("Failed to read ENVS key");
-        _exit(EXIT_FAILURE);
+        spawn_free(&argv);
+        return 1;
     }
     int envs = atoi(envs_str);
 
@@ -435,15 +444,16 @@ static int exec_direct(
 
     /* exec process, we only return on error */
     execve(exe, argv, envp);
-    SPAWN_ERR("create_child (execve errno=%d %s)", errno, strerror(errno));
-    _exit(EXIT_FAILURE);
+    SPAWN_ERR("Failed to exec program (execve errno=%d %s)", errno, strerror(errno));
 
+    /* clean up in case we do happen to fall through */
     spawn_free(&envp);
     spawn_free(&argv);
 
-    return 0;
+    return 1;
 }
 
+/* fork process, child execs specified command */
 static int temp_launch(
     const char* host,
     const strmap* params,
@@ -500,11 +510,14 @@ static int temp_launch(
             const char* local = strmap_get(params, "LOCAL");
             if (local == NULL) {
                 SPAWN_ERR("Failed to read LOCAL key");
-            }
-            if (strcmp(local, "sh") == 0) {
-                exec_shell(params, cwd, exe, argmap, envmap);
-            } else if (strcmp(local, "direct") == 0) {
-                exec_direct(params, cwd, exe, argmap, envmap);
+            } else {
+                if (strcmp(local, "sh") == 0) {
+                    exec_shell(params, cwd, exe, argmap, envmap);
+                } else if (strcmp(local, "direct") == 0) {
+                    exec_direct(params, cwd, exe, argmap, envmap);
+                } else {
+                    SPAWN_ERR("Unknown LOCAL key value `%s'", local);
+                }
             }
         } else {
             exec_remote(host, params, cwd, exe, argmap, envmap);
