@@ -6,6 +6,7 @@
 #include "spawn_net.h"
 #include "spawn_net_tcp.h"
 #include "spawn_net_fifo.h"
+#include "spawn_net_ib.h"
 #include "spawn_net_util.h"
 
 #define SPAWN_SUCCESS (0)

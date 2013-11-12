@@ -17,6 +17,8 @@ spawn_net_endpoint* spawn_net_open(spawn_net_type type)
     return spawn_net_open_tcp();
   } else if (type == SPAWN_NET_TYPE_FIFO) {
     return spawn_net_open_fifo();
+  } else if (type == SPAWN_NET_TYPE_IB) {
+    return spawn_net_open_ib();
   } else {
     SPAWN_ERR("Unknown endpoint type %d", (int)type);
     return SPAWN_NET_ENDPOINT_NULL;
@@ -44,6 +46,8 @@ int spawn_net_close(spawn_net_endpoint** pep)
     return spawn_net_close_tcp(pep);
   } else if (ep->type == SPAWN_NET_TYPE_FIFO) {
     return spawn_net_close_fifo(pep);
+  } else if (ep->type == SPAWN_NET_TYPE_IB) {
+    return spawn_net_close_ib(pep);
   } else {
     SPAWN_ERR("Unknown endpoint type %d", (int)ep->type);
     return SPAWN_FAILURE;
@@ -74,6 +78,8 @@ spawn_net_type spawn_net_infer_type(const char* name)
     return SPAWN_NET_TYPE_TCP;
   } else if (strncmp(name, "FIFO:", 5) == 0) {
     return SPAWN_NET_TYPE_FIFO;
+  } else if (strncmp(name, "IB:", 3) == 0) {
+    return SPAWN_NET_TYPE_IB;
   } else {
     return SPAWN_NET_TYPE_NULL;
   }
@@ -89,6 +95,8 @@ spawn_net_channel* spawn_net_connect(const char* name)
     return spawn_net_connect_tcp(name);
   } else if (type == SPAWN_NET_TYPE_FIFO) {
     return spawn_net_connect_fifo(name);
+  } else if (type == SPAWN_NET_TYPE_IB) {
+    return spawn_net_connect_ib(name);
   } else {
     SPAWN_ERR("Unknown endpoint name format %s", name);
     return SPAWN_NET_CHANNEL_NULL;
@@ -107,6 +115,8 @@ spawn_net_channel* spawn_net_accept(const spawn_net_endpoint* ep)
     return spawn_net_accept_tcp(ep);
   } else if (ep->type == SPAWN_NET_TYPE_FIFO) {
     return spawn_net_accept_fifo(ep);
+  } else if (ep->type == SPAWN_NET_TYPE_IB) {
+    return spawn_net_accept_ib(ep);
   } else {
     SPAWN_ERR("Unknown endpoint type %d", ep->type);
     return SPAWN_NET_CHANNEL_NULL;
@@ -134,6 +144,8 @@ int spawn_net_disconnect(spawn_net_channel** pch)
     return spawn_net_disconnect_tcp(pch);
   } else if (ch->type == SPAWN_NET_TYPE_FIFO) {
     return spawn_net_disconnect_fifo(pch);
+  } else if (ch->type == SPAWN_NET_TYPE_IB) {
+    return spawn_net_disconnect_ib(pch);
   } else {
     SPAWN_ERR("Unknown channel type %d", ch->type);
     return SPAWN_FAILURE;
@@ -152,6 +164,8 @@ int spawn_net_read(const spawn_net_channel* ch, void* buf, size_t size)
     return spawn_net_read_tcp(ch, buf, size);
   } else if (ch->type == SPAWN_NET_TYPE_FIFO) {
     return spawn_net_read_fifo(ch, buf, size);
+  } else if (ch->type == SPAWN_NET_TYPE_IB) {
+    return spawn_net_read_ib(ch, buf, size);
   } else {
     SPAWN_ERR("Unknown channel type %d", ch->type);
     return SPAWN_FAILURE;
@@ -170,6 +184,8 @@ int spawn_net_write(const spawn_net_channel* ch, const void* buf, size_t size)
     return spawn_net_write_tcp(ch, buf, size);
   } else if (ch->type == SPAWN_NET_TYPE_FIFO) {
     return spawn_net_write_fifo(ch, buf, size);
+  } else if (ch->type == SPAWN_NET_TYPE_IB) {
+    return spawn_net_write_ib(ch, buf, size);
   } else {
     SPAWN_ERR("Unknown channel type %d", ch->type);
     return SPAWN_FAILURE;

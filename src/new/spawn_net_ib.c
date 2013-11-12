@@ -11,6 +11,8 @@
  */
 #include <ib_internal.h>
 
+#include "spawn_internal.h"
+
 extern int my_pg_rank;
 extern int my_pg_size;
 
@@ -30,6 +32,11 @@ spawn_net_endpoint* spawn_net_open_ib()
     }
 
     return ep;
+}
+
+int spawn_net_close_ib(spawn_net_endpoint** pep)
+{
+    /* TODO: close down UD endpoint */
 }
 
 spawn_net_channel* spawn_net_connect_ib(const char* name)

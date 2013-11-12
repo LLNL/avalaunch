@@ -31,8 +31,8 @@ libpmi_la_SOURCES = \
   spawn_net.c spawn_net.h \
   spawn_net_tcp.c spawn_net_tcp.h \
   spawn_net_fifo.c spawn_net_fifo.h \
-  spawn_net_util.c spawn_net_util.h \
   spawn_net_ib.c spawn_net_ib.h \
+  spawn_net_util.c spawn_net_util.h \
   spawn_util.c spawn_util.h \
   strmap.c strmap.h \
   ring.c ring.h \
