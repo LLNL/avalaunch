@@ -661,7 +661,7 @@ const char* strmap_get(const strmap* tree, const char* key)
 
 /* returns pointer to value string if found, NULL otherwise,
  * key can use printf formatting */
-const char* strmap_getf(strmap* map, const char* format, ...)
+const char* strmap_getf(const strmap* map, const char* format, ...)
 {
   va_list args;
   char* str = NULL;
