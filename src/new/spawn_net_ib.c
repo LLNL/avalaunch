@@ -73,9 +73,18 @@ int spawn_net_disconnect_ib(spawn_net_channel** pch)
 
 int spawn_net_read_ib(const spawn_net_channel* ch, void* buf, size_t size)
 {
+    int ret = 0;
+
     comm_lock();
+    ret = mv2_ud_recv(ch, buf, size);
+    if (ret < 0) {
+        fprintf(stderr, "Couldn't send message\n");
+        comm_unlock();
+        return ret;
+    }
     comm_unlock();
-    return 0;
+
+    return ret;
 }
 
 int spawn_net_write_ib(const spawn_net_channel* ch, const void* buf, size_t size)

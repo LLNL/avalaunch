@@ -66,6 +66,40 @@ static inline void mv2_ud_process_ack(MPIDI_VC_t *vc, uint16_t acknum)
     }    
 }
 
+inline void mv2_ud_apprecv_window_add(message_queue_t *q, vbuf *v)
+{
+    v->apprecvwin_msg.next = v->apprecvwin_msg.prev = NULL;
+
+    if(q->head == NULL) {
+        q->head = v;
+    } else {
+        (q->tail)->apprecvwin_msg.next = v;
+    }
+
+    q->tail = v;
+    q->count++;
+}
+
+inline vbuf* mv2_ud_apprecv_window_retrieve_and_remove(message_queue_t *q)
+{
+    vbuf *v = q->head;
+
+    if (v == NULL) {
+        return NULL;
+    }
+
+    q->head = v->apprecvwin_msg.next;
+    q->count--;
+    if (q->head == NULL ) {
+        q->tail = NULL;
+        assert(q->count == 0);
+    }
+
+    v->apprecvwin_msg.next = NULL;
+
+    return v;
+}
+
 static inline void mv2_ud_place_recvwin(vbuf *v)
 {
     MPIDI_VC_t *vc;
@@ -81,8 +115,8 @@ static inline void mv2_ud_place_recvwin(vbuf *v)
     if (INCL_BETWEEN(v->seqnum, recv_win_start, recv_win_end)) {
         if (v->seqnum == vc->mrail.seqnum_next_torecv) {
             PRINT_DEBUG(DEBUG_UD_verbose>2,"get one with in-order seqnum:%d \n",v->seqnum);
-            /* process in-order message */
-            handle_read(vc, v);
+            /* process in-order message; add to app_recv window */
+            mv2_ud_apprecv_window_add(&vc->mrail.app_recv_window, v);
             vc->mrail.seqnum_next_toack = vc->mrail.seqnum_next_torecv;
             ++vc->mrail.seqnum_next_torecv;
             if (v->transport == IB_TRANSPORT_UD) {
@@ -106,7 +140,9 @@ static inline void mv2_ud_place_recvwin(vbuf *v)
                 (vc->mrail.ud.recv_window.head->seqnum == 
                  vc->mrail.seqnum_next_torecv)) {
             PRINT_DEBUG(DEBUG_UD_verbose>1,"get one with in-order seqnum:%d \n",vc->mrail.seqnum_next_torecv);
-            handle_read(vc, vc->mrail.ud.recv_window.head);
+            /* process in-order message; add to app_recv window */
+            mv2_ud_apprecv_window_add(&vc->mrail.app_recv_window, vc->mrail.ud.recv_window.head);
+
             mv2_ud_recv_window_remove(&vc->mrail.ud.recv_window);
             vc->mrail.seqnum_next_toack = vc->mrail.seqnum_next_torecv;
             ++vc->mrail.seqnum_next_torecv;

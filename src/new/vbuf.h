@@ -203,6 +203,7 @@ typedef struct vbuf
     double timestamp;
 #if defined(_ENABLE_UD_)
     uint8_t in_sendwin;
+    LINK apprecvwin_msg;
     LINK sendwin_msg;
     LINK recvwin_msg;
     LINK extwin_msg;

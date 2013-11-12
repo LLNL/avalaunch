@@ -59,6 +59,7 @@ MPIDI_VC_t *ud_vc_info = NULL;
 static pthread_mutex_t comm_lock_object;
 static pthread_t comm_thread;
 
+int mv2_wait_on_channel();
 int mv2_ud_init_vc (int rank);
 void* cm_timeout_handler(void *arg);
 int mv2_post_ud_recv_buffers(int num_bufs, mv2_ud_ctx_t *ud_ctx);
@@ -294,7 +295,7 @@ spawn_net_endpoint* mv2_init_ud(int nchild)
     }
 
     for (i = 0; i < nchild; ++i) {
-        mv2_ud_init_vc (i);
+        mv2_ud_init_vc(i);
     }
 
     proc.post_send = post_ud_send;
@@ -354,6 +355,7 @@ int mv2_ud_init_vc (int rank)
     MESSAGE_QUEUE_INIT(&ud_vc_info[rank].mrail.ud.send_window);
     MESSAGE_QUEUE_INIT(&ud_vc_info[rank].mrail.ud.ext_window);
     MESSAGE_QUEUE_INIT(&ud_vc_info[rank].mrail.ud.recv_window);
+    MESSAGE_QUEUE_INIT(&ud_vc_info[rank].mrail.app_recv_window);
 
     return 0;
 }
@@ -421,6 +423,7 @@ void comm_unlock(void)
 
 void* cm_timeout_handler(void *arg)
 {
+    int nspin = 0;
     struct timespec cm_timeout;
     struct timespec remain;
 
@@ -431,6 +434,9 @@ void* cm_timeout_handler(void *arg)
         comm_unlock();
         nanosleep(&cm_timeout, &remain);
         comm_lock();
+        for (nspin = 0; nspin < rdma_ud_progress_spin; nspin++) {
+            mv2_poll_cq();
+        }
         if (UD_ACK_PROGRESS_TIMEOUT) {
             mv2_check_resend();
             MV2_UD_SEND_ACKS();
@@ -586,6 +592,10 @@ int mv2_ud_send_internal(MPIDI_VC_t *vc, const void* buf, size_t size)
     int avail = 0;
     MPIDI_CH3I_MRAILI_Pkt_comm_header *pkt = NULL;
     vbuf *v = get_ud_vbuf();
+
+    /* Offset for the packet header */
+    v->content_size = sizeof(MPIDI_CH3I_MRAILI_Pkt_comm_header);
+
     void *ptr = (v->buffer + v->content_size);
 
     avail = MRAIL_MAX_UD_SIZE - v->content_size;
@@ -633,6 +643,44 @@ int mv2_ud_send(const spawn_net_channel* ch, const void* buf, size_t size)
     return ret;
 }
 
+int mv2_ud_recv(const spawn_net_channel* ch, void* buf, size_t size)
+{
+    int ret = 0;
+    vbuf *v  = NULL;
+    void *ptr = NULL;
+    int parsed = 0;
+    int dest_rank = -1;
+    size_t recv_size = 0;
+    MPIDI_VC_t *vc = NULL;
+    mv2_ud_exch_info_t ep_info;
+
+    parsed = sscanf(ch->name, "%06x:%04x:%06x", &dest_rank, &ep_info.lid, &ep_info.qpn);
+    if (parsed != 3) {
+        fprintf(stderr, "Couldn't parse ep info from %s\n", ch->name);
+        return NULL;
+    }
+
+    MV2_Get_vc(dest_rank, &vc);
+
+    v = mv2_ud_apprecv_window_retrieve_and_remove(&vc->mrail.app_recv_window);
+    if (v == NULL) {
+        mv2_wait_on_channel();
+        v = mv2_ud_apprecv_window_retrieve_and_remove(&vc->mrail.app_recv_window);
+    }
+
+    ptr = v->buffer + sizeof(MPIDI_CH3I_MRAILI_Pkt_comm_header);
+
+    recv_size = v->content_size - sizeof(MPIDI_CH3I_MRAILI_Pkt_comm_header);
+
+    assert(size >= recv_size);
+
+    memcpy(buf, ptr, recv_size);
+
+    MRAILI_Release_vbuf(v);
+
+    return recv_size;
+}
+
 spawn_net_channel* mv2_ep_accept()
 {
     int i = 0;
@@ -667,11 +715,6 @@ spawn_net_channel* mv2_ep_accept()
     return ch;
 }
 
-int handle_read(MPIDI_VC_t *vc, vbuf *v)
-{
-    return 0;
-}
-
 int mv2_poll_cq()
 {
     int ne = 0;
@@ -682,72 +725,69 @@ int mv2_poll_cq()
     MPIDI_CH3I_MRAILI_Pkt_comm_header *p = NULL;
 
     /* poll cq */
-    while (1) {
-        ne = ibv_poll_cq(cq, 1, &wc);
-        if ( 1 == ne ) {
-            if ( IBV_WC_SUCCESS != wc.status ) {
-                fprintf(stderr, "IBV_WC_SUCCESS != wc.status (%d)\n", wc.status);
-                exit(-1);
-            }
-            /* Get VBUF */
-            v = (vbuf *) ((uintptr_t) wc.wr_id);
-            /* Get VC from VBUF */
-            vc = (MPIDI_VC_t*) (v->vc);
     
-            switch (wc.opcode) {
-                case IBV_WC_SEND:
-                case IBV_WC_RDMA_READ:
-                case IBV_WC_RDMA_WRITE:
-                    if (v->pheader && IS_CNTL_MSG(p)) {
-                    }
-                    mv2_ud_update_send_credits(v);
-                    if (v->flags & UD_VBUF_SEND_INPROGRESS) {
-                        v->flags &= ~(UD_VBUF_SEND_INPROGRESS);
-                        if (v->flags & UD_VBUF_FREE_PENIDING) {
-                            v->flags &= ~(UD_VBUF_FREE_PENIDING);
-                            MRAILI_Release_vbuf(v);
-                        }
-                    }
-    
-                    v = NULL;
-                    break;
-                case IBV_WC_RECV:
-                    SET_PKT_LEN_HEADER(v, wc);
-                    SET_PKT_HEADER_OFFSET(v);
-    
-                    p = v->pheader;
-                    /* Retrieve the VC */
-                    MV2_Get_vc(p->src.rank, &vc);
-    
-                    v->vc   = vc;
-                    v->rail = p->rail;
-    
-                    if (p->type == MPIDI_CH3_PKT_UD_CONNECT) {
-                        mv2_ud_set_vc_info(p->src.rank, (mv2_ud_exch_info_t*) v->buffer, RDMA_DEFAULT_PORT);
-                    }
-
-                    MRAILI_Process_recv(v);
-
-                    proc.ud_ctx->num_recvs_posted--;
-                    if(proc.ud_ctx->num_recvs_posted < proc.ud_ctx->credit_preserve) {
-                        proc.ud_ctx->num_recvs_posted += mv2_post_ud_recv_buffers(
-                                (RDMA_DEFAULT_MAX_UD_RECV_WQE - proc.ud_ctx->num_recvs_posted),
-                                proc.ud_ctx);
-                    }
-                    break;
-                default:
-                    fprintf(stderr, "Invalid opcode from ibv_poll_cq()\n");
-                    break;
-            }
-            /* break out of while loop */
-            break;
-        } else if ( ne < 0 ){
-            fprintf(stderr, "poll cq error\n");
+    ne = ibv_poll_cq(cq, 1, &wc);
+    if ( 1 == ne ) {
+        if ( IBV_WC_SUCCESS != wc.status ) {
+            fprintf(stderr, "IBV_WC_SUCCESS != wc.status (%d)\n", wc.status);
             exit(-1);
         }
+        /* Get VBUF */
+        v = (vbuf *) ((uintptr_t) wc.wr_id);
+        /* Get VC from VBUF */
+        vc = (MPIDI_VC_t*) (v->vc);
+    
+        switch (wc.opcode) {
+            case IBV_WC_SEND:
+            case IBV_WC_RDMA_READ:
+            case IBV_WC_RDMA_WRITE:
+                if (v->pheader && IS_CNTL_MSG(p)) {
+                }
+                mv2_ud_update_send_credits(v);
+                if (v->flags & UD_VBUF_SEND_INPROGRESS) {
+                    v->flags &= ~(UD_VBUF_SEND_INPROGRESS);
+                    if (v->flags & UD_VBUF_FREE_PENIDING) {
+                        v->flags &= ~(UD_VBUF_FREE_PENIDING);
+                        MRAILI_Release_vbuf(v);
+                    }
+                }
+    
+                v = NULL;
+                break;
+            case IBV_WC_RECV:
+                SET_PKT_LEN_HEADER(v, wc);
+                SET_PKT_HEADER_OFFSET(v);
+    
+                p = v->pheader;
+                /* Retrieve the VC */
+                MV2_Get_vc(p->src.rank, &vc);
+    
+                v->vc   = vc;
+                v->rail = p->rail;
+    
+                if (p->type == MPIDI_CH3_PKT_UD_CONNECT) {
+                    mv2_ud_set_vc_info(p->src.rank, (mv2_ud_exch_info_t*) v->buffer, RDMA_DEFAULT_PORT);
+                }
+
+                MRAILI_Process_recv(v);
+
+                proc.ud_ctx->num_recvs_posted--;
+                if(proc.ud_ctx->num_recvs_posted < proc.ud_ctx->credit_preserve) {
+                    proc.ud_ctx->num_recvs_posted += mv2_post_ud_recv_buffers(
+                            (RDMA_DEFAULT_MAX_UD_RECV_WQE - proc.ud_ctx->num_recvs_posted),
+                            proc.ud_ctx);
+                }
+                break;
+            default:
+                fprintf(stderr, "Invalid opcode from ibv_poll_cq()\n");
+                break;
+        }
+    } else if ( ne < 0 ){
+        fprintf(stderr, "poll cq error\n");
+        exit(-1);
     }
 
-    return 0;
+    return ne;
 }
 
 int mv2_wait_on_channel()
