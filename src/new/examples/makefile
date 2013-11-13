@@ -33,6 +33,7 @@ all: clean
 	mpicc -g -O0 -o connect_test connect_test.c $(OBJS) -I../. $(LIBS)
 	mpicc -g -O0 -o connect_test2 connect_test2.c $(OBJS) -I../. $(LIBS)
 	mpicc -g -O0 -o fifo_test fifo_test.c $(OBJS) -I../. $(LIBS)
+	mpicc -g -O0 -o ibud_test ibud_test.c $(OBJS) -I../. $(LIBS)
 
 clean:
-	rm -rf *.o strmap_test connect_test connect_test2 fifo_test pmi_test ring_test
+	rm -rf *.o strmap_test connect_test connect_test2 fifo_test ibud_test pmi_test ring_test
