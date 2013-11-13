@@ -354,13 +354,13 @@ spawn_net_endpoint* mv2_init_ud(int nchild)
     local_ep_info.qpn = proc.ud_ctx->qp->qp_num;
 
     ep = SPAWN_MALLOC(sizeof(spawn_net_endpoint));
-    ep->name = SPAWN_MALLOC(sizeof(char)*RDMA_CONNECTION_INFO_LEN);
+    ep->name = SPAWN_MALLOC(sizeof(char) * (3 + RDMA_CONNECTION_INFO_LEN));
     ep->data = SPAWN_MALLOC(sizeof(mv2_ud_exch_info_t));
 
     /* Populate spawn_net_endpoint with correct data */
     ep->type = SPAWN_NET_TYPE_IB;
 
-    sprintf(ep->name, "%06x:%04x:%06x", PG_RANK, local_ep_info.lid, local_ep_info.qpn);
+    sprintf(ep->name, "IB:%06x:%04x:%06x", PG_RANK, local_ep_info.lid, local_ep_info.qpn);
 
     memcpy(ep->data, &local_ep_info, sizeof(mv2_ud_exch_info_t));
 
@@ -407,18 +407,18 @@ int mv2_ud_init_vc (int rank)
 
 int mv2_ud_set_vc_info (int rank, mv2_ud_exch_info_t *rem_info, int port)
 {
-    struct ibv_ah_attr ah_attr;
-
-    assert(rank < PG_SIZE);
+    //assert(rank < PG_SIZE);
 
     if (ud_vc_info[rank].mrail.state == MRAILI_UD_CONNECTING ||
-        ud_vc_info[rank].mrail.state == MRAILI_UD_CONNECTED) {
+        ud_vc_info[rank].mrail.state == MRAILI_UD_CONNECTED)
+    {
         /* Duplicate message - return */
         return 0;
     }
 
     //PRINT_DEBUG(DEBUG_UD_verbose>0,"lid:%d\n", rem_info->lid );
     
+    struct ibv_ah_attr ah_attr;
     memset(&ah_attr, 0, sizeof(ah_attr));
 
     ah_attr.sl              = RDMA_DEFAULT_SERVICE_LEVEL;
@@ -428,7 +428,8 @@ int mv2_ud_set_vc_info (int rank, mv2_ud_exch_info_t *rem_info, int port)
     ah_attr.src_path_bits   = 0; 
 
     ud_vc_info[rank].mrail.ud.ah = ibv_create_ah(g_hca_info.pd, &ah_attr);
-    if(!(ud_vc_info[rank].mrail.ud.ah)){    
+    if(ud_vc_info[rank].mrail.ud.ah == NULL){    
+        /* TODO: man page doesn't say anything about errno */
         SPAWN_ERR("Error in creating address handle\n");
         return -1;
     }
@@ -599,30 +600,22 @@ int mv2_send_connect_message(MPIDI_VC_t *vc)
 
 spawn_net_channel* mv2_ep_connect(const char *name)
 {
-    int parsed = 0;
-    int dest_rank = -1;
-    MPIDI_VC_t *vc = NULL;
-    mv2_ud_exch_info_t ep_info;
-    spawn_net_channel* ch = SPAWN_NET_CHANNEL_NULL;
+    /* TODO: allocate new VC's dynamically, associate them with channel */
 
-    parsed = sscanf(name, "%06x:%04x:%06x", &dest_rank, &ep_info.lid, &ep_info.qpn);
+    /* extract lid and queue pair address from endpoint name */
+    int dest_rank;
+    mv2_ud_exch_info_t ep_info;
+    int parsed = sscanf(name, "IB:%06x:%04x:%06x", &dest_rank, &ep_info.lid, &ep_info.qpn);
     if (parsed != 3) {
         SPAWN_ERR("Couldn't parse ep info from %s\n", name);
         return SPAWN_NET_CHANNEL_NULL;
     }
 
-    ch = SPAWN_MALLOC(sizeof(spawn_net_channel));
-    ch->name = SPAWN_MALLOC(sizeof(char)*RDMA_CONNECTION_INFO_LEN);
-    ch->data = SPAWN_MALLOC(sizeof(mv2_ud_exch_info_t));
-
-    /* Populate spawn_net_channel with information */
-    ch->type = SPAWN_NET_TYPE_IB;
-    sprintf(ch->name, "%06x:%04x:%06x", dest_rank, local_ep_info.lid, local_ep_info.qpn);
-    memcpy(ch->data, &ep_info, sizeof(mv2_ud_exch_info_t));
-
     /* Set VC info */
     mv2_ud_set_vc_info(dest_rank, &ep_info, RDMA_DEFAULT_PORT);
 
+    /* lookup virtual channel for named process */
+    MPIDI_VC_t *vc = NULL;
     MV2_Get_vc(dest_rank, &vc);
 
     /* Send connect message to destination */
@@ -630,6 +623,18 @@ spawn_net_channel* mv2_ep_connect(const char *name)
 
     /* Change state to connected */
     ud_vc_info[dest_rank].mrail.state = MRAILI_UD_CONNECTED;
+
+    /* allocate spawn net channel data structure */
+    spawn_net_channel* ch = SPAWN_MALLOC(sizeof(spawn_net_channel));
+    ch->type = SPAWN_NET_TYPE_IB;
+
+    /* Fill in channel name */
+    ch->name = SPAWN_MALLOC(sizeof(char) * RDMA_CONNECTION_INFO_LEN);
+    sprintf(ch->name, "%06x:%04x:%06x", dest_rank, ep_info.lid, ep_info.qpn);
+
+    /* copy endpoint info to channel data */
+    ch->data = SPAWN_MALLOC(sizeof(mv2_ud_exch_info_t));
+    memcpy(ch->data, &ep_info, sizeof(mv2_ud_exch_info_t));
 
     return ch;
 }
