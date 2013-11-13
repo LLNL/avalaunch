@@ -458,13 +458,21 @@ void mv2_ud_destroy_ctx (mv2_ud_ctx_t *ctx)
 /*Interface to lock/unlock connection manager*/
 void comm_lock(void)
 {           
-    pthread_mutex_lock(&comm_lock_object);
-}               
+    int rc = pthread_mutex_lock(&comm_lock_object);
+    if (rc != 0) {
+        SPAWN_ERR("Failed to lock comm mutex (pthread_mutex_lock rc=%d %s)", rc, strerror(rc));
+    }
+    return;
+}
             
 void comm_unlock(void)
 {           
-    pthread_mutex_unlock(&comm_lock_object);
-}               
+    int rc = pthread_mutex_unlock(&comm_lock_object);
+    if (rc != 0) {
+        SPAWN_ERR("Failed to unlock comm mutex (pthread_mutex_unlock rc=%d %s)", rc, strerror(rc));
+    }
+    return;
+}
 
 void* cm_timeout_handler(void *arg)
 {
