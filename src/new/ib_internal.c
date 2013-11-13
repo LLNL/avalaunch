@@ -70,62 +70,113 @@ int mv2_post_ud_recv_buffers(int num_bufs, mv2_ud_ctx_t *ud_ctx);
 /* Get HCA parameters */
 static int mv2_get_hca_info(int devnum, mv2_hca_info_t *hca_info)
 {
-    int i = 0, j = 0, retval;
-    int num_devices = 0;
-    struct ibv_device **dev_list = NULL;
+    int i;
 
-    dev_list = ibv_get_device_list(&num_devices);
-
-    for (i = 0; i < num_devices; i++) {
-        if (j == devnum) {
-            hca_info->device = dev_list[i];
-            break;
-        }
-        j++;
+    /* get list of HCA devices */
+    int num_devices;
+    struct ibv_device** dev_list = ibv_get_device_list(&num_devices);
+    if (dev_list == NULL) {
+        SPAWN_ERR("Failed to get device list (ibv_get_device_list errno=%d %s)", errno, strerror(errno));
+        return -1;
     }
 
+    /* check that caller's requested device is within range */
+    if (devnum >= num_devices) {
+        SPAWN_ERR("Requested device number %d higher than max devices %d", devnum, num_devices);
+        ibv_free_device_list(dev_list);
+        return -1;
+    }
+
+    /* pick out device specified by caller */
+    struct ibv_device* dev = dev_list[devnum];
+
     /* Open the HCA for communication */
-    hca_info->context = ibv_open_device(hca_info->device);
-    if (!hca_info->context) {
+    struct ibv_context* context = ibv_open_device(dev);
+    if (context == NULL) {
+        /* TODO: man page doesn't say anything about errno */
         SPAWN_ERR("Cannot create context for HCA");
+        ibv_free_device_list(dev_list);
         return -1;
     }
 
     /* Create a protection domain for communication */
-    hca_info->pd = ibv_alloc_pd(hca_info->context);
-    if (!hca_info->pd) {
+    struct ibv_pd* pd = ibv_alloc_pd(context);
+    if (pd == NULL) {
+        /* TODO: man page doesn't say anything about errno */
         SPAWN_ERR("Cannot create PD for HCA");
+        ibv_close_device(context);
+        ibv_free_device_list(dev_list);
         return -1;
     }
     
     /* Get the attributes of the HCA */
-    retval = ibv_query_device(g_hca_info.context, &g_hca_info.device_attr);
+    struct ibv_device_attr attr;
+    int retval = ibv_query_device(context, &attr);
     if (retval) {
-        SPAWN_ERR("Cannot query HCA");
+        SPAWN_ERR("Cannot query HCA (ibv_query_device errno=%d %s)", retval, strerror(retval));
+        ibv_dealloc_pd(pd);
+        ibv_close_device(context);
+        ibv_free_device_list(dev_list);
         return -1;
     }
 
+    /* determine number of ports to query */
+    int num_ports = attr.phys_port_cnt;
+    if (num_ports > MAX_NUM_PORTS) {
+        num_ports = MAX_NUM_PORTS;
+    }
+
+    /* allocate space to query each port */
+    struct ibv_port_attr* ports = (struct ibv_port_attr*) SPAWN_MALLOC(num_ports * sizeof(struct ibv_port_attr));
+
     /* Get the attributes of the port */
-    for (i = 0; i < MAX_NUM_PORTS; ++i) {
-        retval = ibv_query_port(g_hca_info.context, i, &g_hca_info.port_attr[i]);
+    for (i = 0; i < num_ports; ++i) {
+        retval = ibv_query_port(context, i, &ports[i]);
+        if (retval != 0) {
+            SPAWN_ERR("Failed to query port (ibv_query_port errno=%d %s)", retval, strerror(retval));
+        }
     }
     
     /* Create completion channel */
-    hca_info->comp_channel = ibv_create_comp_channel(hca_info->context);
-    if (!hca_info->comp_channel) {
+    struct ibv_comp_channel* channel = ibv_create_comp_channel(context);
+    if (channel == NULL) {
+        /* TODO: man page doesn't say anything about errno */
         SPAWN_ERR("Cannot create completion channel");
+        spawn_free(&ports);
+        ibv_dealloc_pd(pd);
+        ibv_close_device(context);
+        ibv_free_device_list(dev_list);
         return -1;
     }
 
     /* Create completion queue */
-    hca_info->cq_hndl = ibv_create_cq(hca_info->context,
-                                      RDMA_DEFAULT_MAX_CQ_SIZE, NULL,
-                                      hca_info->comp_channel, 0);
-    if (!hca_info->cq_hndl) {
+    struct ibv_cq* cq = ibv_create_cq(
+        context, RDMA_DEFAULT_MAX_CQ_SIZE, NULL, channel, 0
+    );
+    if (cq == NULL) {
+        /* TODO: man page doesn't say anything about errno */
         SPAWN_ERR("Cannot create completion queue");
+        ibv_destroy_comp_channel(channel);
+        spawn_free(&ports);
+        ibv_dealloc_pd(pd);
+        ibv_close_device(context);
+        ibv_free_device_list(dev_list);
         return -1;
     }
 
+    /* copy values into output struct */
+    hca_info->pd           = pd;
+    hca_info->device       = dev;
+    hca_info->context      = context;
+    hca_info->cq_hndl      = cq;
+    hca_info->comp_channel = channel;
+    for (i = 0; i < num_ports; ++i) {
+        memcpy(&(hca_info->port_attr[i]), &ports[i], sizeof(struct ibv_port_attr));
+    }
+    memcpy(&hca_info->device_attr, &attr, sizeof(struct ibv_device_attr));
+
+    /* free temporary objects */
+    spawn_free(&ports);
     ibv_free_device_list(dev_list);
 
     return 0;
@@ -135,7 +186,7 @@ static int mv2_get_hca_info(int devnum, mv2_hca_info_t *hca_info)
 int mv2_hca_open()
 {
     memset(&g_hca_info, 0, sizeof(mv2_hca_info_t));
-    if (0!= mv2_get_hca_info(0, &g_hca_info)){
+    if (mv2_get_hca_info(0, &g_hca_info) != 0){
         SPAWN_ERR("Failed to initialize HCA");
         return -1;
     }
@@ -147,41 +198,42 @@ int mv2_ud_qp_transition(struct ibv_qp *qp)
 {
     struct ibv_qp_attr attr;
 
+    /* Init QP */
     memset(&attr, 0, sizeof(struct ibv_qp_attr));
-
-    attr.qp_state = IBV_QPS_INIT;
+    attr.qp_state   = IBV_QPS_INIT;
     attr.pkey_index = 0;
-    attr.port_num = RDMA_DEFAULT_PORT;
-    attr.qkey = 0;
-
-    if (ibv_modify_qp(qp, &attr,
-                IBV_QP_STATE |
-                IBV_QP_PKEY_INDEX |
-                IBV_QP_PORT | IBV_QP_QKEY)) {
-            SPAWN_ERR("Failed to modify QP to INIT");
-            return 1;
+    attr.port_num   = RDMA_DEFAULT_PORT;
+    attr.qkey       = 0;
+    int rc = ibv_modify_qp(qp, &attr,
+        IBV_QP_STATE |
+        IBV_QP_PKEY_INDEX |
+        IBV_QP_PORT | IBV_QP_QKEY
+    );
+    if (rc != 0) {
+        SPAWN_ERR("Failed to modify QP to INIT (ibv_modify_qp errno=%d %s)", rc, strerror(rc));
+        return 1;
     }    
         
+    /* set QP to RTR */
     memset(&attr, 0, sizeof(struct ibv_qp_attr));
-
     attr.qp_state = IBV_QPS_RTR;
-    if (ibv_modify_qp(qp, &attr, IBV_QP_STATE)) {
-            SPAWN_ERR("Failed to modify QP to RTR");
-            return 1;
+    rc = ibv_modify_qp(qp, &attr, IBV_QP_STATE);
+    if (rc != 0) {
+        SPAWN_ERR("Failed to modify QP to RTR (ibv_modify_qp errno=%d %s)", rc, strerror(rc));
+        return 1;
     }   
 
+    /* set QP to RTS */
     memset(&attr, 0, sizeof(struct ibv_qp_attr));
-
     attr.qp_state = IBV_QPS_RTS;
-    attr.sq_psn = RDMA_DEFAULT_PSN;
-    if (ibv_modify_qp(qp, &attr,
-                IBV_QP_STATE | IBV_QP_SQ_PSN)) {
-        SPAWN_ERR("Failed to modify QP to RTS");
+    attr.sq_psn   = RDMA_DEFAULT_PSN;
+    rc = ibv_modify_qp(qp, &attr, IBV_QP_STATE | IBV_QP_SQ_PSN);
+    if (rc != 0) {
+        SPAWN_ERR("Failed to modify QP to RTS (ibv_modify_qp errno=%d %s)", rc, strerror(rc));
         return 1;
     }
 
     return 0;
-
 }
 
 /* Create UD QP */
@@ -208,7 +260,8 @@ struct ibv_qp * mv2_ud_create_qp(mv2_ud_qp_info_t *qp_info)
     init_attr.qp_type = IBV_QPT_UD;
 
     qp = ibv_create_qp(qp_info->pd, &init_attr);
-    if(!qp) {
+    if(qp == NULL) {
+        /* TODO: man page doesn't say anything about errno values */
         SPAWN_ERR("error in creating UD qp");
         return NULL;
     }
@@ -251,7 +304,9 @@ spawn_net_endpoint* mv2_init_ud(int nchild)
     /* Init lock for vbuf */
     init_vbuf_lock();
 
-    if (pthread_mutex_init(&comm_lock_object, 0)) {
+    ret = pthread_mutex_init(&comm_lock_object, 0);
+    if (ret != 0) {
+        SPAWN_ERR("Failed to init comm_lock_object (pthread_mutex_init ret=%d %s)", ret, strerror(ret));
         ibv_error_abort(-1, "Failed to init comm_lock_object\n");
     }   
 
