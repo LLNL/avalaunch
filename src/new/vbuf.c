@@ -108,7 +108,9 @@ void mv2_print_vbuf_usage_usage()
 
 int init_vbuf_lock(void)
 {
-    if (pthread_spin_init(&vbuf_lock, 0)) {
+    int rc = pthread_spin_init(&vbuf_lock, 0);
+    if (rc != 0) {
+        SPAWN_ERR("Failed to lock vbuf_lock (pthread_spin_init rc=%d %s)", rc, strerror(rc));
         ibv_error_abort(-1, "Failed to init vbuf_lock\n");
     }
 
@@ -582,6 +584,7 @@ static int allocate_ud_vbuf_region(int nvbufs)
 
     /* register region with each HCA */
     for (i = 0; i < rdma_num_hcas; ++i) {
+        /* register memory region */
         reg->mem_handle[i] = ibv_reg_mr(
                 g_hca_info.pd,
                 vbuf_dma_buffer,
@@ -596,25 +599,34 @@ static int allocate_ud_vbuf_region(int nvbufs)
         }
     }
 
-    /* init the free list */
+    /* init the vbuf structures */
     for (i = 0; i < nvbufs; ++i) {
+        /* get a pointer to the vbuf */
         vbuf* cur = ud_free_vbuf_head + i;
+
+        /* set next pointer */
         cur->desc.next = ud_free_vbuf_head + i + 1;
-        if (i == (nvbufs -1)) {
+        if (i == (nvbufs - 1)) {
             cur->desc.next = NULL;
         }
-        cur->region = reg;
-        cur->head_flag = (VBUF_FLAG_TYPE *) ((char *)vbuf_dma_buffer
-                + (i + 1) * rdma_default_ud_mtu - sizeof * cur->head_flag);
-        cur->buffer = (unsigned char *) ((char *)vbuf_dma_buffer
-                + i * rdma_default_ud_mtu);
 
-        cur->eager = 0;
+        /* set pointer to region */
+        cur->region = reg;
+
+        /* set pointer to data buffer */
+        char* ptr = (char *)vbuf_dma_buffer + i * rdma_default_ud_mtu;
+        cur->buffer = ptr;
+
+        /* set pointer to head flag, comes as last bytes of buffer */
+        cur->head_flag = (VBUF_FLAG_TYPE *) (ptr + rdma_default_ud_mtu - sizeof(cur->head_flag));
+
+        /* set remaining fields */
+        cur->eager        = 0;
         cur->content_size = 0;
-        cur->coalesce = 0;
+        cur->coalesce     = 0;
     }
 
-    /* thread region list */
+    /* insert region into list */
     reg->next = vbuf_region_head;
     vbuf_region_head = reg;
 
