@@ -42,10 +42,8 @@ spawn_net_channel* spawn_net_connect_ib(const char* name)
 {
     comm_lock();
     spawn_net_channel* ch = mv2_ep_connect(name);
-    if (SPAWN_NET_CHANNEL_NULL == ch) {
+    if (ch == SPAWN_NET_CHANNEL_NULL) {
         SPAWN_ERR("Error creating IB communication channel");
-        comm_unlock();
-        return SPAWN_NET_CHANNEL_NULL;
     }
     comm_unlock();
 
@@ -56,10 +54,8 @@ spawn_net_channel* spawn_net_accept_ib(const spawn_net_endpoint* ep)
 {
     comm_lock();
     spawn_net_channel* ch = mv2_ep_accept();
-    if (SPAWN_NET_CHANNEL_NULL == ch) {
+    if (ch == SPAWN_NET_CHANNEL_NULL) {
         SPAWN_ERR("Error accepting IB connection");
-        comm_unlock();
-        return SPAWN_NET_CHANNEL_NULL;
     }
     comm_unlock();
 
@@ -75,14 +71,10 @@ int spawn_net_disconnect_ib(spawn_net_channel** pch)
 
 int spawn_net_read_ib(const spawn_net_channel* ch, void* buf, size_t size)
 {
-    int ret = 0;
-
     comm_lock();
-    ret = mv2_ud_recv(ch, buf, size);
+    int ret = mv2_ud_recv(ch, buf, size);
     if (ret < 0) {
         SPAWN_ERR("Couldn't recv IB message");
-        comm_unlock();
-        return ret;
     }
     comm_unlock();
 
@@ -91,14 +83,10 @@ int spawn_net_read_ib(const spawn_net_channel* ch, void* buf, size_t size)
 
 int spawn_net_write_ib(const spawn_net_channel* ch, const void* buf, size_t size)
 {
-    int ret = 0;
-
     comm_lock();
-    ret = mv2_ud_send(ch, buf, size);
+    int ret = mv2_ud_send(ch, buf, size);
     if (ret < 0) {
         SPAWN_ERR("Couldn't send IB message");
-        comm_unlock();
-        return ret;
     }
     comm_unlock();
 
