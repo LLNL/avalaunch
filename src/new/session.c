@@ -1181,19 +1181,21 @@ session_init (int argc, char * argv[])
         /* no parent, we are the root, create parameters strmap */
 
         /* TODO: move endpoint open to session_start? */
-        /* open our endpoint */
+        /* determine which type of endpoint we should open */
+        spawn_net_type type = SPAWN_NET_TYPE_TCP;
         if ((value = getenv("MV2_SPAWN_NET")) != NULL) {
             if (strcmp(value, "tcp") == 0) {
-                s->ep = spawn_net_open(SPAWN_NET_TYPE_TCP);
+                type = SPAWN_NET_TYPE_TCP;
             } else if (strcmp(value, "ib") == 0) {
-                s->ep = spawn_net_open(SPAWN_NET_TYPE_IB);
+                type = SPAWN_NET_TYPE_IB;
             } else {
                 SPAWN_ERR("MV2_SPAWN_NET must be either \"tcp\" or \"ib\"");
                 _exit(EXIT_FAILURE);
             }
-        } else {
-            s->ep = spawn_net_open(SPAWN_NET_TYPE_TCP);
         }
+
+        /* open our endpoint */
+        s->ep = spawn_net_open(type);
         s->ep_name = spawn_net_name(s->ep);
 
         /* we include ourself as a host,
