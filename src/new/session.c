@@ -1163,11 +1163,6 @@ session_init (int argc, char * argv[])
     /* create empty params strmap */
     s->params = strmap_new();
 
-    /* TODO: perhaps move this if this operation is expensive */
-    /* open our endpoint */
-    s->ep = spawn_net_open(SPAWN_NET_TYPE_TCP);
-    s->ep_name = spawn_net_name(s->ep);
-
     /* get our executable name */
     s->spawn_exe = SPAWN_STRDUP(argv[0]);
 
@@ -1177,8 +1172,29 @@ session_init (int argc, char * argv[])
     if ((value = getenv("MV2_SPAWN_PARENT")) != NULL) {
         /* we have a parent, record its address */
         s->spawn_parent = SPAWN_STRDUP(value);
+
+        /* infer net type from parent's name and open endpoint */
+        spawn_net_type type = spawn_net_infer_type(s->spawn_parent);
+        s->ep = spawn_net_open(type);
+        s->ep_name = spawn_net_name(s->ep);
     } else {
         /* no parent, we are the root, create parameters strmap */
+
+        /* TODO: move endpoint open to session_start? */
+        /* open our endpoint */
+        if ((value = getenv("MV2_SPAWN_NET")) != NULL) {
+            if (strcmp(value, "tcp") == 0) {
+                s->ep = spawn_net_open(SPAWN_NET_TYPE_TCP);
+            } else if (strcmp(value, "ib") == 0) {
+                s->ep = spawn_net_open(SPAWN_NET_TYPE_IB);
+            } else {
+                SPAWN_ERR("MV2_SPAWN_NET must be either \"tcp\" or \"ib\"");
+                _exit(EXIT_FAILURE);
+            }
+        } else {
+            s->ep = spawn_net_open(SPAWN_NET_TYPE_TCP);
+        }
+        s->ep_name = spawn_net_name(s->ep);
 
         /* we include ourself as a host,
          * plus all hosts listed on command line */
