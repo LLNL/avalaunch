@@ -623,14 +623,17 @@ int mv2_send_connect_message(MPIDI_VC_t *vc)
     /* grab a packet */
     vbuf* v = get_ud_vbuf();
 
+    /* Offset for the packet header */
+    v->content_size = sizeof(MPIDI_CH3I_MRAILI_Pkt_comm_header);
+
+    /* check that we can fit message in packet */
+    int avail = MRAIL_MAX_UD_SIZE - v->content_size;
+    assert (avail >= RDMA_CONNECTION_INFO_LEN);
+
     /* copy in payload and set payload size */
     void* ptr = (v->buffer + v->content_size);
     memcpy(ptr, conn_info, sizeof(conn_info));
     v->content_size += RDMA_CONNECTION_INFO_LEN;
-
-    /* check that we can fix message in packet */
-    int avail = MRAIL_MAX_UD_SIZE - v->content_size;
-    assert (avail >= RDMA_CONNECTION_INFO_LEN);
 
     /* set header fields */
     MPIDI_CH3I_MRAILI_Pkt_comm_header* connect_pkt = v->pheader;
@@ -678,7 +681,7 @@ spawn_net_channel* mv2_ep_connect(const char *name)
 
     /* TODO: include hostname here */
     /* Fill in channel name */
-    ch->name = SPAWN_STRDUPF("%04x:%06x", ep_info.lid, ep_info.qpn);
+    ch->name = SPAWN_STRDUPF("IB:%06x:%04x:%06x", dest_rank, ep_info.lid, ep_info.qpn);
 
     /* record vc in channel data field */
     ch->data = (void*) vc;
@@ -714,10 +717,10 @@ int mv2_ud_send_internal(MPIDI_VC_t *vc, const void* buf, size_t size)
 
     if (vc->mrail.state != MRAILI_UD_CONNECTED) {
         mv2_ud_ext_window_add(&vc->mrail.ud.ext_window, v);
+    } else {
+        /* send packet */
+        proc.post_send(vc, v, 0, NULL);
     }
-
-    /* send packet */
-    proc.post_send(vc, v, 0, NULL);
 
     return 0;
 }
