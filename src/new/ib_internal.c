@@ -740,7 +740,7 @@ int mv2_ud_recv(const spawn_net_channel* ch, void* buf, size_t size)
     MPIDI_VC_t *vc = NULL;
     mv2_ud_exch_info_t ep_info;
 
-    parsed = sscanf(ch->name, "%06x:%04x:%06x", &dest_rank, &ep_info.lid, &ep_info.qpn);
+    parsed = sscanf(ch->name, "IB:%06x:%04x:%06x", &dest_rank, &ep_info.lid, &ep_info.qpn);
     if (parsed != 3) {
         SPAWN_ERR("Couldn't parse ep info from %s\n", ch->name);
         return NULL;
@@ -783,7 +783,7 @@ spawn_net_channel* mv2_ep_accept()
         
             /* Populate spawn_net_channel with information */
             ch->type = SPAWN_NET_TYPE_IB;
-            sprintf(ch->name, "%06x:%04x:%06x", i, ud_vc_info[i].mrail.ud.lid,
+            sprintf(ch->name, "IB:%06x:%04x:%06x", i, ud_vc_info[i].mrail.ud.lid,
                     ud_vc_info[i].mrail.ud.qpn);
 
             ep_info.lid = ud_vc_info[i].mrail.ud.lid;
