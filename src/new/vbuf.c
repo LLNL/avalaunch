@@ -790,7 +790,6 @@ void vbuf_init_send(vbuf* v, unsigned long len, int rail)
 {
     int hca_num = rail / (rdma_num_rails / rdma_num_hcas);
 
-
     v->desc.u.sr.next = NULL;
     v->desc.u.sr.send_flags = IBV_SEND_SIGNALED;
     v->desc.u.sr.opcode = IBV_WR_SEND;
@@ -803,6 +802,7 @@ void vbuf_init_send(vbuf* v, unsigned long len, int rail)
     v->padding = NORMAL_VBUF_FLAG;
     v->rail = rail;
 
+    return;
 }
 
 #undef FUNCNAME
@@ -812,7 +812,6 @@ void vbuf_init_send(vbuf* v, unsigned long len, int rail)
 void vbuf_init_recv(vbuf* v, unsigned long len, int rail)
 {
     int hca_num = rail / (rdma_num_rails / rdma_num_hcas);
-
 
     assert(v != NULL);
 
@@ -826,6 +825,7 @@ void vbuf_init_recv(vbuf* v, unsigned long len, int rail)
     v->padding = NORMAL_VBUF_FLAG;
     v->rail = rail;
 
+    return;
 }
 
 #undef FUNCNAME

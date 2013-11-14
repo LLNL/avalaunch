@@ -167,7 +167,7 @@ int post_ud_send(MPIDI_VC_t* vc, vbuf* v, int rail, mv2_ud_ctx_t *send_ud_ctx)
     }
     v->vc = (void *)vc;
     p->rail = rail;
-    p->src.rank  = PG_RANK;
+    p->src.rank = vc->mrail.writeid;
     assert(v->transport == IB_TRANSPORT_UD);
 
     SEND_WINDOW_CHECK(&vc->mrail.ud, v);
@@ -198,7 +198,7 @@ void mv2_send_control_msg(MPIDI_VC_t *vc, vbuf *v)
 
     ud_ctx = proc.ud_ctx;
     v->vc = (void *)vc;
-    p->src.rank  = my_pg_rank;
+    p->src.rank = vc->mrail.writeid;
     assert(v->transport == IB_TRANSPORT_UD);
 
     v->seqnum = p->seqnum = -1;

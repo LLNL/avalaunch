@@ -144,6 +144,41 @@ static uint64_t vc_alloc()
     return id;
 }
 
+static int vc_set_addr(MPIDI_VC_t* vc, mv2_ud_exch_info_t *rem_info, int port)
+{
+    if (vc->mrail.state == MRAILI_UD_CONNECTING ||
+        vc->mrail.state == MRAILI_UD_CONNECTED)
+    {
+        /* Duplicate message - return */
+        return 0;
+    }
+
+    //PRINT_DEBUG(DEBUG_UD_verbose>0,"lid:%d\n", rem_info->lid );
+    
+    struct ibv_ah_attr ah_attr;
+    memset(&ah_attr, 0, sizeof(ah_attr));
+
+    ah_attr.sl              = RDMA_DEFAULT_SERVICE_LEVEL;
+    ah_attr.dlid            = rem_info->lid;
+    ah_attr.port_num        = port;
+    ah_attr.is_global       = 0; 
+    ah_attr.src_path_bits   = 0; 
+
+    vc->mrail.ud.ah = ibv_create_ah(g_hca_info.pd, &ah_attr);
+    if(vc->mrail.ud.ah == NULL){    
+        /* TODO: man page doesn't say anything about errno */
+        SPAWN_ERR("Error in creating address handle (ibv_create_ah errno=%d %s)", errno, strerror(errno));
+        return -1;
+    }
+
+    vc->mrail.state = MRAILI_UD_CONNECTING;
+
+    vc->mrail.ud.lid = rem_info->lid;
+    vc->mrail.ud.qpn = rem_info->qpn;
+
+    return 0;
+}
+
 /* ===== Begin: Initialization functions ===== */
 /* Get HCA parameters */
 static int mv2_get_hca_info(int devnum, mv2_hca_info_t *hca_info)
@@ -317,10 +352,11 @@ int mv2_ud_qp_transition(struct ibv_qp *qp)
 /* Create UD QP */
 struct ibv_qp * mv2_ud_create_qp(mv2_ud_qp_info_t *qp_info)
 {
-    struct ibv_qp *qp;
+    /* zero out all fields of queue pair attribute structure */
     struct ibv_qp_init_attr init_attr;
- 
     memset(&init_attr, 0, sizeof(struct ibv_qp_init_attr));
+
+    /* set attributes */
     init_attr.send_cq = qp_info->send_cq;
     init_attr.recv_cq = qp_info->recv_cq;
     init_attr.cap.max_send_wr = qp_info->cap.max_send_wr;
@@ -337,24 +373,25 @@ struct ibv_qp * mv2_ud_create_qp(mv2_ud_qp_info_t *qp_info)
     init_attr.cap.max_inline_data = qp_info->cap.max_inline_data;
     init_attr.qp_type = IBV_QPT_UD;
 
-    qp = ibv_create_qp(qp_info->pd, &init_attr);
+    /* create queue pair */
+    struct ibv_qp* qp = ibv_create_qp(qp_info->pd, &init_attr);
     if(qp == NULL) {
         /* TODO: man page doesn't say anything about errno values */
         SPAWN_ERR("error in creating UD qp");
         return NULL;
     }
     
+    /* set queue pair to UD */
     if (mv2_ud_qp_transition(qp)) {
+        ibv_destroy_qp(qp);
         return NULL;
     }
-
-    //PRINT_DEBUG(DEBUG_UD_verbose>0," UD QP:%p qpn:%d \n",qp, qp->qp_num);
 
     return qp;
 }
 
 /* Create UD Context */
-mv2_ud_ctx_t* mv2_ud_create_ctx (mv2_ud_qp_info_t *qp_info)
+mv2_ud_ctx_t* mv2_ud_create_ctx(mv2_ud_qp_info_t *qp_info)
 {
     mv2_ud_ctx_t *ctx;
 
@@ -447,43 +484,8 @@ spawn_net_endpoint* mv2_init_ud(int nchild)
     return ep;
 }
 
-static int vc_set_addr(MPIDI_VC_t* vc, mv2_ud_exch_info_t *rem_info, int port)
-{
-    if (vc->mrail.state == MRAILI_UD_CONNECTING ||
-        vc->mrail.state == MRAILI_UD_CONNECTED)
-    {
-        /* Duplicate message - return */
-        return 0;
-    }
-
-    //PRINT_DEBUG(DEBUG_UD_verbose>0,"lid:%d\n", rem_info->lid );
-    
-    struct ibv_ah_attr ah_attr;
-    memset(&ah_attr, 0, sizeof(ah_attr));
-
-    ah_attr.sl              = RDMA_DEFAULT_SERVICE_LEVEL;
-    ah_attr.dlid            = rem_info->lid;
-    ah_attr.port_num        = port;
-    ah_attr.is_global       = 0; 
-    ah_attr.src_path_bits   = 0; 
-
-    vc->mrail.ud.ah = ibv_create_ah(g_hca_info.pd, &ah_attr);
-    if(vc->mrail.ud.ah == NULL){    
-        /* TODO: man page doesn't say anything about errno */
-        SPAWN_ERR("Error in creating address handle (ibv_create_ah errno=%d %s)", errno, strerror(errno));
-        return -1;
-    }
-
-    vc->mrail.state = MRAILI_UD_CONNECTING;
-
-    vc->mrail.ud.lid = rem_info->lid;
-    vc->mrail.ud.qpn = rem_info->qpn;
-
-    return 0;
-}
-
 /* Destroy UD Context */
-void mv2_ud_destroy_ctx (mv2_ud_ctx_t *ctx)
+void mv2_ud_destroy_ctx(mv2_ud_ctx_t *ctx)
 {
     if (ctx->qp) {
         ibv_destroy_qp(ctx->qp);
@@ -608,11 +610,14 @@ int mv2_post_ud_recv_buffers(int num_bufs, mv2_ud_ctx_t *ud_ctx)
     return i;
 }
 
-int mv2_send_connect_message(MPIDI_VC_t *vc)
+static int mv2_send_connect_message(MPIDI_VC_t *vc)
 {
-    /* set message payload, specify id we want remote side to use when sending to us */
-    char conn_info[RDMA_CONNECTION_INFO_LEN];
-    sprintf(conn_info, "%06x:%04x:%06x", vc->mrail.readid, local_ep_info.lid, local_ep_info.qpn);
+    /* message payload, specify id we want remote side to use when
+     * sending to us followed by our lid/qp */
+    char* payload = SPAWN_STRDUPF("%06x:%04x:%06x",
+        vc->mrail.readid, local_ep_info.lid, local_ep_info.qpn
+    );
+    size_t payload_bytes = strlen(payload) + 1;
 
     /* grab a packet */
     vbuf* v = get_ud_vbuf();
@@ -622,7 +627,7 @@ int mv2_send_connect_message(MPIDI_VC_t *vc)
 
     /* check that we can fit message in packet */
     int avail = MRAIL_MAX_UD_SIZE - v->content_size;
-    assert (avail >= RDMA_CONNECTION_INFO_LEN);
+    assert(avail >= payload_bytes);
 
     /* set header fields */
     MPIDI_CH3I_MRAILI_Pkt_comm_header* connect_pkt = v->pheader;
@@ -631,9 +636,48 @@ int mv2_send_connect_message(MPIDI_VC_t *vc)
     connect_pkt->rail   = v->rail;
 
     /* copy in payload and set payload size */
-    void* ptr = (v->buffer + v->content_size);
-    memcpy(ptr, conn_info, sizeof(conn_info));
-    v->content_size += RDMA_CONNECTION_INFO_LEN;
+    char* ptr = (char*)v->buffer + v->content_size;
+    memcpy(ptr, payload, payload_bytes);
+    v->content_size += payload_bytes;
+
+    /* prepare packet for send */
+    vbuf_init_send(v, sizeof(MPIDI_CH3I_MRAILI_Pkt_comm_header), v->rail);
+
+    /* and send it */
+    proc.post_send(vc, v, 0, NULL);
+
+    return 0;
+}
+
+static int mv2_send_accept_message(MPIDI_VC_t *vc)
+{
+    /* message payload, specify id we want remote side to use when
+     * sending to us followed by our lid/qp */
+    char* payload = SPAWN_STRDUPF("%06x",
+        vc->mrail.readid
+    );
+    size_t payload_bytes = strlen(payload) + 1;
+
+    /* grab a packet */
+    vbuf* v = get_ud_vbuf();
+
+    /* Offset for the packet header */
+    v->content_size = sizeof(MPIDI_CH3I_MRAILI_Pkt_comm_header);
+
+    /* check that we can fit message in packet */
+    int avail = MRAIL_MAX_UD_SIZE - v->content_size;
+    assert(avail >= payload_bytes);
+
+    /* set header fields */
+    MPIDI_CH3I_MRAILI_Pkt_comm_header* connect_pkt = v->pheader;
+    MPIDI_Pkt_init(connect_pkt, MPIDI_CH3_PKT_UD_ACCEPT);
+    connect_pkt->acknum = vc->mrail.seqnum_next_toack;
+    connect_pkt->rail   = v->rail;
+
+    /* copy in payload and set payload size */
+    char* ptr = (char*)v->buffer + v->content_size;
+    memcpy(ptr, payload, payload_bytes);
+    v->content_size += payload_bytes;
 
     /* prepare packet for send */
     vbuf_init_send(v, sizeof(MPIDI_CH3I_MRAILI_Pkt_comm_header), v->rail);
@@ -664,6 +708,7 @@ spawn_net_channel* mv2_ep_connect(const char *name)
     mv2_send_connect_message(vc);
 
     /* TODO: wait for accept message and set vc->mrail.writeid */
+    // mv2_recv_accept_message(vc);
 
     /* Change state to connected */
     vc->mrail.state = MRAILI_UD_CONNECTED;
@@ -674,6 +719,42 @@ spawn_net_channel* mv2_ep_connect(const char *name)
 
     /* TODO: include hostname here */
     /* Fill in channel name */
+    ch->name = SPAWN_STRDUPF("IBUD:%04x:%06x", ep_info.lid, ep_info.qpn);
+
+    /* record address of vc in channel data field */
+    ch->data = (void*) vc;
+
+    return ch;
+}
+
+spawn_net_channel* mv2_ep_accept()
+{
+    /* wait for connect message */
+    // mv2_recv_connect_message();
+
+    /* get id and endpoint name from message payload */
+
+    /* TODO: decode lid/qp from endpoint name */
+    mv2_ud_exch_info_t ep_info;
+    // TODO
+
+    /* allocate new vc */
+    MPIDI_VC_t* vc = vc_alloc();
+
+    /* record remote id as write id */
+    //vc->mrail.writeid = ...
+
+    /* send accept message */
+    mv2_send_accept_message(vc);
+
+    /* mark vc as connected */
+    vc->mrail.state = MRAILI_UD_CONNECTED;
+
+    /* allocate new channel data structure */
+    spawn_net_channel* ch = SPAWN_MALLOC(sizeof(spawn_net_channel));
+    ch->type = SPAWN_NET_TYPE_IBUD;
+
+    /* record name */
     ch->name = SPAWN_STRDUPF("IBUD:%04x:%06x", ep_info.lid, ep_info.qpn);
 
     /* record address of vc in channel data field */
@@ -759,42 +840,6 @@ int mv2_ud_recv(const spawn_net_channel* ch, void* buf, size_t size)
     MRAILI_Release_vbuf(v);
 
     return recv_size;
-}
-
-spawn_net_channel* mv2_ep_accept()
-{
-    /* wait for connect message */
-
-    /* get id and endpoint name from message payload */
-
-    /* TODO: decode lid/qp from endpoint name */
-    mv2_ud_exch_info_t ep_info;
-    // TODO
-
-    /* allocate new vc */
-    MPIDI_VC_t* vc = vc_alloc();
-
-    /* record remote id as write id */
-
-    /* prepare accept message, write local id as payload */
-    // vc->mrail.readid
-
-    /* send accept message */
-
-    /* mark vc as connected */
-    vc->mrail.state = MRAILI_UD_CONNECTED;
-
-    /* allocate new channel data structure */
-    spawn_net_channel* ch = SPAWN_MALLOC(sizeof(spawn_net_channel));
-    ch->type = SPAWN_NET_TYPE_IBUD;
-
-    /* record name */
-    ch->name = SPAWN_STRDUPF("IBUD:%04x:%06x", ep_info.lid, ep_info.qpn);
-
-    /* record address of vc in channel data field */
-    ch->data = (void*) vc;
-
-    return ch;
 }
 
 int mv2_poll_cq()

@@ -68,7 +68,7 @@ do {                                            \
 #define VC_SRC_INFO \
     union {                     \
         uint32_t smp_index;     \
-        uint32_t rank;          \
+        uint64_t rank;          \
     } src;                      
 #else
 #define VC_SRC_INFO \
