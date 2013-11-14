@@ -16,15 +16,8 @@
 
 spawn_net_endpoint* spawn_net_open_ib()
 {
-    int nchild = 8;
-
     mv2_hca_open();
-
-    spawn_net_endpoint* ep = mv2_init_ud(nchild);
-    if (SPAWN_NET_ENDPOINT_NULL == ep) {
-        SPAWN_ERR("Error creating IB end point");
-        return SPAWN_NET_ENDPOINT_NULL;
-    }
+    spawn_net_endpoint* ep = mv2_init_ud();
 
     return ep;
 }
@@ -56,6 +49,7 @@ int spawn_net_disconnect_ib(spawn_net_channel** pch)
 {
     comm_lock();
     comm_unlock();
+
     return SPAWN_SUCCESS;
 }
 

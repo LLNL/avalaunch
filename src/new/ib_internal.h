@@ -107,12 +107,6 @@
 
 #define MIN(x, y) (((x) < (y))?(x):(y))
 
-#include <spawn_net.h>
-#include <ib_internal.h>
-#include <mv2_ud.h>
-//#include <mv2_ud_inline.h>
-#include <debug_utils.h>
-
 enum MPIDI_CH3_Pkt_types
 {
     MPIDI_CH3_PKT_UD_NULL,
@@ -181,7 +175,7 @@ extern int rdma_vbuf_secondary_pool_size;
 int mv2_hca_open();
 void comm_lock(void);
 void comm_unlock(void);
-spawn_net_endpoint* mv2_init_ud(int nchild);
+spawn_net_endpoint* mv2_init_ud();
 spawn_net_channel* mv2_ep_connect(const char *name);
 spawn_net_channel* mv2_ep_accept();
 //int mv2_ud_send(MPIDI_VC_t* vc, const void* buf, size_t size);

@@ -603,7 +603,7 @@ static void mv2_ud_destroy_ctx(mv2_ud_ctx_t *ctx)
 }
 
 /* Initialize UD Context */
-spawn_net_endpoint* mv2_init_ud(int nchild)
+spawn_net_endpoint* mv2_init_ud()
 {
     int ret = 0;
     pthread_attr_t attr;
