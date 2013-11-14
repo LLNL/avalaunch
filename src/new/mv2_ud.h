@@ -200,6 +200,9 @@ typedef struct MPIDI_CH3I_MRAIL_VC_t
     message_queue_t app_recv_window;
 
     mv2_ud_vc_info_t ud;
+
+    uint64_t readid;  /* remote proc labels its packets with this id when sending to us */
+    uint64_t writeid; /* we label our outgoing packets with this id */
 } MPIDI_CH3I_MRAIL_VC;
 
 typedef struct MPIDI_CH3_Pkt_zcopy_finish_t

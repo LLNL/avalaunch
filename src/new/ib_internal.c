@@ -57,14 +57,92 @@ struct timespec cm_timeout;
 mv2_proc_info_t proc;
 mv2_hca_info_t g_hca_info;
 mv2_ud_exch_info_t local_ep_info;
-MPIDI_VC_t *ud_vc_info = NULL; 
+
+/* Tracks an array of virtual channels.  With each new channel created,
+ * the id is incremented.  Grows channel array as needed. */
+static uint64_t ud_vc_info_id  = 0;    /* next id to be assigned */
+static uint64_t ud_vc_infos    = 0;    /* capacity of VC array */
+MPIDI_VC_t** ud_vc_info = NULL; /* VC array */
+
 static pthread_mutex_t comm_lock_object;
 static pthread_t comm_thread;
 
 int mv2_wait_on_channel();
-int mv2_ud_init_vc (int rank);
 void* cm_timeout_handler(void *arg);
 int mv2_post_ud_recv_buffers(int num_bufs, mv2_ud_ctx_t *ud_ctx);
+
+/* initialize UD VC */
+static void vc_init(MPIDI_VC_t* vc)
+{
+    vc->mrail.state = MRAILI_INIT;
+
+    vc->mrail.ack_need_tosend = 0;
+    vc->mrail.seqnum_next_tosend = 0;
+    vc->mrail.seqnum_next_torecv = 0;
+    vc->mrail.seqnum_next_toack = UINT16_MAX;
+
+    vc->mrail.ud.cntl_acks = 0; 
+    vc->mrail.ud.ack_pending = 0;
+    vc->mrail.ud.resend_count = 0;
+    vc->mrail.ud.total_messages = 0;
+    vc->mrail.ud.ext_win_send_count = 0;
+
+    MESSAGE_QUEUE_INIT(&(vc->mrail.ud.send_window));
+    MESSAGE_QUEUE_INIT(&(vc->mrail.ud.ext_window));
+    MESSAGE_QUEUE_INIT(&(vc->mrail.ud.recv_window));
+    MESSAGE_QUEUE_INIT(&(vc->mrail.app_recv_window));
+
+    return;
+}
+
+/* creates a new VC and returns its id */
+static uint64_t vc_alloc()
+{
+    /* get a new id */
+    uint64_t id = ud_vc_info_id;
+
+    /* check whether we need to allocate more VC's */
+    if (id >= ud_vc_infos) {
+        /* increase capacity of array */
+        if (ud_vc_infos > 0) {
+            ud_vc_infos *= 2;
+        } else {
+            ud_vc_infos = 1;
+        }
+
+        /* allocate space to hold VC pointers */
+        size_t vcsize = ud_vc_infos * sizeof(MPIDI_VC_t*);
+        MPIDI_VC_t** vcs = (MPIDI_VC_t**) SPAWN_MALLOC(vcsize);
+
+        /* copy old values into new array */
+        uint64_t i;
+        for (i = 0; i < id; i++) {
+            vcs[i] = ud_vc_info[i];
+        }
+
+        /* free old array and assign it to new copy */
+        spawn_free(&ud_vc_info);
+        ud_vc_info = vcs;
+    }
+
+    /* allocate and initialize a new VC */
+    MPIDI_VC_t* vc = (MPIDI_VC_t*) SPAWN_MALLOC(sizeof(MPIDI_VC_t));
+    vc_init(vc);
+
+    /* record address of vc in array */
+    ud_vc_info[id] = vc;
+
+    /* increment our counter for next time */
+    ud_vc_info_id++;
+
+    /* set our read id, other end of channel will label its outgoing
+     * messages with this id when sending to us (our readid is their
+     * writeid) */
+    vc->mrail.readid = id;
+
+    /* return id to caller */
+    return id;
+}
 
 /* ===== Begin: Initialization functions ===== */
 /* Get HCA parameters */
@@ -341,12 +419,6 @@ spawn_net_endpoint* mv2_init_ud(int nchild)
              (RDMA_DEFAULT_MAX_UD_RECV_WQE - proc.ud_ctx->num_recvs_posted), proc.ud_ctx);
     MESSAGE_QUEUE_INIT(&proc.unack_queue);
 
-    ud_vc_info = SPAWN_MALLOC(sizeof(MPIDI_VC_t) * nchild);
-
-    for (i = 0; i < nchild; ++i) {
-        mv2_ud_init_vc(i);
-    }
-
     proc.post_send = post_ud_send;
 
     /* Create end point */
@@ -381,36 +453,10 @@ spawn_net_endpoint* mv2_init_ud(int nchild)
     return ep;
 }
 
-/* Create UD VC */
-int mv2_ud_init_vc (int rank)
+int mv2_ud_set_vc_info(MPIDI_VC_t* vc, mv2_ud_exch_info_t *rem_info, int port)
 {
-    ud_vc_info[rank].mrail.state = MRAILI_INIT;
-
-    ud_vc_info[rank].mrail.ack_need_tosend = 0;
-    ud_vc_info[rank].mrail.seqnum_next_tosend = 0;
-    ud_vc_info[rank].mrail.seqnum_next_torecv = 0;
-    ud_vc_info[rank].mrail.seqnum_next_toack = UINT16_MAX;
-
-    ud_vc_info[rank].mrail.ud.cntl_acks = 0; 
-    ud_vc_info[rank].mrail.ud.ack_pending = 0;
-    ud_vc_info[rank].mrail.ud.resend_count = 0;
-    ud_vc_info[rank].mrail.ud.total_messages = 0;
-    ud_vc_info[rank].mrail.ud.ext_win_send_count = 0;
-
-    MESSAGE_QUEUE_INIT(&ud_vc_info[rank].mrail.ud.send_window);
-    MESSAGE_QUEUE_INIT(&ud_vc_info[rank].mrail.ud.ext_window);
-    MESSAGE_QUEUE_INIT(&ud_vc_info[rank].mrail.ud.recv_window);
-    MESSAGE_QUEUE_INIT(&ud_vc_info[rank].mrail.app_recv_window);
-
-    return 0;
-}
-
-int mv2_ud_set_vc_info (int rank, mv2_ud_exch_info_t *rem_info, int port)
-{
-    //assert(rank < PG_SIZE);
-
-    if (ud_vc_info[rank].mrail.state == MRAILI_UD_CONNECTING ||
-        ud_vc_info[rank].mrail.state == MRAILI_UD_CONNECTED)
+    if (vc->mrail.state == MRAILI_UD_CONNECTING ||
+        vc->mrail.state == MRAILI_UD_CONNECTED)
     {
         /* Duplicate message - return */
         return 0;
@@ -427,17 +473,17 @@ int mv2_ud_set_vc_info (int rank, mv2_ud_exch_info_t *rem_info, int port)
     ah_attr.is_global       = 0; 
     ah_attr.src_path_bits   = 0; 
 
-    ud_vc_info[rank].mrail.ud.ah = ibv_create_ah(g_hca_info.pd, &ah_attr);
-    if(ud_vc_info[rank].mrail.ud.ah == NULL){    
+    vc->mrail.ud.ah = ibv_create_ah(g_hca_info.pd, &ah_attr);
+    if(vc->mrail.ud.ah == NULL){    
         /* TODO: man page doesn't say anything about errno */
-        SPAWN_ERR("Error in creating address handle\n");
+        SPAWN_ERR("Error in creating address handle (ibv_create_ah errno=%d %s)", errno, strerror(errno));
         return -1;
     }
 
-    ud_vc_info[rank].mrail.state = MRAILI_UD_CONNECTING;
+    vc->mrail.state = MRAILI_UD_CONNECTING;
 
-    ud_vc_info[rank].mrail.ud.lid = rem_info->lid;
-    ud_vc_info[rank].mrail.ud.qpn = rem_info->qpn;
+    vc->mrail.ud.lid = rem_info->lid;
+    vc->mrail.ud.qpn = rem_info->qpn;
 
     return 0;
 }
@@ -449,7 +495,7 @@ void mv2_ud_destroy_ctx (mv2_ud_ctx_t *ctx)
         ibv_destroy_qp(ctx->qp);
     }
     spawn_free(ctx);
-    spawn_free(ud_vc_info);
+    spawn_free(&ud_vc_info);
 
     pthread_cancel(comm_thread);
 }
@@ -570,29 +616,32 @@ int mv2_post_ud_recv_buffers(int num_bufs, mv2_ud_ctx_t *ud_ctx)
 
 int mv2_send_connect_message(MPIDI_VC_t *vc)
 {
-    int avail = 0;
-    MPIDI_CH3I_MRAILI_Pkt_comm_header *connect_pkt = NULL;
+    /* set message payload, specify id we want remote side to use when sending to us */
     char conn_info[RDMA_CONNECTION_INFO_LEN];
-    vbuf *v = get_ud_vbuf();
-    void *ptr = (v->buffer + v->content_size);
+    sprintf(conn_info, "%06x:%04x:%06x", vc->mrail.readid, local_ep_info.lid, local_ep_info.qpn);
 
-    sprintf(conn_info, "%06x:%04x:%06x", PG_RANK, local_ep_info.lid, local_ep_info.qpn);
+    /* grab a packet */
+    vbuf* v = get_ud_vbuf();
 
-    avail = MRAIL_MAX_UD_SIZE - v->content_size;
-
-    assert (avail >= RDMA_CONNECTION_INFO_LEN);
-
+    /* copy in payload and set payload size */
+    void* ptr = (v->buffer + v->content_size);
     memcpy(ptr, conn_info, sizeof(conn_info));
     v->content_size += RDMA_CONNECTION_INFO_LEN;
 
-    connect_pkt = v->pheader;
+    /* check that we can fix message in packet */
+    int avail = MRAIL_MAX_UD_SIZE - v->content_size;
+    assert (avail >= RDMA_CONNECTION_INFO_LEN);
 
+    /* set header fields */
+    MPIDI_CH3I_MRAILI_Pkt_comm_header* connect_pkt = v->pheader;
     MPIDI_Pkt_init(connect_pkt, MPIDI_CH3_PKT_UD_CONNECT);
     connect_pkt->acknum = vc->mrail.seqnum_next_toack;
-    connect_pkt->rail = v->rail;
+    connect_pkt->rail   = v->rail;
 
+    /* prepare packet for send */
     vbuf_init_send(v, sizeof(MPIDI_CH3I_MRAILI_Pkt_comm_header), v->rail);
 
+    /* and send it */
     proc.post_send(vc, v, 0, NULL);
 
     return 0;
@@ -600,8 +649,6 @@ int mv2_send_connect_message(MPIDI_VC_t *vc)
 
 spawn_net_channel* mv2_ep_connect(const char *name)
 {
-    /* TODO: allocate new VC's dynamically, associate them with channel */
-
     /* extract lid and queue pair address from endpoint name */
     int dest_rank;
     mv2_ud_exch_info_t ep_info;
@@ -611,64 +658,65 @@ spawn_net_channel* mv2_ep_connect(const char *name)
         return SPAWN_NET_CHANNEL_NULL;
     }
 
-    /* Set VC info */
-    mv2_ud_set_vc_info(dest_rank, &ep_info, RDMA_DEFAULT_PORT);
+    /* allocate and initialize a new virtual channel */
+    MPIDI_VC_t* vc = vc_alloc();
 
-    /* lookup virtual channel for named process */
-    MPIDI_VC_t *vc = NULL;
-    MV2_Get_vc(dest_rank, &vc);
+    /* point channel to remote endpoint */
+    mv2_ud_set_vc_info(vc, &ep_info, RDMA_DEFAULT_PORT);
 
-    /* Send connect message to destination */
+    /* send connect message to destination */
     mv2_send_connect_message(vc);
 
+    /* TODO: wait for accept message and set vc->mrail.writeid */
+
     /* Change state to connected */
-    ud_vc_info[dest_rank].mrail.state = MRAILI_UD_CONNECTED;
+    vc->mrail.state = MRAILI_UD_CONNECTED;
 
     /* allocate spawn net channel data structure */
     spawn_net_channel* ch = SPAWN_MALLOC(sizeof(spawn_net_channel));
     ch->type = SPAWN_NET_TYPE_IB;
 
+    /* TODO: include hostname here */
     /* Fill in channel name */
-    ch->name = SPAWN_MALLOC(sizeof(char) * RDMA_CONNECTION_INFO_LEN);
-    sprintf(ch->name, "%06x:%04x:%06x", dest_rank, ep_info.lid, ep_info.qpn);
+    ch->name = SPAWN_STRDUPF("%04x:%06x", ep_info.lid, ep_info.qpn);
 
-    /* copy endpoint info to channel data */
-    ch->data = SPAWN_MALLOC(sizeof(mv2_ud_exch_info_t));
-    memcpy(ch->data, &ep_info, sizeof(mv2_ud_exch_info_t));
+    /* record vc in channel data field */
+    ch->data = (void*) vc;
 
     return ch;
 }
 
 int mv2_ud_send_internal(MPIDI_VC_t *vc, const void* buf, size_t size)
 {
-    int avail = 0;
-    MPIDI_CH3I_MRAILI_Pkt_comm_header *pkt = NULL;
-    vbuf *v = get_ud_vbuf();
+    /* get a packet */
+    vbuf* v = get_ud_vbuf();
 
     /* Offset for the packet header */
     v->content_size = sizeof(MPIDI_CH3I_MRAILI_Pkt_comm_header);
 
-    void *ptr = (v->buffer + v->content_size);
-
-    avail = MRAIL_MAX_UD_SIZE - v->content_size;
-
+    /* check that we have room left for message payload */
+    int avail = MRAIL_MAX_UD_SIZE - v->content_size;
     assert (avail >= size);
 
+    /* fill in the message payload and set content size */
+    void* ptr = (v->buffer + v->content_size);
     memcpy(ptr, buf, size);
     v->content_size += size;
 
-    pkt = v->pheader;
-
+    /* fill in packet header fields */
+    MPIDI_CH3I_MRAILI_Pkt_comm_header* pkt = v->pheader;
     MPIDI_Pkt_init(pkt, MPIDI_CH3_PKT_UD_DATA);
     pkt->acknum = vc->mrail.seqnum_next_toack;
-    pkt->rail = v->rail;
+    pkt->rail   = v->rail;
 
+    /* prepare packet for send */
     vbuf_init_send(v, sizeof(MPIDI_CH3I_MRAILI_Pkt_comm_header), v->rail);
 
     if (vc->mrail.state != MRAILI_UD_CONNECTED) {
         mv2_ud_ext_window_add(&vc->mrail.ud.ext_window, v);
     }
 
+    /* send packet */
     proc.post_send(vc, v, 0, NULL);
 
     return 0;
@@ -676,22 +724,9 @@ int mv2_ud_send_internal(MPIDI_VC_t *vc, const void* buf, size_t size)
 
 int mv2_ud_send(const spawn_net_channel* ch, const void* buf, size_t size)
 {
-    int ret = 0;
-    int parsed = 0;
-    int dest_rank = -1;
-    MPIDI_VC_t *vc = NULL;
-    mv2_ud_exch_info_t ep_info;
-
-    parsed = sscanf(ch->name, "%06x:%04x:%06x", &dest_rank, &ep_info.lid, &ep_info.qpn);
-    if (parsed != 3) {
-        SPAWN_ERR("Couldn't parse ep info from %s\n", ch->name);
-        return NULL;
-    }
-
-    MV2_Get_vc(dest_rank, &vc);
-
-    ret = mv2_ud_send_internal(vc, buf, size);
-
+    /* get pointer to vc from channel data field */
+    MPIDI_VC_t* vc = (MPIDI_VC_t*) ch->data;
+    int ret = mv2_ud_send_internal(vc, buf, size);
     return ret;
 }
 
@@ -815,7 +850,7 @@ int mv2_poll_cq()
                 v->rail = p->rail;
     
                 if (p->type == MPIDI_CH3_PKT_UD_CONNECT) {
-                    mv2_ud_set_vc_info(p->src.rank, (mv2_ud_exch_info_t*) v->buffer, RDMA_DEFAULT_PORT);
+                    mv2_ud_set_vc_info(vc, (mv2_ud_exch_info_t*) v->buffer, RDMA_DEFAULT_PORT);
                 }
 
                 MRAILI_Process_recv(v);
