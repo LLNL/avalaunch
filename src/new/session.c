@@ -3,7 +3,6 @@
  */
 #include <unistd.h>
 #include <spawn_internal.h>
-#include <strmap.h>
 #include <node.h>
 #include <print_errmsg.h>
 
@@ -14,6 +13,7 @@
 #include <stdio.h>
 #include <errno.h>
 #include <sys/utsname.h>
+#include <limits.h>
 
 typedef struct spawn_tree_struct {
     int rank;                      /* our global rank (0 to ranks-1) */
@@ -25,7 +25,6 @@ typedef struct spawn_tree_struct {
 } spawn_tree;
 
 struct session_t {
-    char const * spawn_exe;       /* executable path */
     char const * spawn_parent;    /* name of our parent's endpoint */
     char const * spawn_id;        /* id given to us by parent, we echo this back on connect */
     char const * ep_name;         /* name of our endpoint */
@@ -223,6 +222,14 @@ char* path_search(const char* command)
          * path entry */
         spawn_free(&path);
         prefix = strtok(NULL, ":");
+    }
+
+    /* get absolute path name */
+    if (path != NULL) {
+        char pathbuf[PATH_MAX];
+        realpath(path, pathbuf);
+        spawn_free(&path);
+        path = SPAWN_STRDUP(pathbuf);
     }
 
     /* free copy of path */
@@ -1149,7 +1156,6 @@ session_init (int argc, char * argv[])
     struct session_t * s = SPAWN_MALLOC(sizeof(struct session_t));
 
     /* intialize session fields */
-    s->spawn_exe    = NULL;
     s->spawn_parent = NULL;
     s->spawn_id     = NULL;
     s->ep_name      = NULL;
@@ -1162,9 +1168,6 @@ session_init (int argc, char * argv[])
 
     /* create empty params strmap */
     s->params = strmap_new();
-
-    /* get our executable name */
-    s->spawn_exe = SPAWN_STRDUP(argv[0]);
 
     char* value;
 
@@ -1179,6 +1182,12 @@ session_init (int argc, char * argv[])
         s->ep_name = spawn_net_name(s->ep);
     } else {
         /* no parent, we are the root, create parameters strmap */
+
+        /* first, compute and record launch executable name */
+        char* spawn_orig = argv[0];
+        char* spawn_path = path_search(spawn_orig);
+        strmap_set(s->params, "EXE", spawn_path);
+        spawn_free(&spawn_path);
 
         /* TODO: move endpoint open to session_start? */
         /* determine which type of endpoint we should open */
@@ -1300,6 +1309,10 @@ session_start (struct session_t * s)
     /**********************
      * Create spawn tree
      **********************/
+#if 0
+    struct timespec t_parent_connect_start, t_parent_connect_end;
+    struct timespec t_parent_params_start, t_parent_params_end;
+#endif
 
     tid_tree = begin_delta("unfurl tree");
 
@@ -1351,6 +1364,9 @@ session_start (struct session_t * s)
         children = t->children;
     }
 
+    /* lookup spawn executable name */
+    char* spawn_exe = strmap_get(s->params, "EXE");
+
     /* get the current working directory */
     char* spawn_cwd = spawn_getcwd();
 
@@ -1385,7 +1401,7 @@ session_start (struct session_t * s)
 #endif
 
         strmap* argmap = strmap_new();
-        strmap_setf(argmap, "ARG0=%s", s->spawn_exe);
+        strmap_setf(argmap, "ARG0=%s", spawn_exe);
         strmap_setf(argmap, "ARGS=%d", 1);
 
         strmap* envmap = strmap_new();
@@ -1394,7 +1410,7 @@ session_start (struct session_t * s)
         strmap_setf(envmap, "ENVS=%d", 2);
 
         /* launch child process */
-        temp_launch(host, s->params, spawn_cwd, s->spawn_exe, argmap, envmap);
+        temp_launch(host, s->params, spawn_cwd, spawn_exe, argmap, envmap);
 
         strmap_delete(&envmap);
         strmap_delete(&argmap);
@@ -1439,6 +1455,8 @@ session_start (struct session_t * s)
     /* signal root to let it know tree is done */
     signal_to_root(s);
     if (!nodeid) { end_delta(tid_tree); }
+
+    /* TODO: print times for unfurl step */
 
     /**********************
      * Gather endpoints of all spawns
@@ -1586,7 +1604,6 @@ session_destroy (struct session_t * s)
 {
     spawn_free(&(s->spawn_id));
     spawn_free(&(s->spawn_parent));
-    spawn_free(&(s->spawn_exe));
     spawn_net_close(&(s->ep));
     strmap_delete(&(s->params));
     tree_delete(&(s->tree));
