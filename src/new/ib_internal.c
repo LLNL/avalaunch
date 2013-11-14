@@ -69,6 +69,18 @@ static pthread_t comm_thread;
 
 void* cm_timeout_handler(void *arg);
 
+#define MV2_UD_SEND_ACKS() {            \
+    int i;                              \
+    MPIDI_VC_t *vc;                     \
+    int size = ud_vc_info_id;           \
+    for (i=0; i<size; i++) {            \
+        MV2_Get_vc(i, &vc);             \
+        if (vc->mrail.ack_need_tosend) {\
+            mv2_send_explicit_ack(vc);  \
+        }                               \
+    }                                   \
+}
+
 /*******************************************
  * Manage VC objects
  ******************************************/

@@ -250,5 +250,8 @@ void MRAILI_Process_recv(vbuf *v);
 inline void mv2_ud_apprecv_window_add(message_queue_t *q, vbuf *v);
 inline vbuf* mv2_ud_apprecv_window_retrieve_and_remove(message_queue_t *q);
 
+int mv2_ud_send(MPIDI_VC_t* vc, const void* buf, size_t size);
+int mv2_ud_recv(MPIDI_VC_t* vc, void* buf, size_t size);
+
 #endif /* #ifndef _MV2_UD_H_ */
 

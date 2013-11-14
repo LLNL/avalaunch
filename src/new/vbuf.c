@@ -28,12 +28,9 @@
 #include <mv2_ud.h>
 #include <ib_internal.h>
 
-extern int my_pg_rank;
-
 /* vbuf pool info */
 vbuf_pool_t *rdma_vbuf_pools;
 int rdma_num_vbuf_pools;
-
 
 /* head of list of allocated vbuf regions */
 static vbuf_region *vbuf_region_head = NULL;

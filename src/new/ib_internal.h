@@ -46,8 +46,6 @@
 #endif /* __ia64__*/
 #define HUGEPAGE_ALIGN  (2*1024*1024)
 
-#define PG_RANK                         my_pg_rank
-#define PG_SIZE                         my_pg_size
 #define DEF_NUM_CQS                     (1)
 #define MAX_NUM_CQS                     (1)
 #define MAX_NUM_PORTS                   (1)
@@ -186,7 +184,7 @@ void comm_unlock(void);
 spawn_net_endpoint* mv2_init_ud(int nchild);
 spawn_net_channel* mv2_ep_connect(const char *name);
 spawn_net_channel* mv2_ep_accept();
-int mv2_ud_send(MPIDI_VC_t* vc, const void* buf, size_t size);
-int mv2_ud_recv(MPIDI_VC_t* vc, void* buf, size_t size);
+//int mv2_ud_send(MPIDI_VC_t* vc, const void* buf, size_t size);
+//int mv2_ud_recv(MPIDI_VC_t* vc, void* buf, size_t size);
 
 #endif /* _IB_INTERNAL_H */

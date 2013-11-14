@@ -57,18 +57,6 @@ enum {
 
 #define MV2_Get_vc(rank_, vcp_) *(vcp_) = ud_vc_info[rank_]
 
-#define MV2_UD_SEND_ACKS() {            \
-    int i;                              \
-    MPIDI_VC_t *vc;                     \
-    int size = PG_SIZE;                 \
-    for (i=0; i<size; i++) {            \
-        MV2_Get_vc(i, &vc);             \
-        if (vc->mrail.ack_need_tosend) {\
-            mv2_send_explicit_ack(vc);  \
-        }                               \
-    }                                   \
-}
-
 static inline void mv2_ud_ext_sendq_queue(message_queue_t *q, vbuf *v)
 {
     v->desc.next = NULL;

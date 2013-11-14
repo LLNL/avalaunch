@@ -19,8 +19,6 @@
 #include <debug_utils.h>
 
 long rdma_ud_last_check;
-int my_pg_rank;
-int my_pg_size;
 
 extern mv2_proc_info_t proc;
 
