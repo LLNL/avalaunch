@@ -13,7 +13,7 @@
 #ifndef _MV2_UD_H_
 #define _MV2_UD_H_
 
-#include <vbuf.h>
+#include "vbuf.h"
 #include <infiniband/verbs.h>
 
 #define LOG2(_v, _r)                            \
@@ -234,20 +234,12 @@ typedef struct _mv2_proc_info_t {
     int   (*post_send)(MPIDI_VC_t * vc, vbuf * v, int rail, mv2_ud_ctx_t *send_ud_ctx);
 } mv2_proc_info_t;
 
-/* create UD context */
-mv2_ud_ctx_t* mv2_ud_create_ctx (mv2_ud_qp_info_t *qp_info);
-
-int mv2_ud_qp_transition(struct ibv_qp *qp);
-
 void mv2_ud_zcopy_poll_cq(mv2_ud_zcopy_info_t *zcopy_info, mv2_ud_ctx_t *ud_ctx,
                                 vbuf *resend_buf, int hca_index, int *found);
-/* create UD QP */
-struct ibv_qp *mv2_ud_create_qp (mv2_ud_qp_info_t *qp_info);
 
 int post_ud_send(MPIDI_VC_t* vc, vbuf* v, int rail, mv2_ud_ctx_t *send_ud_ctx);
 
 /* destroy ud context */
-void mv2_ud_destroy_ctx (mv2_ud_ctx_t *ctx);
 void mv2_ud_resend(vbuf *v);
 void mv2_check_resend();
 void mv2_ud_update_send_credits(vbuf *v);

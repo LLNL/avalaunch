@@ -9,7 +9,6 @@
  * copyright file COPYRIGHT in the top level MVAPICH2 directory.
  *
  */
-#include <ib_internal.h>
 
 #include "spawn_internal.h"
 
@@ -60,8 +59,14 @@ int spawn_net_disconnect_ib(spawn_net_channel** pch)
 
 int spawn_net_read_ib(const spawn_net_channel* ch, void* buf, size_t size)
 {
+    /* get pointer to vc from channel data field */
+    MPIDI_VC_t* vc = (MPIDI_VC_t*) ch->data;
+    if (vc == NULL) {
+        return SPAWN_FAILURE;
+    }
+
     comm_lock();
-    int ret = mv2_ud_recv(ch, buf, size);
+    int ret = mv2_ud_recv(vc, buf, size);
     comm_unlock();
 
     return ret;
@@ -69,8 +74,14 @@ int spawn_net_read_ib(const spawn_net_channel* ch, void* buf, size_t size)
 
 int spawn_net_write_ib(const spawn_net_channel* ch, const void* buf, size_t size)
 {
+    /* get pointer to vc from channel data field */
+    MPIDI_VC_t* vc = (MPIDI_VC_t*) ch->data;
+    if (vc == NULL) {
+        return SPAWN_FAILURE;
+    }
+
     comm_lock();
-    int ret = mv2_ud_send(ch, buf, size);
+    int ret = mv2_ud_send(vc, buf, size);
     comm_unlock();
 
     return ret;

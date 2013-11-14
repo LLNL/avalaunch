@@ -9,7 +9,7 @@
  * copyright file COPYRIGHT in the top level MVAPICH2 directory.
  *
  */
-#include <spawn_net.h>
+#include <spawn_internal.h>
 #include <ib_internal.h>
 #include <mv2_ud.h>
 #include <mv2_ud_inline.h>
@@ -67,9 +67,11 @@ MPIDI_VC_t** ud_vc_info = NULL; /* VC array */
 static pthread_mutex_t comm_lock_object;
 static pthread_t comm_thread;
 
-int mv2_wait_on_channel();
 void* cm_timeout_handler(void *arg);
-int mv2_post_ud_recv_buffers(int num_bufs, mv2_ud_ctx_t *ud_ctx);
+
+/*******************************************
+ * Manage VC objects
+ ******************************************/
 
 /* initialize UD VC */
 static void vc_init(MPIDI_VC_t* vc)
@@ -96,7 +98,7 @@ static void vc_init(MPIDI_VC_t* vc)
 }
 
 /* allocate and initialize a new VC */
-static uint64_t vc_alloc()
+static MPIDI_VC_t* vc_alloc()
 {
     /* get a new id */
     uint64_t id = ud_vc_info_id;
@@ -140,8 +142,8 @@ static uint64_t vc_alloc()
      * writeid) */
     vc->mrail.readid = id;
 
-    /* return id to caller */
-    return id;
+    /* return vc to caller */
+    return vc;
 }
 
 static int vc_set_addr(MPIDI_VC_t* vc, mv2_ud_exch_info_t *rem_info, int port)
@@ -179,6 +181,177 @@ static int vc_set_addr(MPIDI_VC_t* vc, mv2_ud_exch_info_t *rem_info, int port)
     return 0;
 }
 
+static void vc_free(MPIDI_VC_t** pvc)
+{
+    if (pvc == NULL) {
+        return;
+    }
+
+    //MPIDI_VC_t* vc = *pvc;
+
+    /* TODO: free off any memory allocated for vc */
+
+    spawn_free(pvc);
+
+    return;
+}
+
+/*******************************************
+ * Communication routines
+ ******************************************/
+
+static int mv2_post_ud_recv_buffers(int num_bufs, mv2_ud_ctx_t *ud_ctx)
+{
+    /* check that we don't exceed the max number of work queue elements */
+    if (num_bufs > rdma_default_max_ud_recv_wqe) {
+        ibv_va_error_abort(
+                GEN_ASSERT_ERR,
+                "Try to post %d to UD recv buffers, max %d\n",
+                num_bufs, rdma_default_max_ud_recv_wqe);
+    }
+
+    /* post our vbufs */
+    int i;
+    for (i = 0; i < num_bufs; ++i) {
+        /* get a new vbuf */
+        vbuf* v = get_ud_vbuf();
+        if (v == NULL) {
+            break;
+        }
+
+        /* initialize vubf for UD */
+        vbuf_init_ud_recv(v, rdma_default_ud_mtu, 0);
+        v->transport = IB_TRANSPORT_UD;
+
+        /* post vbuf to receive queue */
+        int ret;
+        struct ibv_recv_wr* bad_wr = NULL;
+        if (ud_ctx->qp->srq) {
+            ret = ibv_post_srq_recv(ud_ctx->qp->srq, &v->desc.u.rr, &bad_wr);
+        } else {
+            ret = ibv_post_recv(ud_ctx->qp, &v->desc.u.rr, &bad_wr);
+        }
+
+        /* check that our post was successful */
+        if (ret) {
+            MRAILI_Release_vbuf(v);
+            break;
+        }
+    }
+
+    PRINT_DEBUG(DEBUG_UD_verbose>0 ,"Posted %d buffers of size:%d to UD QP\n",num_bufs, rdma_default_ud_mtu);
+
+    return i;
+}
+
+static int mv2_poll_cq()
+{
+    /* poll cq */
+    struct ibv_wc wc;
+    struct ibv_cq* cq = g_hca_info.cq_hndl;
+    int ne = ibv_poll_cq(cq, 1, &wc);
+    if (ne == 1) {
+        if (IBV_WC_SUCCESS != wc.status) {
+            SPAWN_ERR("IBV_WC_SUCCESS != wc.status (%d)", wc.status);
+            exit(-1);
+        }
+
+        /* Get VBUF */
+        vbuf* v = (vbuf *) ((uintptr_t) wc.wr_id);
+
+        /* Get VC from VBUF */
+        MPIDI_VC_t* vc = (MPIDI_VC_t*) (v->vc);
+    
+        MPIDI_CH3I_MRAILI_Pkt_comm_header *p = NULL;
+        switch (wc.opcode) {
+            case IBV_WC_SEND:
+            case IBV_WC_RDMA_READ:
+            case IBV_WC_RDMA_WRITE:
+                if (v->pheader && IS_CNTL_MSG(p)) {
+                }
+                mv2_ud_update_send_credits(v);
+                if (v->flags & UD_VBUF_SEND_INPROGRESS) {
+                    v->flags &= ~(UD_VBUF_SEND_INPROGRESS);
+                    if (v->flags & UD_VBUF_FREE_PENIDING) {
+                        v->flags &= ~(UD_VBUF_FREE_PENIDING);
+                        MRAILI_Release_vbuf(v);
+                    }
+                }
+    
+                v = NULL;
+                break;
+            case IBV_WC_RECV:
+                SET_PKT_LEN_HEADER(v, wc);
+                SET_PKT_HEADER_OFFSET(v);
+    
+                /* get packet header */
+                p = v->pheader;
+
+                /* Retrieve the VC */
+                MV2_Get_vc(p->src.rank, &vc);
+    
+                v->vc   = vc;
+                v->rail = p->rail;
+    
+                if (p->type == MPIDI_CH3_PKT_UD_CONNECT) {
+                    vc_set_addr(vc, (mv2_ud_exch_info_t*) v->buffer, RDMA_DEFAULT_PORT);
+                }
+
+                MRAILI_Process_recv(v);
+
+                proc.ud_ctx->num_recvs_posted--;
+                if(proc.ud_ctx->num_recvs_posted < proc.ud_ctx->credit_preserve) {
+                    proc.ud_ctx->num_recvs_posted += mv2_post_ud_recv_buffers(
+                            (RDMA_DEFAULT_MAX_UD_RECV_WQE - proc.ud_ctx->num_recvs_posted),
+                            proc.ud_ctx);
+                }
+                break;
+            default:
+                SPAWN_ERR("Invalid opcode from ibv_poll_cq()");
+                break;
+        }
+    } else if (ne < 0) {
+        SPAWN_ERR("poll cq error");
+        exit(-1);
+    }
+
+    return ne;
+}
+
+static int mv2_wait_on_channel()
+{
+    void *ev_ctx = NULL;
+    struct ibv_cq *ev_cq = NULL;
+
+    if (UD_ACK_PROGRESS_TIMEOUT) {
+        mv2_check_resend();
+        MV2_UD_SEND_ACKS();
+        rdma_ud_last_check = mv2_get_time_us();
+    }
+
+    /* Unlock before going to sleep */
+    comm_unlock();
+
+    /* Wait for the completion event */
+    if (ibv_get_cq_event(g_hca_info.comp_channel, &ev_cq, &ev_ctx)) {
+        ibv_error_abort(-1, "Failed to get cq_event\n");
+    }
+
+    /* Get lock before processing */
+    comm_lock();
+
+    /* Ack the event */
+    ibv_ack_cq_events(ev_cq, 1);
+
+    /* Request notification upon the next completion event */
+    if (ibv_req_notify_cq(ev_cq, 0)) {
+        ibv_error_abort(-1, "Couldn't request CQ notification\n");
+    }
+
+    mv2_poll_cq();
+
+    return 0;
+}
 /* ===== Begin: Initialization functions ===== */
 /* Get HCA parameters */
 static int mv2_get_hca_info(int devnum, mv2_hca_info_t *hca_info)
@@ -307,7 +480,7 @@ int mv2_hca_open()
 }
 
 /* Transition UD QP */
-int mv2_ud_qp_transition(struct ibv_qp *qp)
+static int mv2_ud_qp_transition(struct ibv_qp *qp)
 {
     struct ibv_qp_attr attr;
 
@@ -350,7 +523,7 @@ int mv2_ud_qp_transition(struct ibv_qp *qp)
 }
 
 /* Create UD QP */
-struct ibv_qp * mv2_ud_create_qp(mv2_ud_qp_info_t *qp_info)
+static struct ibv_qp* mv2_ud_create_qp(mv2_ud_qp_info_t *qp_info)
 {
     /* zero out all fields of queue pair attribute structure */
     struct ibv_qp_init_attr init_attr;
@@ -391,20 +564,30 @@ struct ibv_qp * mv2_ud_create_qp(mv2_ud_qp_info_t *qp_info)
 }
 
 /* Create UD Context */
-mv2_ud_ctx_t* mv2_ud_create_ctx(mv2_ud_qp_info_t *qp_info)
+static mv2_ud_ctx_t* mv2_ud_create_ctx(mv2_ud_qp_info_t *qp_info)
 {
-    mv2_ud_ctx_t *ctx;
-
-    ctx = SPAWN_MALLOC( sizeof(mv2_ud_ctx_t) );
-    memset( ctx, 0, sizeof(mv2_ud_ctx_t) );
+    mv2_ud_ctx_t* ctx = (mv2_ud_ctx_t*) SPAWN_MALLOC(sizeof(mv2_ud_ctx_t));
+    memset(ctx, 0, sizeof(mv2_ud_ctx_t));
 
     ctx->qp = mv2_ud_create_qp(qp_info);
-    if(!ctx->qp) {
+    if(! ctx->qp) {
         SPAWN_ERR("Error in creating UD QP");
         return NULL;
     }
 
     return ctx;
+}
+
+/* Destroy UD Context */
+static void mv2_ud_destroy_ctx(mv2_ud_ctx_t *ctx)
+{
+    if (ctx->qp) {
+        ibv_destroy_qp(ctx->qp);
+    }
+    spawn_free(&ctx);
+    spawn_free(&ud_vc_info);
+
+    pthread_cancel(comm_thread);
 }
 
 /* Initialize UD Context */
@@ -484,20 +667,10 @@ spawn_net_endpoint* mv2_init_ud(int nchild)
     return ep;
 }
 
-/* Destroy UD Context */
-void mv2_ud_destroy_ctx(mv2_ud_ctx_t *ctx)
-{
-    if (ctx->qp) {
-        ibv_destroy_qp(ctx->qp);
-    }
-    spawn_free(ctx);
-    spawn_free(&ud_vc_info);
-
-    pthread_cancel(comm_thread);
-}
 /* ===== End: Initialization functions ===== */
 
 /* ===== Begin: Send/Recv functions ===== */
+
 /*Interface to lock/unlock connection manager*/
 void comm_lock(void)
 {           
@@ -570,46 +743,6 @@ void MPIDI_CH3I_MRAIL_Release_vbuf(vbuf * v)
 #endif
 }
 
-int mv2_post_ud_recv_buffers(int num_bufs, mv2_ud_ctx_t *ud_ctx)
-{
-    int i = 0,ret = 0;
-    vbuf* v = NULL;
-    struct ibv_recv_wr* bad_wr = NULL;
-
-    if (num_bufs > rdma_default_max_ud_recv_wqe)
-    {
-        ibv_va_error_abort(
-                GEN_ASSERT_ERR,
-                "Try to post %d to UD recv buffers, max %d\n",
-                num_bufs, rdma_default_max_ud_recv_wqe);
-    }
-
-    for (; i < num_bufs; ++i)
-    {
-        if ((v = get_ud_vbuf()) == NULL)
-        {
-            break;
-        }
-
-        vbuf_init_ud_recv(v, rdma_default_ud_mtu, 0);
-        v->transport = IB_TRANSPORT_UD;
-        if (ud_ctx->qp->srq) {
-            ret = ibv_post_srq_recv(ud_ctx->qp->srq, &v->desc.u.rr, &bad_wr);
-        } else {
-            ret = ibv_post_recv(ud_ctx->qp, &v->desc.u.rr, &bad_wr);
-        }
-        if (ret)
-        {
-            MRAILI_Release_vbuf(v);
-            break;
-        }
-    }
-
-    PRINT_DEBUG(DEBUG_UD_verbose>0 ,"Posted %d buffers of size:%d to UD QP\n",num_bufs, rdma_default_ud_mtu);
-
-    return i;
-}
-
 static int mv2_send_connect_message(MPIDI_VC_t *vc)
 {
     /* message payload, specify id we want remote side to use when
@@ -617,17 +750,18 @@ static int mv2_send_connect_message(MPIDI_VC_t *vc)
     char* payload = SPAWN_STRDUPF("%06x:%04x:%06x",
         vc->mrail.readid, local_ep_info.lid, local_ep_info.qpn
     );
-    size_t payload_bytes = strlen(payload) + 1;
+    size_t payload_size = strlen(payload) + 1;
 
     /* grab a packet */
     vbuf* v = get_ud_vbuf();
+    if (v == NULL) {
+        SPAWN_ERR("Failed to get vbuf for connect msg");
+        return SPAWN_FAILURE;
+    }
 
     /* Offset for the packet header */
-    v->content_size = sizeof(MPIDI_CH3I_MRAILI_Pkt_comm_header);
-
-    /* check that we can fit message in packet */
-    int avail = MRAIL_MAX_UD_SIZE - v->content_size;
-    assert(avail >= payload_bytes);
+    size_t header_size = sizeof(MPIDI_CH3I_MRAILI_Pkt_comm_header);
+    assert((MRAIL_MAX_UD_SIZE - header_size) >= payload_size);
 
     /* set header fields */
     MPIDI_CH3I_MRAILI_Pkt_comm_header* connect_pkt = v->pheader;
@@ -637,36 +771,37 @@ static int mv2_send_connect_message(MPIDI_VC_t *vc)
 
     /* copy in payload and set payload size */
     char* ptr = (char*)v->buffer + v->content_size;
-    memcpy(ptr, payload, payload_bytes);
-    v->content_size += payload_bytes;
+    memcpy(ptr, payload, payload_size);
+
+    /* compute packet size */
+    v->content_size = header_size + payload_size;
 
     /* prepare packet for send */
-    vbuf_init_send(v, sizeof(MPIDI_CH3I_MRAILI_Pkt_comm_header), v->rail);
+    vbuf_init_send(v, header_size, v->rail);
 
     /* and send it */
     proc.post_send(vc, v, 0, NULL);
 
-    return 0;
+    return SPAWN_SUCCESS;
 }
 
 static int mv2_send_accept_message(MPIDI_VC_t *vc)
 {
     /* message payload, specify id we want remote side to use when
      * sending to us followed by our lid/qp */
-    char* payload = SPAWN_STRDUPF("%06x",
-        vc->mrail.readid
-    );
-    size_t payload_bytes = strlen(payload) + 1;
+    char* payload = SPAWN_STRDUPF("%06x", vc->mrail.readid);
+    size_t payload_size = strlen(payload) + 1;
 
     /* grab a packet */
     vbuf* v = get_ud_vbuf();
+    if (v == NULL) {
+        SPAWN_ERR("Failed to get vbuf for accept msg");
+        return SPAWN_FAILURE;
+    }
 
     /* Offset for the packet header */
-    v->content_size = sizeof(MPIDI_CH3I_MRAILI_Pkt_comm_header);
-
-    /* check that we can fit message in packet */
-    int avail = MRAIL_MAX_UD_SIZE - v->content_size;
-    assert(avail >= payload_bytes);
+    size_t header_size = sizeof(MPIDI_CH3I_MRAILI_Pkt_comm_header);
+    assert((MRAIL_MAX_UD_SIZE - header_size) >= payload_size);
 
     /* set header fields */
     MPIDI_CH3I_MRAILI_Pkt_comm_header* connect_pkt = v->pheader;
@@ -676,27 +811,34 @@ static int mv2_send_accept_message(MPIDI_VC_t *vc)
 
     /* copy in payload and set payload size */
     char* ptr = (char*)v->buffer + v->content_size;
-    memcpy(ptr, payload, payload_bytes);
-    v->content_size += payload_bytes;
+    memcpy(ptr, payload, payload_size);
+
+    /* compute packet size */
+    v->content_size = header_size + payload_size;
 
     /* prepare packet for send */
-    vbuf_init_send(v, sizeof(MPIDI_CH3I_MRAILI_Pkt_comm_header), v->rail);
+    vbuf_init_send(v, header_size, v->rail);
 
     /* and send it */
     proc.post_send(vc, v, 0, NULL);
 
-    return 0;
+    return SPAWN_SUCCESS;
 }
 
 spawn_net_channel* mv2_ep_connect(const char *name)
 {
     /* extract lid and queue pair address from endpoint name */
-    mv2_ud_exch_info_t ep_info;
-    int parsed = sscanf(name, "IBUD:%04x:%06x", &ep_info.lid, &ep_info.qpn);
+    unsigned int lid, qpn;
+    int parsed = sscanf(name, "IBUD:%04x:%06x", &lid, &qpn);
     if (parsed != 2) {
         SPAWN_ERR("Couldn't parse ep info from %s\n", name);
         return SPAWN_NET_CHANNEL_NULL;
     }
+
+    /* store lid and queue pair */
+    mv2_ud_exch_info_t ep_info;
+    ep_info.lid = lid;
+    ep_info.qpn = qpn;
 
     /* allocate and initialize a new virtual channel */
     MPIDI_VC_t* vc = vc_alloc();
@@ -763,190 +905,99 @@ spawn_net_channel* mv2_ep_accept()
     return ch;
 }
 
-int mv2_ud_send_internal(MPIDI_VC_t *vc, const void* buf, size_t size)
+int mv2_ud_send(MPIDI_VC_t *vc, const void* buf, size_t size)
 {
-    /* get a packet */
-    vbuf* v = get_ud_vbuf();
+    /* compute header and payload sizes */
+    size_t header_size = sizeof(MPIDI_CH3I_MRAILI_Pkt_comm_header);
+    size_t payload_size = MRAIL_MAX_UD_SIZE - header_size;
+    assert(MRAIL_MAX_UD_SIZE >= header_size);
 
-    /* Offset for the packet header */
-    v->content_size = sizeof(MPIDI_CH3I_MRAILI_Pkt_comm_header);
-
-    /* check that we have room left for message payload */
-    int avail = MRAIL_MAX_UD_SIZE - v->content_size;
-    assert (avail >= size);
-
-    /* fill in packet header fields */
-    MPIDI_CH3I_MRAILI_Pkt_comm_header* pkt = v->pheader;
-    MPIDI_Pkt_init(pkt, MPIDI_CH3_PKT_UD_DATA);
-    pkt->acknum = vc->mrail.seqnum_next_toack;
-    pkt->rail   = v->rail;
-
-    /* fill in the message payload and set content size */
-    void* ptr = v->buffer + v->content_size;
-    memcpy(ptr, buf, size);
-    v->content_size += size;
-
-    /* prepare packet for send */
-    vbuf_init_send(v, sizeof(MPIDI_CH3I_MRAILI_Pkt_comm_header), v->rail);
-
-    if (vc->mrail.state != MRAILI_UD_CONNECTED) {
-        mv2_ud_ext_window_add(&vc->mrail.ud.ext_window, v);
-    } else {
-        /* send packet */
-        proc.post_send(vc, v, 0, NULL);
-    }
-
-    return 0;
-}
-
-int mv2_ud_send(const spawn_net_channel* ch, const void* buf, size_t size)
-{
-    /* get pointer to vc from channel data field */
-    MPIDI_VC_t* vc = (MPIDI_VC_t*) ch->data;
-    int ret = mv2_ud_send_internal(vc, buf, size);
-    return ret;
-}
-
-int mv2_ud_recv(const spawn_net_channel* ch, void* buf, size_t size)
-{
-    /* get address of vc from channel data field */
-    MPIDI_VC_t* vc = (MPIDI_VC_t*) ch->data;
-
-    /* get readid for this vc */
-    uint64_t readid = vc->mrail.readid;
-
-    /* TODO: look for packets with readid */
-
-    /* wait for a packet from this vc */
-    vbuf* v = mv2_ud_apprecv_window_retrieve_and_remove(&vc->mrail.app_recv_window);
-    while (v == NULL) {
-        comm_unlock();
-        nanosleep(&cm_timeout, &remain);
-        comm_lock();
-        v = mv2_ud_apprecv_window_retrieve_and_remove(&vc->mrail.app_recv_window);
-    }
-
-    /* get pointer to message payload */
-    void* ptr = v->buffer + sizeof(MPIDI_CH3I_MRAILI_Pkt_comm_header);
-
-    /* check that payload doesn't overrun user buffer */
-    size_t recv_size = v->content_size - sizeof(MPIDI_CH3I_MRAILI_Pkt_comm_header);
-    assert(size >= recv_size);
-
-    /* copy payload into user buffer */
-    memcpy(buf, ptr, recv_size);
-
-    /* put vbuf back on free list */
-    MRAILI_Release_vbuf(v);
-
-    return recv_size;
-}
-
-int mv2_poll_cq()
-{
-    int ne = 0;
-    vbuf *v = NULL;
-    MPIDI_VC_t *vc = NULL;
-    struct ibv_wc wc;
-    struct ibv_cq *cq = g_hca_info.cq_hndl;
-    MPIDI_CH3I_MRAILI_Pkt_comm_header *p = NULL;
-
-    /* poll cq */
-    
-    ne = ibv_poll_cq(cq, 1, &wc);
-    if ( 1 == ne ) {
-        if ( IBV_WC_SUCCESS != wc.status ) {
-            SPAWN_ERR("IBV_WC_SUCCESS != wc.status (%d)\n", wc.status);
-            exit(-1);
+    /* break message up into packets and send each one */
+    int rc = SPAWN_SUCCESS;
+    size_t nwritten = 0;
+    while (nwritten < size) {
+        /* determine amount to write in this step */
+        size_t bytes = (size - nwritten);
+        if (bytes > payload_size) {
+            bytes = payload_size;
         }
-        /* Get VBUF */
-        v = (vbuf *) ((uintptr_t) wc.wr_id);
-        /* Get VC from VBUF */
-        vc = (MPIDI_VC_t*) (v->vc);
-    
-        switch (wc.opcode) {
-            case IBV_WC_SEND:
-            case IBV_WC_RDMA_READ:
-            case IBV_WC_RDMA_WRITE:
-                if (v->pheader && IS_CNTL_MSG(p)) {
-                }
-                mv2_ud_update_send_credits(v);
-                if (v->flags & UD_VBUF_SEND_INPROGRESS) {
-                    v->flags &= ~(UD_VBUF_SEND_INPROGRESS);
-                    if (v->flags & UD_VBUF_FREE_PENIDING) {
-                        v->flags &= ~(UD_VBUF_FREE_PENIDING);
-                        MRAILI_Release_vbuf(v);
-                    }
-                }
-    
-                v = NULL;
-                break;
-            case IBV_WC_RECV:
-                SET_PKT_LEN_HEADER(v, wc);
-                SET_PKT_HEADER_OFFSET(v);
-    
-                p = v->pheader;
-                /* Retrieve the VC */
-                MV2_Get_vc(p->src.rank, &vc);
-    
-                v->vc   = vc;
-                v->rail = p->rail;
-    
-                if (p->type == MPIDI_CH3_PKT_UD_CONNECT) {
-                    vc_set_addr(vc, (mv2_ud_exch_info_t*) v->buffer, RDMA_DEFAULT_PORT);
-                }
 
-                MRAILI_Process_recv(v);
-
-                proc.ud_ctx->num_recvs_posted--;
-                if(proc.ud_ctx->num_recvs_posted < proc.ud_ctx->credit_preserve) {
-                    proc.ud_ctx->num_recvs_posted += mv2_post_ud_recv_buffers(
-                            (RDMA_DEFAULT_MAX_UD_RECV_WQE - proc.ud_ctx->num_recvs_posted),
-                            proc.ud_ctx);
-                }
-                break;
-            default:
-                SPAWN_ERR("Invalid opcode from ibv_poll_cq()\n");
-                break;
+        /* get a packet */
+        vbuf* v = get_ud_vbuf();
+        if (v == NULL) {
+            /* TODO: need to worry about this? */
+            SPAWN_ERR("Failed to get vbuf for sending");
+            return SPAWN_FAILURE;
         }
-    } else if ( ne < 0 ){
-        SPAWN_ERR("poll cq error\n");
-        exit(-1);
+
+        /* fill in packet header fields */
+        MPIDI_CH3I_MRAILI_Pkt_comm_header* pkt = v->pheader;
+        MPIDI_Pkt_init(pkt, MPIDI_CH3_PKT_UD_DATA);
+        pkt->acknum = vc->mrail.seqnum_next_toack;
+        pkt->rail   = v->rail;
+
+        /* fill in the message payload */
+        char* ptr  = (char*)v->buffer + header_size;
+        char* data = (char*)buf + nwritten;
+        memcpy(ptr, data, bytes);
+
+        /* set packet size */
+        v->content_size = header_size + bytes;
+
+        /* prepare packet for send */
+        vbuf_init_send(v, header_size, v->rail);
+
+        if (vc->mrail.state != MRAILI_UD_CONNECTED) {
+            /* TODO: what's this do? */
+            mv2_ud_ext_window_add(&vc->mrail.ud.ext_window, v);
+        } else {
+            /* send packet */
+            proc.post_send(vc, v, 0, NULL);
+        }
+
+        /* go to next part of message */
+        nwritten += bytes;
     }
 
-    return ne;
+    return rc;
 }
 
-int mv2_wait_on_channel()
+int mv2_ud_recv(MPIDI_VC_t* vc, void* buf, size_t size)
 {
-    void *ev_ctx = NULL;
-    struct ibv_cq *ev_cq = NULL;
+    /* compute header and payload sizes */
+    size_t header_size = sizeof(MPIDI_CH3I_MRAILI_Pkt_comm_header);
+    assert(MRAIL_MAX_UD_SIZE >= header_size);
 
-    if (UD_ACK_PROGRESS_TIMEOUT) {
-        mv2_check_resend();
-        MV2_UD_SEND_ACKS();
-        rdma_ud_last_check = mv2_get_time_us();
+    /* read data one packet at a time */
+    int rc = SPAWN_SUCCESS;
+    size_t nread = 0;
+    while (nread < size) {
+        /* read a packet from this vc */
+        vbuf* v = mv2_ud_apprecv_window_retrieve_and_remove(&vc->mrail.app_recv_window);
+        while (v == NULL) {
+            comm_unlock();
+            nanosleep(&cm_timeout, &remain);
+            comm_lock();
+            v = mv2_ud_apprecv_window_retrieve_and_remove(&vc->mrail.app_recv_window);
+        }
+
+        /* copy data to user's buffer */
+        size_t payload_size = v->content_size - header_size;
+        if (payload_size > 0) {
+            /* get pointer to message payload */
+            char* ptr  = (char*)buf + nread;
+            char* data = (char*)v->buffer + header_size;
+            memcpy(ptr, data, payload_size);
+        }
+
+        /* put vbuf back on free list */
+        MRAILI_Release_vbuf(v);
+
+        /* go on to next part of message */
+        nread += payload_size;
     }
 
-    /* Unlock before going to sleep */
-    comm_unlock();
-    /* Wait for the completion event */
-    if (ibv_get_cq_event(g_hca_info.comp_channel, &ev_cq, &ev_ctx)) {
-        ibv_error_abort(-1, "Failed to get cq_event\n");
-    }
-    /* Get lock before processing */
-    comm_lock();
-
-    /* Ack the event */
-    ibv_ack_cq_events(ev_cq, 1);
-
-    /* Request notification upon the next completion event */
-    if (ibv_req_notify_cq(ev_cq, 0)) {
-        ibv_error_abort(-1, "Couldn't request CQ notification\n");
-    }
-
-    mv2_poll_cq();
-
-    return 0;
+    return rc;
 }
+
 /* ===== End: Send/Recv functions ===== */
