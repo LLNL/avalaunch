@@ -13,7 +13,7 @@
 #include <vbuf.h>
 
 extern void mv2_ud_resend(vbuf *v);
-extern MPIDI_VC_t *ud_vc_info;
+extern MPIDI_VC_t** ud_vc_info;
 
 enum {
     MSG_QUEUED_RECVWIN,
@@ -55,7 +55,7 @@ enum {
     }                                                                   \
 }
 
-#define MV2_Get_vc(rank_, vcp_) *(vcp_) = &ud_vc_info[rank_]
+#define MV2_Get_vc(rank_, vcp_) *(vcp_) = ud_vc_info[rank_]
 
 #define MV2_UD_SEND_ACKS() {            \
     int i;                              \

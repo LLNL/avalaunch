@@ -1186,10 +1186,10 @@ session_init (int argc, char * argv[])
         if ((value = getenv("MV2_SPAWN_NET")) != NULL) {
             if (strcmp(value, "tcp") == 0) {
                 type = SPAWN_NET_TYPE_TCP;
-            } else if (strcmp(value, "ib") == 0) {
-                type = SPAWN_NET_TYPE_IB;
+            } else if (strcmp(value, "ibud") == 0) {
+                type = SPAWN_NET_TYPE_IBUD;
             } else {
-                SPAWN_ERR("MV2_SPAWN_NET must be either \"tcp\" or \"ib\"");
+                SPAWN_ERR("MV2_SPAWN_NET must be either \"tcp\" or \"ibud\"");
                 _exit(EXIT_FAILURE);
             }
         }

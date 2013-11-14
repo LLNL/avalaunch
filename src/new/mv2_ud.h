@@ -244,9 +244,6 @@ void mv2_ud_zcopy_poll_cq(mv2_ud_zcopy_info_t *zcopy_info, mv2_ud_ctx_t *ud_ctx,
 /* create UD QP */
 struct ibv_qp *mv2_ud_create_qp (mv2_ud_qp_info_t *qp_info);
 
-/* create ud vc */
-int mv2_ud_set_vc_info (int rank, mv2_ud_exch_info_t *rem_info, int port);
-
 int post_ud_send(MPIDI_VC_t* vc, vbuf* v, int rail, mv2_ud_ctx_t *send_ud_ctx);
 
 /* destroy ud context */

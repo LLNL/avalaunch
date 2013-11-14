@@ -14,7 +14,7 @@ int main(int argc, char* argv[])
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
   MPI_Comm_size(MPI_COMM_WORLD, &ranks);
 
-  spawn_net_endpoint* ep = spawn_net_open(SPAWN_NET_TYPE_IB);
+  spawn_net_endpoint* ep = spawn_net_open(SPAWN_NET_TYPE_IBUD);
   const char* ep_name = spawn_net_name(ep);
   printf("%d: Endpoint name: %s\n", rank, ep_name);
 
