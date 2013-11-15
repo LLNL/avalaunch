@@ -15,6 +15,8 @@
 #include <sys/utsname.h>
 #include <limits.h>
 
+#include <time.h>
+
 typedef struct spawn_tree_struct {
     int rank;                      /* our global rank (0 to ranks-1) */
     int ranks;                     /* number of nodes in tree */
@@ -614,6 +616,56 @@ static void signal_from_root(const struct session_t* s)
         spawn_net_channel* ch = t->child_chs[i];
         spawn_net_write(ch, &signal, sizeof(char));
     }
+
+    return;
+}
+
+static void print_critical_path(const struct session_t* s, int count, uint64_t* vals)
+{
+    spawn_tree* t = s->tree;
+    int children = t->children;
+
+    size_t bytes = count * sizeof(uint64_t);
+    uint64_t* recv = (uint64_t*) SPAWN_MALLOC(bytes);
+    uint64_t* max  = (uint64_t*) SPAWN_MALLOC(bytes);
+
+    /* wait for signal from all children */
+    int i, j;
+    for (i = 0; i < children; i++) {
+        spawn_net_channel* ch = t->child_chs[i];
+        spawn_net_read(ch, recv, bytes);
+
+        /* compute max value across all children */
+        for (j = 0; j < count; j++) {
+            if (i == 0 || recv[j] > max[j]) {
+                max[j] = recv[j];
+            }
+        }
+    }
+
+    /* add our time to max value */
+    if (children > 0) {
+        for (j = 0; j < count; j++) {
+            max[j] += vals[j];
+        }
+    } else {
+        for (j = 0; j < count; j++) {
+            max[j] = vals[j];
+        }
+    }
+
+    /* forward signal to parent */
+    if (t->parent_ch != SPAWN_NET_CHANNEL_NULL) {
+        spawn_net_write(t->parent_ch, max, bytes);
+    } else {
+        for (j = 0; j < count; j++) {
+            double time = (double)max[j] / 1000000000.0;
+            printf("times[%d] = %f\n", j, time);
+        }
+    }
+
+    spawn_free(&max);
+    spawn_free(&recv);
 
     return;
 }
@@ -1284,6 +1336,14 @@ session_init (int argc, char * argv[])
     return s;
 }
 
+static uint64_t time_diff(struct timespec* end, struct timespec* start)
+{
+    uint64_t sec  = (uint64_t) (end->tv_sec  - start->tv_sec);
+    uint64_t nsec = (uint64_t) (end->tv_nsec - start->tv_nsec);
+    uint64_t total = sec * 1000000000 + nsec;
+    return total;
+}
+
 int
 session_start (struct session_t * s)
 { 
@@ -1309,10 +1369,11 @@ session_start (struct session_t * s)
     /**********************
      * Create spawn tree
      **********************/
-#if 0
-    struct timespec t_parent_connect_start, t_parent_connect_end;
-    struct timespec t_parent_params_start, t_parent_params_end;
-#endif
+    struct timespec t_parent_connect_start,   t_parent_connect_end;
+    struct timespec t_parent_params_start,    t_parent_params_end;
+    struct timespec t_children_launch_start,  t_children_launch_end;
+    struct timespec t_children_connect_start, t_children_connect_end;
+    struct timespec t_children_params_start,  t_children_params_end;
 
     tid_tree = begin_delta("unfurl tree");
 
@@ -1324,13 +1385,22 @@ session_start (struct session_t * s)
     /* if we have a parent, connect back to him */
     if (s->spawn_parent != NULL) {
         /* connect to parent */
+        clock_gettime(CLOCK_MONOTONIC_RAW, &t_parent_connect_start);
         t->parent_ch = spawn_net_connect(s->spawn_parent);
+        clock_gettime(CLOCK_MONOTONIC_RAW, &t_parent_connect_end);
 
         /* send our id */
+        clock_gettime(CLOCK_MONOTONIC_RAW, &t_parent_params_start);
         spawn_net_write_str(t->parent_ch, s->spawn_id);
 
         /* read parameters */
         spawn_net_read_strmap(t->parent_ch, s->params);
+        clock_gettime(CLOCK_MONOTONIC_RAW, &t_parent_params_end);
+    } else {
+        clock_gettime(CLOCK_MONOTONIC_RAW, &t_parent_connect_start);
+        clock_gettime(CLOCK_MONOTONIC_RAW, &t_parent_connect_end);
+        clock_gettime(CLOCK_MONOTONIC_RAW, &t_parent_params_start);
+        clock_gettime(CLOCK_MONOTONIC_RAW, &t_parent_params_end);
     }
 
     end_delta(tid);
@@ -1374,6 +1444,7 @@ session_start (struct session_t * s)
     strmap* childmap = strmap_new();
 
     /* launch children */
+    clock_gettime(CLOCK_MONOTONIC_RAW, &t_children_launch_start);
     if (!nodeid) { tid = begin_delta("launch children"); }
     for (i = 0; i < children; i++) {
         /* get rank of child */
@@ -1417,18 +1488,33 @@ session_start (struct session_t * s)
     }
     if (!nodeid) { end_delta(tid); }
     spawn_free(&spawn_cwd);
+    clock_gettime(CLOCK_MONOTONIC_RAW, &t_children_launch_end);
 
     /*
      * This for loop will be in another thread to overlap and speed up the
      * startup.  This loop also will cause a hang if any nodes do not launch
      * and connect back properly.
      */
-    if (!nodeid) { tid = begin_delta("accept child and send params"); }
+
+    spawn_net_channel** chs = (spawn_net_channel**) SPAWN_MALLOC(children * sizeof(spawn_net_channel*));
+
+    clock_gettime(CLOCK_MONOTONIC_RAW, &t_children_connect_start);
+    if (!nodeid) { tid = begin_delta("accept children"); }
+    for (i = 0; i < children; i++) {
+        /* TODO: would be good to authenticate connections as they are
+         * made.  However, for now we just accept as fast as possible */
+        chs[i] = spawn_net_accept(s->ep);
+    }
+    if (!nodeid) { end_delta(tid); }
+    clock_gettime(CLOCK_MONOTONIC_RAW, &t_children_connect_end);
+
+    clock_gettime(CLOCK_MONOTONIC_RAW, &t_children_params_start);
+    if (!nodeid) { tid = begin_delta("send params to children"); }
     for (i = 0; i < children; i++) {
         /* TODO: once we determine which child we're accepting,
          * save pointer to connection in tree structure */
         /* accept child connection */
-        spawn_net_channel* ch = spawn_net_accept(s->ep);
+        spawn_net_channel* ch = chs[i];
 
         /* read global id from child */
         char* str = spawn_net_read_str(ch);
@@ -1448,6 +1534,9 @@ session_start (struct session_t * s)
         spawn_net_write_strmap(ch, s->params);
     }
     if (!nodeid) { end_delta(tid); }
+    clock_gettime(CLOCK_MONOTONIC_RAW, &t_children_params_end);
+
+    spawn_free(&chs);
 
     /* delete child global-to-local id map */
     strmap_delete(&childmap);
@@ -1455,8 +1544,6 @@ session_start (struct session_t * s)
     /* signal root to let it know tree is done */
     signal_to_root(s);
     if (!nodeid) { end_delta(tid_tree); }
-
-    /* TODO: print times for unfurl step */
 
     /**********************
      * Gather endpoints of all spawns
@@ -1581,6 +1668,15 @@ session_start (struct session_t * s)
     app_start(s, appmap);
 
     strmap_delete(&appmap);
+
+    /* TODO: print times for unfurl step */
+    uint64_t times[5];
+    times[0] = time_diff(&t_parent_connect_end,   &t_parent_connect_start);
+    times[1] = time_diff(&t_parent_params_end,    &t_parent_params_start);
+    times[2] = time_diff(&t_children_launch_end,  &t_children_launch_start);
+    times[3] = time_diff(&t_children_connect_end, &t_children_connect_start);
+    times[4] = time_diff(&t_children_params_end,  &t_children_params_start);
+    print_critical_path(s, 5, times);
 
     /**********************
      * Tear down
