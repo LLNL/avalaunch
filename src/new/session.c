@@ -17,6 +17,11 @@
 
 #include <time.h>
 
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <sys/wait.h>
+
 typedef struct spawn_tree_struct {
     int rank;                      /* our global rank (0 to ranks-1) */
     int ranks;                     /* number of nodes in tree */
@@ -37,6 +42,8 @@ struct session_t {
 
 static int call_stop_event_handler = 0;
 static int call_node_finalize = 0;
+
+static int copy_launcher = 0; /* set to 1 to copy launcher to /tmp while unfurling tree */
 
 void session_destroy (struct session_t *);
 
@@ -565,6 +572,107 @@ static int temp_launch(
     return 0;
 }
 
+/* given full path of executable, copy to tmp and return new name */
+static char* copy_to_tmp(const char* src)
+{
+    int srcfd = open(src, O_RDONLY);
+    if (srcfd < 0) {
+        SPAWN_ERR("Failed to open source file `%s' (open() errno=%d %s)", src, errno, strerror(errno));
+        return NULL;
+    }
+
+    /* create name for destination */
+    char* src_copy = SPAWN_STRDUP(src);
+    char* base = basename(src_copy);
+    char* dst = SPAWN_STRDUPF("/tmp/%s", base);
+    spawn_free(&src_copy);
+
+    int dstfd = open(dst, O_WRONLY | O_CREAT | O_TRUNC, S_IRWXU | S_IRWXG | S_IRWXO);
+    if (dstfd < 0) {
+        SPAWN_ERR("Failed to open source file `%s' (open() errno=%d %s)", src, errno, strerror(errno));
+        close(srcfd);
+        spawn_free(&dst);
+        return NULL;
+    }
+
+    size_t bufsize = 1024*1024;
+    char* buf = (char*) SPAWN_MALLOC(bufsize);
+
+    while (1) {
+        ssize_t nread = read(srcfd, buf, bufsize);
+
+        if (nread == 0) {
+            break;
+        }
+
+        if (nread < 0) {
+            SPAWN_ERR("Failed to read source file `%s' (read() errno=%d %s)", src, errno, strerror(errno));
+            spawn_free(&dst);
+            break;
+        }
+
+        size_t towrite = (size_t) nread;
+        ssize_t nwrite = write(dstfd, buf, towrite);
+
+        if (nwrite != nread) {
+            SPAWN_ERR("Failed to write dest file `%s' (read() errno=%d %s)", dst, errno, strerror(errno));
+            spawn_free(&dst);
+            break;
+        }
+    }
+
+    spawn_free(&buf);
+
+    fsync(dstfd);
+
+    close(dstfd);
+    close(srcfd);
+
+    return dst;
+}
+
+/* fork process, child execs specified command */
+static pid_t copy_exe(const char* host, const char* exepath)
+{
+    pid_t cpid = fork();
+
+    if (cpid == -1) {
+        SPAWN_ERR("create_process (fork() errno=%d %s)", errno, strerror(errno));
+        return -1;
+    } else if (cpid == 0) {
+        /* get name of remote shell */
+        const char shname[] = "rcp";
+        if (shname == NULL) {
+            SPAWN_ERR("Failed to read name of remote shell from SH key");
+            return -1;
+        }
+
+        /* determine whether to use rsh or ssh */
+        if (strcmp(shname, "rcp") != 0 &&
+            strcmp(shname, "scp") != 0)
+        {
+            SPAWN_ERR("Unknown launch remote shell: `%s'", shname);
+            return -1;
+        }
+
+        /* lookup paths to env and remote sh commands from params */
+        const char shpath[] = "/usr/bin/rcp";
+        if (shpath == NULL) {
+            SPAWN_ERR("Path to sh command not set");
+            return 1;
+        }
+
+        const char* dstpath = SPAWN_STRDUPF("%s:%s", host, exepath);
+
+        /* exec process, we only return on error */
+        execl(shpath, shpath, exepath, dstpath, (char*)0);
+        SPAWN_ERR("Failed to exec program (execl errno=%d %s)", errno, strerror(errno));
+        _exit(EXIT_FAILURE);
+    }
+
+    return cpid;
+}
+
 int get_spawn_id(struct session_t* s)
 {
     if (s->spawn_id == NULL) {
@@ -620,7 +728,7 @@ static void signal_from_root(const struct session_t* s)
     return;
 }
 
-static void print_critical_path(const struct session_t* s, int count, uint64_t* vals)
+static void print_critical_path(const struct session_t* s, int count, uint64_t* vals, char** labels)
 {
     spawn_tree* t = s->tree;
     int children = t->children;
@@ -660,7 +768,7 @@ static void print_critical_path(const struct session_t* s, int count, uint64_t* 
     } else {
         for (j = 0; j < count; j++) {
             double time = (double)max[j] / 1000000000.0;
-            printf("times[%d] = %f\n", j, time);
+            printf("%s = %f\n", labels[j], time);
         }
     }
 
@@ -1238,7 +1346,17 @@ session_init (int argc, char * argv[])
         /* first, compute and record launch executable name */
         char* spawn_orig = argv[0];
         char* spawn_path = path_search(spawn_orig);
-        strmap_set(s->params, "EXE", spawn_path);
+
+        if (copy_launcher) {
+            /* copy launcher executable to /tmp */
+            char* spawn_path_tmp = copy_to_tmp(spawn_path);
+            strmap_set(s->params, "EXE", spawn_path_tmp);
+            spawn_free(&spawn_path_tmp);
+        } else {
+            /* run launcher from its current location */
+            strmap_set(s->params, "EXE", spawn_path);
+        }
+
         spawn_free(&spawn_path);
 
         /* TODO: move endpoint open to session_start? */
@@ -1350,15 +1468,6 @@ session_start (struct session_t * s)
     int i, tid, tid_tree;
     int nodeid;
 
-#if 0
-    if (node_initialize()) {
-        session_destroy(s);
-        return -1;
-    }
-
-    call_node_finalize = 1;
-#endif
-
     if (start_event_handler()) {
         session_destroy(s);
         return -1;
@@ -1371,6 +1480,7 @@ session_start (struct session_t * s)
      **********************/
     struct timespec t_parent_connect_start,   t_parent_connect_end;
     struct timespec t_parent_params_start,    t_parent_params_end;
+    struct timespec t_copy_launcher_start,    t_copy_launcher_end;
     struct timespec t_children_launch_start,  t_children_launch_end;
     struct timespec t_children_connect_start, t_children_connect_end;
     struct timespec t_children_params_start,  t_children_params_end;
@@ -1443,6 +1553,39 @@ session_start (struct session_t * s)
     /* we'll map global id to local child id */
     strmap* childmap = strmap_new();
 
+    /* rcp launcher executable to remote hosts */
+    clock_gettime(CLOCK_MONOTONIC_RAW, &t_copy_launcher_start);
+    if (copy_launcher) {
+        if (!nodeid) { tid = begin_delta("copy launcher exe"); }
+        pid_t* pids = (pid_t*) SPAWN_MALLOC(children * sizeof(pid_t));
+
+        for (i = 0; i < children; i++) {
+            /* get rank of child */
+            int child_rank = t->child_ranks[i];
+
+            /* lookup hostname of child from parameters */
+            const char* host = strmap_getf(s->params, "%d", child_rank);
+            if (host == NULL) {
+                spawn_free(&spawn_cwd);
+                session_destroy(s);
+                return -1;
+            }
+
+            /* launch child process */
+            pids[i] = copy_exe(host, spawn_exe);
+        }
+
+        /* wait for all copies to complete */
+        for (i = 0; i < children; i++) {
+            int status;
+            waitpid(pids[i], &status, 0);
+        }
+
+        spawn_free(&pids);
+        if (!nodeid) { end_delta(tid); }
+    }
+    clock_gettime(CLOCK_MONOTONIC_RAW, &t_copy_launcher_end);
+
     /* launch children */
     clock_gettime(CLOCK_MONOTONIC_RAW, &t_children_launch_start);
     if (!nodeid) { tid = begin_delta("launch children"); }
@@ -1461,20 +1604,12 @@ session_start (struct session_t * s)
             return -1;
         }
 
-        /* create structure for this child */
-#if 0
-        int node_id = node_get_id(host);
-        if (node_id < 0) {
-            spawn_free(&spawn_cwd);
-            session_destroy(s);
-            return -1;
-        }
-#endif
-
+        /* build map of arguments */
         strmap* argmap = strmap_new();
         strmap_setf(argmap, "ARG0=%s", spawn_exe);
         strmap_setf(argmap, "ARGS=%d", 1);
 
+        /* build map of environment variables */
         strmap* envmap = strmap_new();
         strmap_setf(envmap, "ENV0=MV2_SPAWN_PARENT=%s", s->ep_name);
         strmap_setf(envmap, "ENV1=MV2_SPAWN_ID=%d", child_rank);
@@ -1483,6 +1618,7 @@ session_start (struct session_t * s)
         /* launch child process */
         temp_launch(host, s->params, spawn_cwd, spawn_exe, argmap, envmap);
 
+        /* free the maps */
         strmap_delete(&envmap);
         strmap_delete(&argmap);
     }
@@ -1670,13 +1806,19 @@ session_start (struct session_t * s)
     strmap_delete(&appmap);
 
     /* TODO: print times for unfurl step */
-    uint64_t times[5];
+    char* labels[] = {"parent connect", "parent params", "launcher copy", "children launch", "children connect", "children params"};
+    uint64_t times[6];
     times[0] = time_diff(&t_parent_connect_end,   &t_parent_connect_start);
     times[1] = time_diff(&t_parent_params_end,    &t_parent_params_start);
-    times[2] = time_diff(&t_children_launch_end,  &t_children_launch_start);
-    times[3] = time_diff(&t_children_connect_end, &t_children_connect_start);
-    times[4] = time_diff(&t_children_params_end,  &t_children_params_start);
-    print_critical_path(s, 5, times);
+    times[2] = time_diff(&t_copy_launcher_end,    &t_copy_launcher_start);
+    times[3] = time_diff(&t_children_launch_end,  &t_children_launch_start);
+    times[4] = time_diff(&t_children_connect_end, &t_children_connect_start);
+    times[5] = time_diff(&t_children_params_end,  &t_children_params_start);
+    print_critical_path(s, 6, times, labels);
+
+    if (copy_launcher) {
+        unlink(spawn_exe);
+    }
 
     /**********************
      * Tear down
