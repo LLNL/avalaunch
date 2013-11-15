@@ -456,8 +456,8 @@ static int mv2_get_hca_info(int devnum, mv2_hca_info_t *hca_info)
     struct ibv_port_attr* ports = (struct ibv_port_attr*) SPAWN_MALLOC(num_ports * sizeof(struct ibv_port_attr));
 
     /* Get the attributes of the port */
-    for (i = 1; i <= num_ports; ++i) {
-        retval = ibv_query_port(context, i, &ports[i]);
+    for (i = 0; i < num_ports; ++i) {
+        retval = ibv_query_port(context, i+1, &ports[i]);
         if (retval != 0) {
             SPAWN_ERR("Failed to query port (ibv_query_port errno=%d %s)", retval, strerror(retval));
         }
