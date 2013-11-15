@@ -212,6 +212,16 @@ static void vc_free(MPIDI_VC_t** pvc)
  * Communication routines
  ******************************************/
 
+/* this queue tracks a list of pending connect messages,
+ * the accept function pulls items from this list */
+typedef struct vbuf_list_t {
+    vbuf* v;
+    struct vbuf_list_t* next;
+} vbuf_list;
+
+static vbuf_list* connect_head = NULL;
+static vbuf_list* connect_tail = NULL;
+
 static int mv2_post_ud_recv_buffers(int num_bufs, mv2_ud_ctx_t *ud_ctx)
 {
     /* check that we don't exceed the max number of work queue elements */
@@ -271,10 +281,9 @@ static int mv2_poll_cq()
         /* Get VBUF */
         vbuf* v = (vbuf *) ((uintptr_t) wc.wr_id);
 
-        /* Get VC from VBUF */
-        MPIDI_VC_t* vc = (MPIDI_VC_t*) (v->vc);
-    
         /* get packet header */
+        SET_PKT_LEN_HEADER(v, wc);
+        SET_PKT_HEADER_OFFSET(v);
         MPIDI_CH3I_MRAILI_Pkt_comm_header* p = v->pheader;
 
         switch (wc.opcode) {
@@ -295,20 +304,36 @@ static int mv2_poll_cq()
                 v = NULL;
                 break;
             case IBV_WC_RECV:
-                SET_PKT_LEN_HEADER(v, wc);
-                SET_PKT_HEADER_OFFSET(v);
-    
-                /* Retrieve the VC */
-                MV2_Get_vc(p->src.rank, &vc);
-    
-                v->vc   = vc;
-                v->rail = p->rail;
-    
-                if (p->type == MPIDI_CH3_PKT_UD_CONNECT) {
-                    vc_set_addr(vc, (mv2_ud_exch_info_t*) v->buffer, RDMA_DEFAULT_PORT);
-                }
+                /* we don't have a source id for connect messages */
+                if (p->type != MPIDI_CH3_PKT_UD_CONNECT) {
+                    /* src field is valid (unless we have a connect message),
+                     * use src id to get vc */
+                    MPIDI_VC_t* vc;
+                    MV2_Get_vc(p->src.rank, &vc);
 
-                MRAILI_Process_recv(v);
+                    v->vc   = vc;
+                    v->rail = p->rail;
+
+                    MRAILI_Process_recv(v);
+                } else {
+                    /* a connect message does not have a valid src id field,
+                     * so we can't associate msg with a vc yet, we stick this
+                     * on the queue that accept looks to later */
+
+                    /* allocate and initialize new element for connect queue */
+                    vbuf_list* elem = (vbuf_list*) SPAWN_MALLOC(sizeof(vbuf_list));
+                    elem->v = v;
+                    elem->next = NULL;
+
+                    /* append elem to connect queue */
+                    if (connect_head == NULL) {
+                        connect_head = elem;
+                    }
+                    if (connect_tail != NULL) {
+                        connect_tail->next = elem;
+                    }
+                    connect_tail = elem;
+                }
 
                 proc.ud_ctx->num_recvs_posted--;
                 if(proc.ud_ctx->num_recvs_posted < proc.ud_ctx->credit_preserve) {
@@ -363,6 +388,7 @@ static int mv2_wait_on_channel()
 
     return 0;
 }
+
 /* ===== Begin: Initialization functions ===== */
 /* Get HCA parameters */
 static int mv2_get_hca_info(int devnum, mv2_hca_info_t *hca_info)
@@ -754,6 +780,19 @@ void MPIDI_CH3I_MRAIL_Release_vbuf(vbuf * v)
 #endif
 }
 
+/* blocks until packet comes in on specified VC */
+static vbuf* packet_read(MPIDI_VC_t* vc)
+{
+    vbuf* v = mv2_ud_apprecv_window_retrieve_and_remove(&vc->mrail.app_recv_window);
+    while (v == NULL) {
+        comm_unlock();
+        nanosleep(&cm_timeout, &remain);
+        comm_lock();
+        v = mv2_ud_apprecv_window_retrieve_and_remove(&vc->mrail.app_recv_window);
+    }
+    return v;
+}
+
 static int mv2_send_connect_message(MPIDI_VC_t *vc)
 {
     /* message payload, specify id we want remote side to use when
@@ -780,8 +819,8 @@ static int mv2_send_connect_message(MPIDI_VC_t *vc)
     connect_pkt->acknum = vc->mrail.seqnum_next_toack;
     connect_pkt->rail   = v->rail;
 
-    /* copy in payload and set payload size */
-    char* ptr = (char*)v->buffer + v->content_size;
+    /* copy in payload */
+    char* ptr = (char*)v->buffer + header_size;
     memcpy(ptr, payload, payload_size);
 
     /* compute packet size */
@@ -794,6 +833,36 @@ static int mv2_send_connect_message(MPIDI_VC_t *vc)
     proc.post_send(vc, v, 0, NULL);
 
     return SPAWN_SUCCESS;
+}
+
+/* blocks until element arrives on connect queue,
+ * extracts element and returns its vbuf */
+static vbuf* mv2_recv_connect_message()
+{
+    /* wait until we see at item at head of connect queue */
+    while (connect_head == NULL) {
+        comm_unlock();
+        nanosleep(&cm_timeout, &remain);
+        comm_lock();
+    }
+
+    /* get pointer to element */
+    vbuf_list* elem = connect_head;
+
+    /* extract element from queue */
+    connect_head = elem->next;
+    if (connect_head == NULL) {
+        connect_tail = NULL;
+    }
+
+    /* get pointer to vbuf */
+    vbuf* v = elem->v;
+
+    /* free element */
+    spawn_free(&elem);
+
+    /* return vbuf */
+    return v;
 }
 
 static int mv2_send_accept_message(MPIDI_VC_t *vc)
@@ -820,8 +889,8 @@ static int mv2_send_accept_message(MPIDI_VC_t *vc)
     connect_pkt->acknum = vc->mrail.seqnum_next_toack;
     connect_pkt->rail   = v->rail;
 
-    /* copy in payload and set payload size */
-    char* ptr = (char*)v->buffer + v->content_size;
+    /* copy in payload */
+    char* ptr = (char*)v->buffer + header_size;
     memcpy(ptr, payload, payload_size);
 
     /* compute packet size */
@@ -836,13 +905,42 @@ static int mv2_send_accept_message(MPIDI_VC_t *vc)
     return SPAWN_SUCCESS;
 }
 
+static int mv2_recv_accept_message(MPIDI_VC_t* vc)
+{
+    /* first incoming packet should be accept */
+    vbuf* v = packet_read(vc);
+
+    /* message payload is write id we should use when sending */
+    size_t header_size = sizeof(MPIDI_CH3I_MRAILI_Pkt_comm_header);
+    char* payload = (char*)v->buffer + header_size;
+
+    /* extract write id from payload */
+    int id;
+    int parsed = sscanf(payload, "%06x", &id);
+    if (parsed != 1) {
+        SPAWN_ERR("Couldn't parse write id from accept message");
+        return SPAWN_FAILURE;
+    }
+
+    /* TODO: avoid casting up from int here */
+    uint64_t writeid = (uint64_t) id;
+
+    /* set our write id */
+    vc->mrail.writeid = writeid;
+
+    /* put vbuf back on free list */
+    MRAILI_Release_vbuf(v);
+
+    return SPAWN_SUCCESS;
+}
+
 spawn_net_channel* mv2_ep_connect(const char *name)
 {
     /* extract lid and queue pair address from endpoint name */
     unsigned int lid, qpn;
     int parsed = sscanf(name, "IBUD:%04x:%06x", &lid, &qpn);
     if (parsed != 2) {
-        SPAWN_ERR("Couldn't parse ep info from %s\n", name);
+        SPAWN_ERR("Couldn't parse ep info from %s", name);
         return SPAWN_NET_CHANNEL_NULL;
     }
 
@@ -860,8 +958,8 @@ spawn_net_channel* mv2_ep_connect(const char *name)
     /* send connect message to destination */
     mv2_send_connect_message(vc);
 
-    /* TODO: wait for accept message and set vc->mrail.writeid */
-    // mv2_recv_accept_message(vc);
+    /* wait for accept message and set vc->mrail.writeid */
+    mv2_recv_accept_message(vc);
 
     /* Change state to connected */
     vc->mrail.state = MRAILI_UD_CONNECTED;
@@ -883,19 +981,35 @@ spawn_net_channel* mv2_ep_connect(const char *name)
 spawn_net_channel* mv2_ep_accept()
 {
     /* wait for connect message */
-    // mv2_recv_connect_message();
+    vbuf* v = mv2_recv_connect_message();
+
+    /* get pointer to payload */
+    size_t header_size = sizeof(MPIDI_CH3I_MRAILI_Pkt_comm_header);
+    char* payload = (char*)v->buffer + header_size;
 
     /* get id and endpoint name from message payload */
+    int id, lid, qpn;
+    int parsed = sscanf(payload, "%06x:%04x:%06x", &id, &lid, &qpn);
+    if (parsed != 3) {
+        SPAWN_ERR("Couldn't parse ep info from %s", payload);
+        return SPAWN_NET_CHANNEL_NULL;
+    }
+    uint64_t writeid = id;
 
-    /* TODO: decode lid/qp from endpoint name */
-    mv2_ud_exch_info_t ep_info;
-    // TODO
+    /* put vbuf back on free list */
+    MRAILI_Release_vbuf(v);
 
     /* allocate new vc */
     MPIDI_VC_t* vc = vc_alloc();
 
+    /* record lid/qp in VC */
+    mv2_ud_exch_info_t ep_info;
+    ep_info.lid = lid;
+    ep_info.qpn = qpn;
+    vc_set_addr(vc, (mv2_ud_exch_info_t*) v->buffer, RDMA_DEFAULT_PORT);
+
     /* record remote id as write id */
-    //vc->mrail.writeid = ...
+    vc->mrail.writeid = writeid;
 
     /* send accept message */
     mv2_send_accept_message(vc);
@@ -984,13 +1098,7 @@ int mv2_ud_recv(MPIDI_VC_t* vc, void* buf, size_t size)
     size_t nread = 0;
     while (nread < size) {
         /* read a packet from this vc */
-        vbuf* v = mv2_ud_apprecv_window_retrieve_and_remove(&vc->mrail.app_recv_window);
-        while (v == NULL) {
-            comm_unlock();
-            nanosleep(&cm_timeout, &remain);
-            comm_lock();
-            v = mv2_ud_apprecv_window_retrieve_and_remove(&vc->mrail.app_recv_window);
-        }
+        vbuf* v = packet_read(vc);
 
         /* copy data to user's buffer */
         size_t payload_size = v->content_size - header_size;

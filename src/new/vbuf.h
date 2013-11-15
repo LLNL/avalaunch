@@ -140,6 +140,7 @@ do {                                \
 #define IS_CNTL_MSG(p) \
     (p->type ==  MPIDI_CH3_PKT_FLOW_CNTL_UPDATE || \
      p->type ==  MPIDI_CH3_PKT_UD_CONNECT || \
+     p->type ==  MPIDI_CH3_PKT_UD_ACCEPT || \
      p->type ==  MPIDI_CH3_PKT_UD_DISCONNECT || \
      p->type ==  MPIDI_CH3_PKT_NOOP)
 

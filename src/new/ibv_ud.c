@@ -316,7 +316,9 @@ void MRAILI_Process_recv(vbuf *v)
 
     mv2_ud_process_ack(v->vc, p->acknum);
 
-    if (IS_CNTL_MSG(p)) {
+    if (IS_CNTL_MSG(p) &&
+        p->type != MPIDI_CH3_PKT_UD_ACCEPT)
+    {
         PRINT_DEBUG(DEBUG_UD_verbose>1,"recv cntl message ack:%d \n", p->acknum);
         MRAILI_Release_vbuf(v);
         goto fn_exit;
