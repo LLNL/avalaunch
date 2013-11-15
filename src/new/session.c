@@ -575,18 +575,21 @@ static int temp_launch(
 /* given full path of executable, copy to tmp and return new name */
 static char* copy_to_tmp(const char* src)
 {
-    int srcfd = open(src, O_RDONLY);
-    if (srcfd < 0) {
-        SPAWN_ERR("Failed to open source file `%s' (open() errno=%d %s)", src, errno, strerror(errno));
-        return NULL;
-    }
-
     /* create name for destination */
     char* src_copy = SPAWN_STRDUP(src);
     char* base = basename(src_copy);
     char* dst = SPAWN_STRDUPF("/tmp/%s", base);
     spawn_free(&src_copy);
 
+    /* open source file for reading */
+    int srcfd = open(src, O_RDONLY);
+    if (srcfd < 0) {
+        SPAWN_ERR("Failed to open source file `%s' (open() errno=%d %s)", src, errno, strerror(errno));
+        spawn_free(&dst);
+        return NULL;
+    }
+
+    /* open destination file for writing */
     int dstfd = open(dst, O_WRONLY | O_CREAT | O_TRUNC, S_IRWXU | S_IRWXG | S_IRWXO);
     if (dstfd < 0) {
         SPAWN_ERR("Failed to open source file `%s' (open() errno=%d %s)", src, errno, strerror(errno));
@@ -595,25 +598,32 @@ static char* copy_to_tmp(const char* src)
         return NULL;
     }
 
+    /* allocate buffer */
     size_t bufsize = 1024*1024;
     char* buf = (char*) SPAWN_MALLOC(bufsize);
 
+    /* copy bytes from source to destination */
     while (1) {
+        /* read block from source file */
         ssize_t nread = read(srcfd, buf, bufsize);
 
+        /* bail out if we hit EOF */
         if (nread == 0) {
             break;
         }
 
+        /* report any error */
         if (nread < 0) {
             SPAWN_ERR("Failed to read source file `%s' (read() errno=%d %s)", src, errno, strerror(errno));
             spawn_free(&dst);
             break;
         }
 
+        /* write block to destination */
         size_t towrite = (size_t) nread;
         ssize_t nwrite = write(dstfd, buf, towrite);
 
+        /* check for write error */
         if (nwrite != nread) {
             SPAWN_ERR("Failed to write dest file `%s' (read() errno=%d %s)", dst, errno, strerror(errno));
             spawn_free(&dst);
@@ -621,17 +631,20 @@ static char* copy_to_tmp(const char* src)
         }
     }
 
+    /* free the buffer */
     spawn_free(&buf);
 
+    /* ensure bytes are written to disk */
     fsync(dstfd);
 
+    /* close both files */
     close(dstfd);
     close(srcfd);
 
     return dst;
 }
 
-/* fork process, child execs specified command */
+/* fork process, child executes remote copy of file from local host to remote host */
 static pid_t copy_exe(const char* host, const char* exepath)
 {
     pid_t cpid = fork();
@@ -640,14 +653,14 @@ static pid_t copy_exe(const char* host, const char* exepath)
         SPAWN_ERR("create_process (fork() errno=%d %s)", errno, strerror(errno));
         return -1;
     } else if (cpid == 0) {
-        /* get name of remote shell */
+        /* get name of remote copy command */
         const char shname[] = "rcp";
         if (shname == NULL) {
             SPAWN_ERR("Failed to read name of remote shell from SH key");
             return -1;
         }
 
-        /* determine whether to use rsh or ssh */
+        /* check that command is valid */
         if (strcmp(shname, "rcp") != 0 &&
             strcmp(shname, "scp") != 0)
         {
@@ -655,13 +668,14 @@ static pid_t copy_exe(const char* host, const char* exepath)
             return -1;
         }
 
-        /* lookup paths to env and remote sh commands from params */
+        /* get path of remote copy command */
         const char shpath[] = "/usr/bin/rcp";
         if (shpath == NULL) {
             SPAWN_ERR("Path to sh command not set");
             return 1;
         }
 
+        /* build destination file name */
         const char* dstpath = SPAWN_STRDUPF("%s:%s", host, exepath);
 
         /* exec process, we only return on error */
@@ -670,6 +684,8 @@ static pid_t copy_exe(const char* host, const char* exepath)
         _exit(EXIT_FAILURE);
     }
 
+    /* return pid to parent so it can wait on us to ensure
+     * copy is complete */
     return cpid;
 }
 
@@ -1343,6 +1359,12 @@ session_init (int argc, char * argv[])
     } else {
         /* no parent, we are the root, create parameters strmap */
 
+        /* check whether user wants us to rcp launcher executable */
+        if ((value = getenv("MV2_SPAWN_COPY")) != NULL) {
+            copy_launcher = atoi(value);
+        }
+        strmap_setf(s->params, "COPY=%d", copy_launcher);
+
         /* first, compute and record launch executable name */
         char* spawn_orig = argv[0];
         char* spawn_path = path_search(spawn_orig);
@@ -1544,6 +1566,10 @@ session_start (struct session_t * s)
         children = t->children;
     }
 
+    /* determine whether we should copy launcher process to /tmp */
+    char* copy_str = strmap_get(s->params, "COPY");
+    copy_launcher = atoi(copy_str);
+
     /* lookup spawn executable name */
     char* spawn_exe = strmap_get(s->params, "EXE");
 
@@ -1553,7 +1579,7 @@ session_start (struct session_t * s)
     /* we'll map global id to local child id */
     strmap* childmap = strmap_new();
 
-    /* rcp launcher executable to remote hosts */
+    /* rcp launcher exe to /tmp on remote hosts */
     clock_gettime(CLOCK_MONOTONIC_RAW, &t_copy_launcher_start);
     if (copy_launcher) {
         if (!nodeid) { tid = begin_delta("copy launcher exe"); }
@@ -1816,6 +1842,7 @@ session_start (struct session_t * s)
     times[5] = time_diff(&t_children_params_end,  &t_children_params_start);
     print_critical_path(s, 6, times, labels);
 
+    /* if we copied launcher to /tmp, delete it now */
     if (copy_launcher) {
         unlink(spawn_exe);
     }
