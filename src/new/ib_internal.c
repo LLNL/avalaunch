@@ -399,13 +399,15 @@ static int mv2_get_hca_info(int devnum, mv2_hca_info_t *hca_info)
     int num_devices;
     struct ibv_device** dev_list = ibv_get_device_list(&num_devices);
     if (dev_list == NULL) {
-        SPAWN_ERR("Failed to get device list (ibv_get_device_list errno=%d %s)", errno, strerror(errno));
+        SPAWN_ERR("Failed to get device list (ibv_get_device_list errno=%d %s)",
+                    errno, strerror(errno));
         return -1;
     }
 
     /* check that caller's requested device is within range */
     if (devnum >= num_devices) {
-        SPAWN_ERR("Requested device number %d higher than max devices %d", devnum, num_devices);
+        SPAWN_ERR("Requested device number %d higher than max devices %d",
+                    devnum, num_devices);
         ibv_free_device_list(dev_list);
         return -1;
     }
@@ -436,7 +438,8 @@ static int mv2_get_hca_info(int devnum, mv2_hca_info_t *hca_info)
     struct ibv_device_attr attr;
     int retval = ibv_query_device(context, &attr);
     if (retval) {
-        SPAWN_ERR("Cannot query HCA (ibv_query_device errno=%d %s)", retval, strerror(retval));
+        SPAWN_ERR("Cannot query HCA (ibv_query_device errno=%d %s)", retval,
+                    strerror(retval));
         ibv_dealloc_pd(pd);
         ibv_close_device(context);
         ibv_free_device_list(dev_list);
@@ -453,7 +456,7 @@ static int mv2_get_hca_info(int devnum, mv2_hca_info_t *hca_info)
     struct ibv_port_attr* ports = (struct ibv_port_attr*) SPAWN_MALLOC(num_ports * sizeof(struct ibv_port_attr));
 
     /* Get the attributes of the port */
-    for (i = 0; i < num_ports; ++i) {
+    for (i = 1; i <= num_ports; ++i) {
         retval = ibv_query_port(context, i, &ports[i]);
         if (retval != 0) {
             SPAWN_ERR("Failed to query port (ibv_query_port errno=%d %s)", retval, strerror(retval));
