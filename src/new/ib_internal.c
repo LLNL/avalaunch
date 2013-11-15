@@ -827,10 +827,11 @@ static int mv2_send_connect_message(MPIDI_VC_t *vc)
     memcpy(ptr, payload, payload_size);
 
     /* compute packet size */
-    v->content_size = header_size + payload_size;
+    int msgsize = header_size + payload_size;
+    v->content_size = msgsize;
 
     /* prepare packet for send */
-    vbuf_init_send(v, header_size, v->rail);
+    vbuf_init_send(v, msgsize, v->rail);
 
     /* and send it */
     proc.post_send(vc, v, 0, NULL);
@@ -897,10 +898,11 @@ static int mv2_send_accept_message(MPIDI_VC_t *vc)
     memcpy(ptr, payload, payload_size);
 
     /* compute packet size */
-    v->content_size = header_size + payload_size;
+    int msgsize = header_size + payload_size;
+    v->content_size = msgsize;
 
     /* prepare packet for send */
-    vbuf_init_send(v, header_size, v->rail);
+    vbuf_init_send(v, msgsize, v->rail);
 
     /* and send it */
     proc.post_send(vc, v, 0, NULL);
@@ -1070,10 +1072,11 @@ int mv2_ud_send(MPIDI_VC_t *vc, const void* buf, size_t size)
         memcpy(ptr, data, bytes);
 
         /* set packet size */
-        v->content_size = header_size + bytes;
+        int msgsize = header_size + payload_size;
+        v->content_size = msgsize;
 
         /* prepare packet for send */
-        vbuf_init_send(v, header_size, v->rail);
+        vbuf_init_send(v, msgsize, v->rail);
 
         if (vc->mrail.state != MRAILI_UD_CONNECTED) {
             /* TODO: what's this do? */
