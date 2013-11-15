@@ -274,12 +274,14 @@ static int mv2_poll_cq()
         /* Get VC from VBUF */
         MPIDI_VC_t* vc = (MPIDI_VC_t*) (v->vc);
     
-        MPIDI_CH3I_MRAILI_Pkt_comm_header *p = NULL;
+        /* get packet header */
+        MPIDI_CH3I_MRAILI_Pkt_comm_header* p = v->pheader;
+
         switch (wc.opcode) {
             case IBV_WC_SEND:
             case IBV_WC_RDMA_READ:
             case IBV_WC_RDMA_WRITE:
-                if (v->pheader && IS_CNTL_MSG(p)) {
+                if (p != NULL && IS_CNTL_MSG(p)) {
                 }
                 mv2_ud_update_send_credits(v);
                 if (v->flags & UD_VBUF_SEND_INPROGRESS) {
@@ -296,9 +298,6 @@ static int mv2_poll_cq()
                 SET_PKT_LEN_HEADER(v, wc);
                 SET_PKT_HEADER_OFFSET(v);
     
-                /* get packet header */
-                p = v->pheader;
-
                 /* Retrieve the VC */
                 MV2_Get_vc(p->src.rank, &vc);
     

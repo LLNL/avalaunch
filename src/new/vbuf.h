@@ -141,7 +141,7 @@ do {                                \
     (p->type ==  MPIDI_CH3_PKT_FLOW_CNTL_UPDATE || \
      p->type ==  MPIDI_CH3_PKT_UD_CONNECT || \
      p->type ==  MPIDI_CH3_PKT_UD_DISCONNECT || \
-        p->type ==  MPIDI_CH3_PKT_NOOP)
+     p->type ==  MPIDI_CH3_PKT_NOOP)
 
 #define IS_MCAST_MSG(p) \
     (p->type == MPIDI_CH3_PKT_MCST || \
