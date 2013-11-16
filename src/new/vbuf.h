@@ -161,6 +161,10 @@ do {                                \
     (_v)->pheader = (_v)->buffer + PKT_TRANSPORT_OFFSET(_v);                \
 }
 
+#define PKT_DATA_OFFSET(_v, _header_size) (_v)->pheader + _header_size;
+
+#define PKT_DATA_SIZE(_v, _header_size) (_v)->content_size - _header_size;
+
 #define MRAIL_MAX_UD_SIZE (RDMA_DEFAULT_UD_MTU - MV2_UD_GRH_LEN)
 
 typedef struct link

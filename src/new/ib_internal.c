@@ -304,6 +304,7 @@ static int mv2_poll_cq()
                 v = NULL;
                 break;
             case IBV_WC_RECV:
+                printf("wc.byte_len = %d, content_size = %d\n", wc.byte_len, v->content_size);
                 /* we don't have a source id for connect messages */
                 if (p->type != MPIDI_CH3_PKT_UD_CONNECT) {
                     /* src field is valid (unless we have a connect message),
@@ -321,6 +322,8 @@ static int mv2_poll_cq()
                      * on the queue that accept looks to later */
 
                     /* allocate and initialize new element for connect queue */
+                    printf("[Src: %d, Rail: %d]:Received connect message: %s\n",
+                            p->src.rank, p->rail, v->buffer);
                     vbuf_list* elem = (vbuf_list*) SPAWN_MALLOC(sizeof(vbuf_list));
                     elem->v = v;
                     elem->next = NULL;
@@ -512,7 +515,7 @@ static int mv2_get_hca_info(int devnum, mv2_hca_info_t *hca_info)
 int mv2_hca_open()
 {
     memset(&g_hca_info, 0, sizeof(mv2_hca_info_t));
-    if (mv2_get_hca_info(0, &g_hca_info) != 0){
+    if (mv2_get_hca_info(1, &g_hca_info) != 0){
         SPAWN_ERR("Failed to initialize HCA");
         return -1;
     }
@@ -826,11 +829,13 @@ static int mv2_send_connect_message(MPIDI_VC_t *vc)
     char* ptr = (char*)v->buffer + header_size;
     memcpy(ptr, payload, payload_size);
 
+    printf("Sending %s; buffer = %s, payload_size = %d, header_size = %d\n", ptr,v->buffer, payload_size, header_size);
+
     /* compute packet size */
     v->content_size = header_size + payload_size;
 
     /* prepare packet for send */
-    vbuf_init_send(v, header_size, v->rail);
+    vbuf_init_send(v, v->content_size, v->rail);
 
     /* and send it */
     proc.post_send(vc, v, 0, NULL);
@@ -900,7 +905,9 @@ static int mv2_send_accept_message(MPIDI_VC_t *vc)
     v->content_size = header_size + payload_size;
 
     /* prepare packet for send */
-    vbuf_init_send(v, header_size, v->rail);
+    vbuf_init_send(v, v->content_size, v->rail);
+
+    printf("Sending accept packet with payload %s\n", payload);
 
     /* and send it */
     proc.post_send(vc, v, 0, NULL);
@@ -915,7 +922,9 @@ static int mv2_recv_accept_message(MPIDI_VC_t* vc)
 
     /* message payload is write id we should use when sending */
     size_t header_size = sizeof(MPIDI_CH3I_MRAILI_Pkt_comm_header);
-    char* payload = (char*)v->buffer + header_size;
+    char* payload = PKT_DATA_OFFSET(v, header_size);
+
+    printf("Received accept packet with payload = %s\n", payload);
 
     /* extract write id from payload */
     int id;
@@ -941,6 +950,8 @@ spawn_net_channel* mv2_ep_connect(const char *name)
 {
     /* extract lid and queue pair address from endpoint name */
     unsigned int lid, qpn;
+    printf("Connecting to %s\n", name);
+
     int parsed = sscanf(name, "IBUD:%04x:%06x", &lid, &qpn);
     if (parsed != 2) {
         SPAWN_ERR("Couldn't parse ep info from %s", name);
@@ -988,8 +999,9 @@ spawn_net_channel* mv2_ep_accept()
 
     /* get pointer to payload */
     size_t header_size = sizeof(MPIDI_CH3I_MRAILI_Pkt_comm_header);
-    char* payload = (char*)v->buffer + header_size;
+    char* payload = PKT_DATA_OFFSET(v, header_size);
 
+    printf("%s: Connect msg: %s\n", __func__, payload);
     /* get id and endpoint name from message payload */
     int id, lid, qpn;
     int parsed = sscanf(payload, "%06x:%04x:%06x", &id, &lid, &qpn);
@@ -1009,7 +1021,7 @@ spawn_net_channel* mv2_ep_accept()
     mv2_ud_exch_info_t ep_info;
     ep_info.lid = lid;
     ep_info.qpn = qpn;
-    vc_set_addr(vc, (mv2_ud_exch_info_t*) v->buffer, RDMA_DEFAULT_PORT);
+    vc_set_addr(vc, &ep_info, RDMA_DEFAULT_PORT);
 
     /* record remote id as write id */
     vc->mrail.writeid = writeid;
@@ -1072,8 +1084,9 @@ int mv2_ud_send(MPIDI_VC_t *vc, const void* buf, size_t size)
         /* set packet size */
         v->content_size = header_size + bytes;
 
+        printf("Sending %d bytes (header = %d, data = %d)\n", v->content_size, header_size, bytes);
         /* prepare packet for send */
-        vbuf_init_send(v, header_size, v->rail);
+        vbuf_init_send(v, v->content_size, v->rail);
 
         if (vc->mrail.state != MRAILI_UD_CONNECTED) {
             /* TODO: what's this do? */
@@ -1104,11 +1117,11 @@ int mv2_ud_recv(MPIDI_VC_t* vc, void* buf, size_t size)
         vbuf* v = packet_read(vc);
 
         /* copy data to user's buffer */
-        size_t payload_size = v->content_size - header_size;
+        size_t payload_size = PKT_DATA_SIZE(v, header_size);
         if (payload_size > 0) {
             /* get pointer to message payload */
             char* ptr  = (char*)buf + nread;
-            char* data = (char*)v->buffer + header_size;
+            char* data = PKT_DATA_OFFSET(v, header_size);
             memcpy(ptr, data, payload_size);
         }
 
