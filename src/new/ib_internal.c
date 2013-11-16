@@ -1082,7 +1082,7 @@ int mv2_ud_send(MPIDI_VC_t *vc, const void* buf, size_t size)
         memcpy(ptr, data, bytes);
 
         /* set packet size */
-        v->content_size = header_size + bytes;
+        v->content_size = header_size + payload_size;
 
         printf("Sending %d bytes (header = %d, data = %d)\n", v->content_size, header_size, bytes);
         /* prepare packet for send */
