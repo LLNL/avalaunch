@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <assert.h>
 
 #include "mpi.h"
 
@@ -47,6 +48,7 @@ int main(int argc, char* argv[])
         for (i = 1; i < ranks; i++) {
           int str_len;
           spawn_net_read(chs[i], &str_len, sizeof(int));
+          assert(size == str_len);
           spawn_net_read(chs[i], str, (size_t)str_len);
           //printf("%d: recevied %s\n", rank, str);
           //printf("%d: recevied ch:%s\n", rank, chs[i]->name);
