@@ -513,7 +513,7 @@ static int mv2_get_hca_info(int devnum, mv2_hca_info_t *hca_info)
 int mv2_hca_open()
 {
     memset(&g_hca_info, 0, sizeof(mv2_hca_info_t));
-    if (mv2_get_hca_info(1, &g_hca_info) != 0){
+    if (mv2_get_hca_info(0, &g_hca_info) != 0){
         SPAWN_ERR("Failed to initialize HCA");
         return -1;
     }
