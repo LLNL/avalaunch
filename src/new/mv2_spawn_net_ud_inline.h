@@ -10,7 +10,7 @@
  *
  */
 #include <ib_internal.h>
-#include <vbuf.h>
+#include <mv2_spawn_net_vbuf.h>
 
 extern void mv2_ud_resend(vbuf *v);
 extern MPIDI_VC_t** ud_vc_info;

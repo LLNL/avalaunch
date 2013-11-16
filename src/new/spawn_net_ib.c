@@ -12,7 +12,7 @@
 
 #include "spawn_internal.h"
 
-#include "mv2_ud.h"
+#include "mv2_spawn_net_ud.h"
 
 spawn_net_endpoint* spawn_net_open_ib()
 {

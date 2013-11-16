@@ -11,9 +11,9 @@
  */
 #include <spawn_internal.h>
 #include <ib_internal.h>
-#include <mv2_ud.h>
-#include <mv2_ud_inline.h>
-#include <debug_utils.h>
+#include <mv2_spawn_net_ud.h>
+#include <mv2_spawn_net_ud_inline.h>
+#include <mv2_spawn_net_debug_utils.h>
 
 int num_rdma_buffer;
 int rdma_num_rails = 1;
@@ -304,6 +304,7 @@ static int mv2_poll_cq()
                 v = NULL;
                 break;
             case IBV_WC_RECV:
+                //printf("Received pkt: size = %d\n", v->content_size);
                 /* we don't have a source id for connect messages */
                 if (p->type != MPIDI_CH3_PKT_UD_CONNECT) {
                     /* src field is valid (unless we have a connect message),

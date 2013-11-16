@@ -13,7 +13,7 @@
 #ifndef _MV2_UD_H_
 #define _MV2_UD_H_
 
-#include "vbuf.h"
+#include "mv2_spawn_net_vbuf.h"
 #include <infiniband/verbs.h>
 
 #define LOG2(_v, _r)                            \
