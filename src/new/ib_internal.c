@@ -1052,6 +1052,8 @@ int mv2_ud_send(MPIDI_VC_t *vc, const void* buf, size_t size)
     size_t payload_size = MRAIL_MAX_UD_SIZE - header_size;
     assert(MRAIL_MAX_UD_SIZE >= header_size);
 
+    printf("Entering %s: size = %d\n", __func__, size);
+
     /* break message up into packets and send each one */
     int rc = SPAWN_SUCCESS;
     size_t nwritten = 0;
@@ -1082,7 +1084,7 @@ int mv2_ud_send(MPIDI_VC_t *vc, const void* buf, size_t size)
         memcpy(ptr, data, bytes);
 
         /* set packet size */
-        v->content_size = header_size + payload_size;
+        v->content_size = header_size + bytes;
 
         printf("Sending %d bytes (header = %d, data = %d)\n", v->content_size, header_size, bytes);
         /* prepare packet for send */
