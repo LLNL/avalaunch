@@ -38,8 +38,7 @@ int main(int argc, char* argv[])
       int str_len;
       spawn_net_read(chs[i], &str_len, sizeof(int));
       spawn_net_read(chs[i], str, (size_t)str_len);
-      printf("%d: recevied %s\n", rank, str);
-      printf("%d: recevied ch:%s\n", rank, chs[i]->name);
+      printf("%d: recevied '%s' from ch %s\n", rank, str, chs[i]->name);
     }
 
     for (i = 1; i < ranks; i++) {
@@ -52,8 +51,7 @@ int main(int argc, char* argv[])
     int str_len = strlen(str) + 1;
     spawn_net_write(ch, &str_len, sizeof(int));
     spawn_net_write(ch, str, (size_t)str_len);
-    printf("%d: sent %s\n", rank, str);
-    printf("%d: sent ch:%s\n", rank, ch->name);
+    printf("%d: sent '%s' to ch %s\n", rank, str, ch->name);
 
     spawn_net_disconnect(&ch);
   }
