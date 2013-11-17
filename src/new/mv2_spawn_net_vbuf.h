@@ -193,10 +193,10 @@ typedef struct vbuf
     uint8_t flags;
     double timestamp;
     uint8_t in_sendwin;
-    LINK apprecvwin_msg;
-    LINK sendwin_msg;
-    LINK recvwin_msg;
-    LINK extwin_msg;
+    LINK apprecvwin_msg; /* tracks in-order packets ready to be received by app */
+    LINK sendwin_msg;    /* tracks outstanding sends */
+    LINK recvwin_msg;    /* tracks received packets, either control msgs or out-of-order app msgs */
+    LINK extwin_msg;     /* tracks messages to be sent when credits are availble */
     LINK unack_msg;
 #if defined(_MCST_SUPPORT_)
     LINK mcast_sendwin_msg;

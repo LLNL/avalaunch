@@ -12,7 +12,6 @@
 #include <ib_internal.h>
 #include <mv2_spawn_net_vbuf.h>
 
-extern void mv2_ud_resend(vbuf *v);
 extern MPIDI_VC_t** ud_vc_info;
 
 enum {
@@ -44,18 +43,7 @@ enum {
     }                                                               \
 }
 
-#define SEND_WINDOW_CHECK(_ud_vc, _v)   {                               \
-    if ((_ud_vc)->send_window.count > rdma_default_ud_sendwin_size      \
-                || ((_ud_vc)->ext_window.head != NULL                   \
-                 && (_ud_vc)->ext_window.head != (_v))) {               \
-        mv2_ud_ext_window_add(&(_ud_vc)->ext_window, v);                \
-        PRINT_DEBUG(DEBUG_UD_verbose>1,"msg(%p) queued to ext window size:%d\n",_v,  \
-                        (_ud_vc)->ext_window.count);                    \
-        return 0;                                                       \
-    }                                                                   \
-}
-
-#define MV2_Get_vc(rank_, vcp_) *(vcp_) = ud_vc_info[rank_]
+#define MV2_Get_vc(index_, vcp_) *(vcp_) = ud_vc_info[index_]
 
 static inline void mv2_ud_ext_sendq_queue(message_queue_t *q, vbuf *v)
 {
@@ -70,6 +58,8 @@ static inline void mv2_ud_ext_sendq_queue(message_queue_t *q, vbuf *v)
     PRINT_DEBUG(DEBUG_UD_verbose>1,"queued to ext send queue, queue len:%d seqnum:%d\n", q->count, v->seqnum);
 }
 
+/* adds vbuf to extended send queue, which tracks messages we will be
+ * sending but haven't yet */
 static inline void mv2_ud_ext_window_add(message_queue_t *q, vbuf *v)
 {
     v->extwin_msg.next = v->extwin_msg.prev = NULL;
@@ -82,6 +72,8 @@ static inline void mv2_ud_ext_window_add(message_queue_t *q, vbuf *v)
     q->count++;
 }
 
+/* adds vbuf to the send queue, which tracks packets we've actually
+ * sent but not yet gotten an ack for */
 static inline void mv2_ud_send_window_add(message_queue_t *q, vbuf *v)
 {
     v->sendwin_msg.next = v->sendwin_msg.prev = NULL;
@@ -161,48 +153,6 @@ static inline void mv2_ud_track_send(mv2_ud_vc_info_t *ud_vc, message_queue_t *u
     mv2_ud_send_window_add(&(ud_vc->send_window), v);
     /* Add vbuf to global unack queue */
     mv2_ud_unack_queue_add(unack_queue, v);
-}
-
-static inline void mv2_ud_unackq_traverse(message_queue_t *q)
-{
-    /* get current time */
-    double timestamp = mv2_get_time_us();
-
-    /* walk through unack'd list */
-    vbuf* cur = q->head;
-    while(cur) {
-        //TODO:: if (cur->left_to_send == 0 || cur->retry_always) {
-
-        /* get log of retry count for this packet */
-        int r;
-        if (cur->retry_count > 1) {
-            LOG2(cur->retry_count, r);
-        } else {
-            r = 1;
-        }
-
-        /* compute time this packet has been waiting since we
-         * last sent (or resent) it */
-        long delay = timestamp - cur->timestamp;
-        if ((delay > (rdma_ud_retry_timeout * r)) ||
-            (delay > rdma_ud_max_retry_timeout))
-        {
-            PRINT_DEBUG(DEBUG_UD_verbose>1,"resend seqnum:%d retry : %d \n",
-                cur->seqnum, cur->retry_count);
-
-            /* we've waited long enough, try again and update
-             * its send timestamp */
-            mv2_ud_resend(cur);
-            cur->timestamp = timestamp;
-
-            /* since this may have taken some time, update our current
-             * timestamp */
-            timestamp = mv2_get_time_us();
-        }
-
-        /* go on to next item in list */
-        cur = cur->unack_msg.next;
-    } 
 }
 
 static inline int mv2_ud_recv_window_add(message_queue_t *q, vbuf *v, int recv_win_start)

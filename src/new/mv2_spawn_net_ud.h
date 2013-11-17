@@ -40,20 +40,6 @@ do {                                            \
     (((_start > _end) && (_val > _start || _val < _end)) ||         \
      ((_end > _start) && (_val > _start && _val < _end)))
 
-#define MV2_UD_RESET_CREDITS(_vc, _v)  {    \
-    if (_v->transport == IB_TRANSPORT_UD) { \
-        _vc->mrail.ud.ack_pending = 0;      \
-    }                                       \
-}   
-
-#define MV2_UD_ACK_CREDIT_CHECK(_vc, _v)   {                            \
-    if (_v->transport == IB_TRANSPORT_UD) {                             \
-        if (++(_vc->mrail.ud.ack_pending) > rdma_ud_max_ack_pending) {  \
-            mv2_send_explicit_ack(_vc);                                 \
-        }                                                               \
-    }                                                                   \
-}
-
 #define MAX_SEQ_NUM (UINT16_MAX)
 #define MESSAGE_QUEUE_INIT(q)   \
 {                               \
@@ -86,13 +72,8 @@ do {                                            \
 
 typedef struct MPIDI_CH3I_MRAILI_Pkt_comm_header_t {
     uint8_t type;
-#if defined(MPIDI_CH3I_MRAILI_IBA_PKT_DECL)
     MPIDI_CH3I_MRAILI_IBA_PKT_DECL
-#endif
 } MPIDI_CH3I_MRAILI_Pkt_comm_header;
-
-#define MARK_ACK_COMPLETED(vc) (vc->mrail.ack_need_tosend = 0)
-#define MARK_ACK_REQUIRED(vc) (vc->mrail.ack_need_tosend = 1)
 
 #define MRAILI_UD_CONNECTING    (0x0001)
 #define MRAILI_UD_CONNECTED     (0x0002)
@@ -230,7 +211,6 @@ void mv2_ud_zcopy_poll_cq(mv2_ud_zcopy_info_t *zcopy_info, mv2_ud_ctx_t *ud_ctx,
 int post_ud_send(MPIDI_VC_t* vc, vbuf* v, int rail, mv2_ud_ctx_t *send_ud_ctx);
 
 /* destroy ud context */
-void mv2_ud_resend(vbuf *v);
 void mv2_check_resend();
 void mv2_ud_update_send_credits(vbuf *v);
 int MRAILI_Process_send(void *vbuf_addr);
