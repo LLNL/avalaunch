@@ -24,12 +24,12 @@
 #include <sys/mman.h>
 #include <sys/types.h>
 #include <arpa/inet.h>
-#include <mv2_clock.h>
+#include <mv2_spawn_net_clock.h>
 #include <spawn_net.h>
 #include <spawn_util.h>
 #include <sys/socket.h>
 #include <netinet/tcp.h>
-#include <debug_utils.h>
+#include <mv2_spawn_net_debug_utils.h>
 #include <infiniband/verbs.h>
 #include <infiniband/umad.h>
 

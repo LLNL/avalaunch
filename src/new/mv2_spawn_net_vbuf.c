@@ -24,8 +24,8 @@
  *
  */
 
-#include <vbuf.h>
-#include <mv2_ud.h>
+#include <mv2_spawn_net_vbuf.h>
+#include <mv2_spawn_net_ud.h>
 #include <ib_internal.h>
 
 /* vbuf pool info */

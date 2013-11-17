@@ -20,10 +20,10 @@ launcher_SOURCES = \
   strmap.c strmap.h \
   spawn_net_ib.c spawn_net_ib.h \
   ib_internal.c ib_internal.h \
-  debug_utils.c debug_utils.h \
-  ibv_ud.c mv2_ud.h mv2_ud_inline.h \
-  mv2_clock.c mv2_clock.h \
-  vbuf.c vbuf.h
+  mv2_spawn_net_debug_utils.c mv2_spawn_net_debug_utils.h \
+  mv2_spawn_net_ibv_ud.c mv2_spawn_net_ud.h mv2_spawn_net_ud_inline.h \
+  mv2_spawn_net_clock.c mv2_spawn_net_clock.h \
+  mv2_spawn_net_vbuf.c mv2_spawn_net_vbuf.h
 launcher_CFLAGS = -pthread -Wall -g
 launcher_LDFLAGS = -lpthread -lrt
 

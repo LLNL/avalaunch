@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <assert.h>
 
 #include "mpi.h"
 
@@ -10,7 +11,7 @@ int main(int argc, char* argv[])
 {
   MPI_Init(&argc, &argv);
 
-  int rank, ranks;
+  int rank, ranks, iters = 1000;
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
   MPI_Comm_size(MPI_COMM_WORLD, &ranks);
 
@@ -28,32 +29,50 @@ int main(int argc, char* argv[])
   spawn_net_channel** chs = (spawn_net_channel**) malloc(ranks * sizeof(spawn_net_channel));
 
   int i;
-  if (rank == 0) {
-    for (i = 1; i < ranks; i++) {
-      chs[i] = spawn_net_accept(ep);
+  int j;
+  int size = 1;
+  char str[1<<20];
+  memset(str, 1, sizeof(str));
+  for (size = 1; size < 1<<19; size *= 2) {
+    if (size > 2048) {
+      iters = 100;
+    } else {
+      iters = 1000;
     }
-
-    for (i = 1; i < ranks; i++) {
-      char str[100];
-      int str_len;
-      spawn_net_read(chs[i], &str_len, sizeof(int));
-      spawn_net_read(chs[i], str, (size_t)str_len);
-      printf("%d: recevied '%s' from ch %s\n", rank, str, chs[i]->name);
+    if (rank == 0) {
+      for (i = 1; i < ranks; i++) {
+        chs[i] = spawn_net_accept(ep);
+      }
+  
+      for (j = 0; j < iters; ++j) {
+        for (i = 1; i < ranks; i++) {
+          int str_len;
+          spawn_net_read(chs[i], &str_len, sizeof(int));
+          assert(size == str_len);
+          spawn_net_read(chs[i], str, (size_t)str_len);
+          //printf("%d: recevied %s\n", rank, str);
+          //printf("%d: recevied ch:%s\n", rank, chs[i]->name);
+        }
+      }
+      for (i = 1; i < ranks; i++) {
+        printf("%d: recevied ch:%s; %d Bytes %d times\n", rank, chs[i]->name, size, iters);
+      }
+  
+      for (i = 1; i < ranks; i++) {
+        spawn_net_disconnect(&chs[i]);
+      }
+    } else {
+      spawn_net_channel* ch = spawn_net_connect(parent_name);
+  
+      for (j = 0; j < iters; ++j) {
+        spawn_net_write(ch, &size, sizeof(int));
+        spawn_net_write(ch, str, (size_t)size);
+      }
+      //printf("%d: sent %s\n", rank, str);
+      printf("%d: sent ch:%s; %d bytes %d times\n", rank, ch->name, size, iters);
+  
+      spawn_net_disconnect(&ch);
     }
-
-    for (i = 1; i < ranks; i++) {
-      spawn_net_disconnect(&chs[i]);
-    }
-  } else {
-    spawn_net_channel* ch = spawn_net_connect(parent_name);
-
-    char str[] = "hello";
-    int str_len = strlen(str) + 1;
-    spawn_net_write(ch, &str_len, sizeof(int));
-    spawn_net_write(ch, str, (size_t)str_len);
-    printf("%d: sent '%s' to ch %s\n", rank, str, ch->name);
-
-    spawn_net_disconnect(&ch);
   }
 
   free(chs);

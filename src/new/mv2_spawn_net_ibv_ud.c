@@ -10,13 +10,13 @@
  *
  */
 
-#include "vbuf.h"
+#include "mv2_spawn_net_vbuf.h"
 #include <ib_internal.h>
 
 #ifdef _ENABLE_UD_
-#include "mv2_ud.h"
-#include "mv2_ud_inline.h"
-#include <debug_utils.h>
+#include "mv2_spawn_net_ud.h"
+#include "mv2_spawn_net_ud_inline.h"
+#include <mv2_spawn_net_debug_utils.h>
 
 long rdma_ud_last_check;
 

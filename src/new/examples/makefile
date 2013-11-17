@@ -6,10 +6,10 @@ OBJS= \
   spawn_net_ib.o \
   spawn_net.o \
   ib_internal.o \
-  debug_utils.o \
-  ibv_ud.o \
-  mv2_clock.o \
-  vbuf.o
+  mv2_spawn_net_debug_utils.o \
+  mv2_spawn_net_ibv_ud.o \
+  mv2_spawn_net_clock.o \
+  mv2_spawn_net_vbuf.o
 
 LIBS= \
   -libverbs \
@@ -23,10 +23,10 @@ all: clean
 	gcc -g -O0 -o spawn_net_fifo.o -c ../spawn_net_fifo.c
 	gcc -g -O0 -o spawn_net_ib.o -c ../spawn_net_ib.c -I../.
 	gcc -g -O0 -o ib_internal.o -c ../ib_internal.c -I ../.
-	gcc -g -O0 -o debug_utils.o -c ../debug_utils.c -I ../.
-	gcc -g -O0 -o ibv_ud.o -c ../ibv_ud.c -I ../.
-	gcc -g -O0 -o mv2_clock.o -c ../mv2_clock.c -I ../.
-	gcc -g -O0 -o vbuf.o -c ../vbuf.c -I ../.
+	gcc -g -O0 -o mv2_spawn_net_debug_utils.o -c ../mv2_spawn_net_debug_utils.c -I ../.
+	gcc -g -O0 -o mv2_spawn_net_ibv_ud.o -c ../mv2_spawn_net_ibv_ud.c -I ../.
+	gcc -g -O0 -o mv2_spawn_net_clock.o -c ../mv2_spawn_net_clock.c -I ../.
+	gcc -g -O0 -o mv2_spawn_net_vbuf.o -c ../mv2_spawn_net_vbuf.c -I ../.
 	gcc -g -O0 -o strmap.o -c ../strmap.c
 	gcc -g -O0 -o strmap_test strmap_test.c $(OBJS) -I../. $(LIBS)
 	gcc -g -O0 -o pmi_test pmi_test.c $(OBJS) -I../../../install/include ../../../install/lib/libpmi.a $(LIBS)
