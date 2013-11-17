@@ -60,9 +60,6 @@ int DEBUG_UDSTAT_verbose = 0;
 // Verbosity level for memory stats
 int DEBUG_MEM_verbose = 0;
 
-// Verbosity level for GPU CUDA
-int DEBUG_CUDA_verbose = 0;
-
 // Verbosity level for IB MULTICAST
 int DEBUG_MCST_verbose = 0;
 
@@ -92,7 +89,6 @@ int initialize_debug_variables() {
     DEBUG_XRC_verbose = env2int( "MV2_DEBUG_XRC_VERBOSE" );
     DEBUG_UDSTAT_verbose = env2int( "MV2_DEBUG_UDSTAT_VERBOSE" );
     DEBUG_MEM_verbose = env2int( "MV2_DEBUG_MEM_USAGE_VERBOSE" );
-    DEBUG_CUDA_verbose = env2int( "MV2_DEBUG_CUDA_VERBOSE" );
     DEBUG_MCST_verbose = env2int( "MV2_DEBUG_MCST_VERBOSE" );
     DEBUG_SHM_verbose = env2int( "MV2_DEBUG_SHM_VERBOSE" );
     return 0;

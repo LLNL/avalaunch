@@ -135,9 +135,6 @@ extern int DEBUG_UDSTAT_verbose;
 // Verbosity level for memory stats
 extern int DEBUG_MEM_verbose;
 
-// Verbosity level for GPU CUDA
-extern int DEBUG_CUDA_verbose;
-
 // Verbosity level for IB MULTICAST
 extern int DEBUG_MCST_verbose;
 
