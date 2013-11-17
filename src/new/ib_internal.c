@@ -798,14 +798,9 @@ void MPIDI_CH3I_MRAIL_Release_vbuf(vbuf * v)
     v->coalesce = 0;
     v->content_size = 0;
 
-    if (v->padding == NORMAL_VBUF_FLAG || v->padding == RPUT_VBUF_FLAG)
+    if (v->padding == NORMAL_VBUF_FLAG || v->padding == RPUT_VBUF_FLAG) {
         MRAILI_Release_vbuf(v);
-#if 0
-    else {
-        MRAILI_Release_recv_rdma(v);
-        MRAILI_Send_noop_if_needed((MPIDI_VC_t *) v->vc, v->rail);
     }
-#endif
 }
 
 /* blocks until packet comes in on specified VC */
