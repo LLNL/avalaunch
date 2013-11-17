@@ -268,11 +268,18 @@ static int mv2_post_ud_recv_buffers(int num_bufs, mv2_ud_ctx_t *ud_ctx)
 
 static int mv2_poll_cq()
 {
+    /* get pointer to completion queue */
+    struct ibv_cq* cq = g_hca_info.cq_hndl;
+
     /* poll cq */
     struct ibv_wc wc;
-    struct ibv_cq* cq = g_hca_info.cq_hndl;
     int ne = ibv_poll_cq(cq, 1, &wc);
+
+    /* check return code */
     if (ne == 1) {
+        /* we got an entry, process it */
+
+        /* first, check that entry was successful */
         if (IBV_WC_SUCCESS != wc.status) {
             SPAWN_ERR("IBV_WC_SUCCESS != wc.status (%d)", wc.status);
             exit(-1);
@@ -290,13 +297,14 @@ static int mv2_poll_cq()
             case IBV_WC_SEND:
             case IBV_WC_RDMA_READ:
             case IBV_WC_RDMA_WRITE:
-                if (p != NULL && IS_CNTL_MSG(p)) {
-                }
                 mv2_ud_update_send_credits(v);
+
                 if (v->flags & UD_VBUF_SEND_INPROGRESS) {
                     v->flags &= ~(UD_VBUF_SEND_INPROGRESS);
+
                     if (v->flags & UD_VBUF_FREE_PENIDING) {
                         v->flags &= ~(UD_VBUF_FREE_PENIDING);
+
                         MRAILI_Release_vbuf(v);
                     }
                 }
@@ -349,7 +357,7 @@ static int mv2_poll_cq()
                 break;
         }
     } else if (ne < 0) {
-        SPAWN_ERR("poll cq error");
+        SPAWN_ERR("poll cq error (ibv_poll_cq rc=%d %s)", ne, strerror(ne));
         exit(-1);
     }
 
@@ -755,21 +763,34 @@ void* cm_timeout_handler(void *arg)
     while(1) {
         /* sleep for some time before we look, release lock while
          * sleeping */
-        comm_unlock();
+        //comm_unlock();
         nanosleep(&cm_timeout, &remain);
-        comm_lock();
+        //comm_lock();
 
+#if 0
         /* spin poll for some time to look for new events */
         for (nspin = 0; nspin < rdma_ud_progress_spin; nspin++) {
             mv2_poll_cq();
         }
+#endif
 
         /* resend messages and send acks if we're due */
         long time = mv2_get_time_us();
         long delay = time - rdma_ud_last_check;
         if (delay > rdma_ud_progress_timeout) {
+            /* time is up, grab lock and process acks */
+            comm_lock();
+
+            /* resend any unack'd packets whose timeout has expired */
             mv2_check_resend();
+
+            /* send explicit acks out on all vc's if we need to */
             MV2_UD_SEND_ACKS();
+
+            /* done sending messages, release lock */
+            comm_unlock();
+
+            /* record the last time we checked acks */
             rdma_ud_last_check = mv2_get_time_us();
         }
     }
@@ -803,14 +824,33 @@ void MPIDI_CH3I_MRAIL_Release_vbuf(vbuf * v)
     }
 }
 
+static void drain_cq_events()
+{
+    /* empty all events from queue */
+    int rc = mv2_poll_cq();
+    while (rc == 1) {
+        rc = mv2_poll_cq();
+    }
+    return;
+}
+
 /* blocks until packet comes in on specified VC */
 static vbuf* packet_read(MPIDI_VC_t* vc)
 {
+    /* eagerly pull all events from completion queue */
+    drain_cq_events();
+
+    /* look for entry in apprecv queue */
     vbuf* v = mv2_ud_apprecv_window_retrieve_and_remove(&vc->mrail.app_recv_window);
     while (v == NULL) {
         comm_unlock();
-        nanosleep(&cm_timeout, &remain);
+//        nanosleep(&cm_timeout, &remain);
         comm_lock();
+
+        /* eagerly pull all events from completion queue */
+        drain_cq_events();
+
+        /* look for entry in apprecv queue */
         v = mv2_ud_apprecv_window_retrieve_and_remove(&vc->mrail.app_recv_window);
     }
     return v;
@@ -862,11 +902,17 @@ static int mv2_send_connect_message(MPIDI_VC_t *vc)
  * extracts element and returns its vbuf */
 static vbuf* mv2_recv_connect_message()
 {
+    /* eagerly pull all events from completion queue */
+    drain_cq_events();
+
     /* wait until we see at item at head of connect queue */
     while (connect_head == NULL) {
         comm_unlock();
-        nanosleep(&cm_timeout, &remain);
+//        nanosleep(&cm_timeout, &remain);
         comm_lock();
+
+        /* eagerly pull all events from completion queue */
+        drain_cq_events();
     }
 
     /* get pointer to element */

@@ -437,6 +437,9 @@ static void mv2_ud_resend(vbuf *v)
 
 void MRAILI_Process_recv(vbuf *v) 
 {
+    /* TODO: consider sending immedate ack with each receive,
+     * trades bandwidth for latency */
+
     /* get VC of vbuf */
     MPIDI_VC_t* vc = v->vc;
 
