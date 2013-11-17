@@ -29,10 +29,6 @@
 
 #include "ib_internal.h"
 
-#if defined(_ENABLE_CUDA_)
-#include "ibv_cuda_util.h"
-#endif
-
 #define CREDIT_VBUF_FLAG (111)
 #define NORMAL_VBUF_FLAG (222)
 #define RPUT_VBUF_FLAG (333)
@@ -114,7 +110,6 @@ typedef enum {
 #define UD_VBUF_RETRY_ALWAYS        (0x04)
 #define UD_VBUF_MCAST_MSG           (0x08)
 
-#ifdef _ENABLE_UD_
 #define MRAILI_Get_buffer(_vc, _v)                  \
 do {                                                \
     if((_vc)->mrail.state & MRAILI_RC_CONNECTED) {  \
@@ -123,14 +118,6 @@ do {                                                \
         (_v) = get_ud_vbuf();                       \
     }                                               \
 } while (0)
-
-#else
-#define MRAILI_Get_buffer(_vc, _v)  \
-do {                                \
-    (_v) = get_vbuf();              \
-} while (0)
-#endif 
-
 
 #define MV2_UD_GRH_LEN (40)
 
@@ -201,30 +188,19 @@ typedef struct vbuf
      */
     ib_transport transport;
     uint16_t seqnum;
-#if defined(_ENABLE_UD_) || defined(_MCST_SUPPORT_)
     uint16_t retry_count;
     uint16_t pending_send_polls;
     uint8_t flags;
     double timestamp;
-#if defined(_ENABLE_UD_)
     uint8_t in_sendwin;
     LINK apprecvwin_msg;
     LINK sendwin_msg;
     LINK recvwin_msg;
     LINK extwin_msg;
     LINK unack_msg;
-#endif
 #if defined(_MCST_SUPPORT_)
     LINK mcast_sendwin_msg;
     LINK mcast_recvwin_msg;
-#endif
-#endif
-#ifdef _ENABLE_CUDA_
-    void *pool_index;
-    void *next;
-    void *orig_vbuf;
-    uint8_t finish_count;
-    uint16_t displacement;
 #endif
 } vbuf;
 
@@ -263,9 +239,6 @@ typedef struct vbuf_region
     struct vbuf* vbuf_head;     /* first vbuf in region       */
     struct vbuf_region* next;   /* thread vbuf regions        */
     int shmid;
-#ifdef _ENABLE_CUDA_
-    void *pool_index;   /* region allocated for a pool */
-#endif
 } vbuf_region;
 
 /* The data structure to hold vbuf pool info */
@@ -283,12 +256,6 @@ typedef struct vbuf_pool
     vbuf *free_head;
     vbuf_region *region_head;
 }vbuf_pool_t;
-
-/* index into vbuf pool */
-enum {
-    CUDA_EAGER_BUF = 0,
-    CUDA_RNDV_BLOCK_BUF,
-};
 
 #define RDMA_VBUF_POOL_INIT(rdma_vbuf_pool)     \
 do{                                             \
@@ -332,11 +299,9 @@ void deallocate_vbuf_region(void);
 
 vbuf* get_vbuf(void);
 
-#if defined(_ENABLE_UD_) || defined(_MCST_SUPPORT_)
 vbuf* get_ud_vbuf(void);
 int allocate_ud_vbufs(int nvbufs);
 void vbuf_init_ud_recv(vbuf* v, unsigned long len, int rail);
-#endif
 
 void MRAILI_Release_vbuf(vbuf* v);
 
@@ -401,21 +366,7 @@ void vbuf_init_rma_fetch_and_add(
     uint64_t add,
     int rail);
 
-#if defined(CKPT)
-void vbuf_reregister_all();
-#endif /* defined(CKPT) */
-
-#ifdef _ENABLE_CUDA_
-int allocate_cuda_vbufs(struct ibv_pd* ptag[]);
-vbuf* get_cuda_vbuf(int flag);
-void release_cuda_vbuf(vbuf* v);
-void register_cuda_vbuf_regions();
-#define IS_CUDA_VBUF(vbuf_pool) (vbuf_pool &&  (\
-                                (vbuf_pool)->index == CUDA_EAGER_BUF || \
-                                (vbuf_pool)->index == CUDA_RNDV_BLOCK_BUF))
-#endif
-
 extern vbuf_pool_t *rdma_vbuf_pools;
 extern int rdma_num_vbuf_pools;
 
-#endif
+#endif /* _VBUF_H_ */
