@@ -13,7 +13,8 @@ OBJS= \
 
 LIBS= \
   -libverbs \
-  -lpthread
+  -lpthread \
+  -lrt
 
 all: clean
 	gcc -g -O0 -o spawn_util.o -c ../spawn_util.c
