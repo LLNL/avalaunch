@@ -62,19 +62,11 @@ do {                                            \
     (q)->count = 0 ;            \
 }
 
-#ifdef _ENABLE_UD_
 #define VC_SRC_INFO \
     union {                     \
         uint32_t smp_index;     \
         uint64_t rank;          \
     } src;                      
-#else
-#define VC_SRC_INFO \
-    union {                     \
-        uint32_t smp_index;     \
-        uint64_t vc_addr;       \
-    } src;                      
-#endif
 
 #ifdef CRC_CHECK
 #define VC_CRC_INFO  unsigned long crc;
