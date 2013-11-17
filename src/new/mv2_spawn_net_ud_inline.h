@@ -165,86 +165,151 @@ static inline void mv2_ud_track_send(mv2_ud_vc_info_t *ud_vc, message_queue_t *u
 
 static inline void mv2_ud_unackq_traverse(message_queue_t *q)
 {
-    int r;
-    long  delay;
+    /* get current time */
     double timestamp = mv2_get_time_us();
-    vbuf *cur = q->head;
 
+    /* walk through unack'd list */
+    vbuf* cur = q->head;
     while(cur) {
         //TODO:: if (cur->left_to_send == 0 || cur->retry_always) {
-        delay = timestamp - cur->timestamp;
+
+        /* get log of retry count for this packet */
+        int r;
         if (cur->retry_count > 1) {
             LOG2(cur->retry_count, r);
         } else {
             r = 1;
         }
-        if ((delay > (rdma_ud_retry_timeout * r)) 
-               || (delay > rdma_ud_max_retry_timeout)) {
+
+        /* compute time this packet has been waiting since we
+         * last sent (or resent) it */
+        long delay = timestamp - cur->timestamp;
+        if ((delay > (rdma_ud_retry_timeout * r)) ||
+            (delay > rdma_ud_max_retry_timeout))
+        {
+            PRINT_DEBUG(DEBUG_UD_verbose>1,"resend seqnum:%d retry : %d \n",
+                cur->seqnum, cur->retry_count);
+
+            /* we've waited long enough, try again and update
+             * its send timestamp */
             mv2_ud_resend(cur);
-            PRINT_DEBUG(DEBUG_UD_verbose>1,"resend seqnum:%d retry : %d \n",cur->seqnum, cur->retry_count);
             cur->timestamp = timestamp;
+
+            /* since this may have taken some time, update our current
+             * timestamp */
             timestamp = mv2_get_time_us();
         }
+
+        /* go on to next item in list */
         cur = cur->unack_msg.next;
     } 
 }
 
 static inline int mv2_ud_recv_window_add(message_queue_t *q, vbuf *v, int recv_win_start)
 {
+    PRINT_DEBUG(DEBUG_UD_verbose>1,"recv window add recv_win_start:%d rece'd seqnum:%d\n",
+        recv_win_start, v->seqnum);
 
-    PRINT_DEBUG(DEBUG_UD_verbose>1,"recv window add recv_win_start:%d rece'd seqnum:%d\n", recv_win_start, v->seqnum);
-
+    /* clear next and previous pointers in vbuf */
     v->recvwin_msg.next = v->recvwin_msg.prev = NULL;
+
+    /* insert vbuf into recv queue in order by its sequence number */
     if(q->head == NULL) {
+        /* trivial insert if list is empty */
         q->head = q->tail = v;
     } else {
-        vbuf *cur_buf = q->head;
+        /* otherwise, we have at least one item already in list,
+         * get a pointer to current head */ 
+        vbuf* cur_buf = q->head;
+
+        /* if our sequence number is greater than start of window */
         if (v->seqnum > recv_win_start) {
+            /* current seq num is higher than start seq number, */
+            /* iterate until we find the first item in the list
+             * whose sequence number is greater or equal to vbuf,
+             * or until we hit first item whose seq wraps (less
+             * than or equal to start seq num) */
             if (cur_buf->seqnum < recv_win_start) {
+                /* first item already wraps */
             } else {
-                while (NULL != cur_buf && cur_buf->seqnum < v->seqnum 
-                        && cur_buf->seqnum > recv_win_start) {
+                /* otherwise, search */
+                while (cur_buf != NULL &&
+                       cur_buf->seqnum < v->seqnum &&
+                       cur_buf->seqnum > recv_win_start)
+                {
                     cur_buf = cur_buf->recvwin_msg.next;
                 }
             }
         } else {
+            /* vbuf seq num is less than or equal to start seq num,
+             * iterate until we find the first item in the list
+             * whose sequence number is greater or equal to vbuf,
+             * or until we hit first item whose seq wraps (less */
             if (cur_buf->seqnum > recv_win_start) {
-                while (NULL != cur_buf && ((cur_buf->seqnum >= recv_win_start)
-                            || (cur_buf->seqnum < v->seqnum))) { 
+                /* first item in list is greater than start, iterate
+                 * until we find an item that wraps and then keep
+                 * going until we find one that is equal or greater
+                 * than vbuf */
+                while (cur_buf != NULL &&
+                       ((cur_buf->seqnum >= recv_win_start) ||
+                        (cur_buf->seqnum  < v->seqnum)))
+                { 
                     cur_buf = cur_buf->recvwin_msg.next;
                 }
             } else {
-                while (NULL != cur_buf && cur_buf->seqnum < v->seqnum) {
+                /* first item already wraps, just iterate until
+                 * we find an item equal or greater than vbuf */
+                while (cur_buf != NULL &&
+                       cur_buf->seqnum < v->seqnum)
+                {
                     cur_buf = cur_buf->recvwin_msg.next;
                 }
             }
         }
 
-        if (NULL != cur_buf) {
+        /* check whether we found an item with a sequence number equal
+         * to or after vbuf seq number */
+        if (cur_buf != NULL) {
+            /* check whether item in list matches seq number of vbuf */
             if (cur_buf->seqnum == v->seqnum) {
+                /* we found a matching item already in the queue */
                 return MSG_IN_RECVWIN;
             }
 
+            /* otherwise current item is larger, so insert vbuf
+             * just before it */
+            vbuf* prev_buf = cur_buf->recvwin_msg.prev;
+            v->recvwin_msg.prev = prev_buf;
             v->recvwin_msg.next = cur_buf;
-            v->recvwin_msg.prev = cur_buf->recvwin_msg.prev;
 
+            /* update list pointers */
             if (cur_buf == q->head) {
+                /* item is at front of list, so update head to
+                 * point to vbuf */
                 q->head = v;
             } else {
-                ((vbuf *)(cur_buf->recvwin_msg.prev))->recvwin_msg.next = v;
+                /* otherwise item is somewhere in the middle,
+                 * so update next pointer of previous item */
+                prev_buf->recvwin_msg.next = v;
             }
             cur_buf->recvwin_msg.prev = v;
         } else {
+            /* all items in queue come before vbuf, so tack vbuf on end */
             v->recvwin_msg.next = NULL;
             v->recvwin_msg.prev = q->tail;
             q->tail->recvwin_msg.next = v;
             q->tail = v;
         }
+
+        /* increment size of queue */
         q->count++;
     }
+
+    /* return code to indicate we inserted vbuf in queue */
     return MSG_QUEUED_RECVWIN; 
 }
 
+/* remove item from head of recv queue */
 static inline void mv2_ud_recv_window_remove(message_queue_t *q)
 {
     vbuf *next = (q->head)->recvwin_msg.next;

@@ -40,8 +40,6 @@ do {                                            \
     (((_start > _end) && (_val > _start || _val < _end)) ||         \
      ((_end > _start) && (_val > _start && _val < _end)))
 
-#define UD_ACK_PROGRESS_TIMEOUT (((mv2_get_time_us() - rdma_ud_last_check) > rdma_ud_progress_timeout))
-
 #define MV2_UD_RESET_CREDITS(_vc, _v)  {    \
     if (_v->transport == IB_TRANSPORT_UD) { \
         _vc->mrail.ud.ack_pending = 0;      \

@@ -358,10 +358,10 @@ static int mv2_poll_cq()
 
 static int mv2_wait_on_channel()
 {
-    void *ev_ctx = NULL;
-    struct ibv_cq *ev_cq = NULL;
-
-    if (UD_ACK_PROGRESS_TIMEOUT) {
+    /* resend messages and send acks if we're due */
+    long time = mv2_get_time_us();
+    long delay = time - rdma_ud_last_check;
+    if (delay > rdma_ud_progress_timeout) {
         mv2_check_resend();
         MV2_UD_SEND_ACKS();
         rdma_ud_last_check = mv2_get_time_us();
@@ -371,6 +371,8 @@ static int mv2_wait_on_channel()
     comm_unlock();
 
     /* Wait for the completion event */
+    void *ev_ctx = NULL;
+    struct ibv_cq *ev_cq = NULL;
     if (ibv_get_cq_event(g_hca_info.comp_channel, &ev_cq, &ev_ctx)) {
         ibv_error_abort(-1, "Failed to get cq_event\n");
     }
@@ -396,6 +398,14 @@ static int mv2_wait_on_channel()
 static int mv2_get_hca_info(int devnum, mv2_hca_info_t *hca_info)
 {
     int i;
+
+    /* we need IB routines to still work after launcher forks children */
+    int fork_rc = ibv_fork_init();
+    if (fork_rc != 0) {
+        SPAWN_ERR("Failed to prepare IB for fork (ibv_fork_init errno=%d %s)",
+                    fork_rc, strerror(fork_rc));
+        return -1;
+    }
 
     /* get list of HCA devices */
     int num_devices;
@@ -738,17 +748,26 @@ void* cm_timeout_handler(void *arg)
 {
     int nspin = 0;
 
+    /* define sleep time between waking and checking for events */
     cm_timeout.tv_sec = rdma_ud_progress_timeout / 1000000;
     cm_timeout.tv_nsec = (rdma_ud_progress_timeout - cm_timeout.tv_sec * 1000000) * 1000;
 
     while(1) {
+        /* sleep for some time before we look, release lock while
+         * sleeping */
         comm_unlock();
         nanosleep(&cm_timeout, &remain);
         comm_lock();
+
+        /* spin poll for some time to look for new events */
         for (nspin = 0; nspin < rdma_ud_progress_spin; nspin++) {
             mv2_poll_cq();
         }
-        if (UD_ACK_PROGRESS_TIMEOUT) {
+
+        /* resend messages and send acks if we're due */
+        long time = mv2_get_time_us();
+        long delay = time - rdma_ud_last_check;
+        if (delay > rdma_ud_progress_timeout) {
             mv2_check_resend();
             MV2_UD_SEND_ACKS();
             rdma_ud_last_check = mv2_get_time_us();
@@ -758,6 +777,7 @@ void* cm_timeout_handler(void *arg)
     return NULL;
 }
 
+/* given a vbuf used for a send, release vbuf back to pool if we can */
 int MRAILI_Process_send(void *vbuf_addr)
 {
     vbuf *v = vbuf_addr;
@@ -773,6 +793,7 @@ int MRAILI_Process_send(void *vbuf_addr)
 
 void MPIDI_CH3I_MRAIL_Release_vbuf(vbuf * v)
 {
+    /* clear some fields */
     v->eager = 0;
     v->coalesce = 0;
     v->content_size = 0;

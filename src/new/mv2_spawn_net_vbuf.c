@@ -45,18 +45,17 @@ static vbuf *free_vbuf_head = NULL;
  */
 static struct ibv_pd *ptag_save[MAX_NUM_HCAS];
 
-int vbuf_n_allocated = 0;
-long num_free_vbuf = 0;
-long num_vbuf_get = 0;
-long num_vbuf_freed = 0;
+/* track vbufs for RC connections */
+int vbuf_n_allocated = 0; /* total number allocated */
+long num_free_vbuf   = 0; /* number currently free */
+long num_vbuf_get    = 0; /* number of times vbuf was taken from free list */
+long num_vbuf_freed  = 0; /* number of times vbuf was added to free list */
 
-#if defined(_ENABLE_UD_) || defined(_MCST_SUPPORT_)
 static vbuf *ud_free_vbuf_head = NULL;
 int ud_vbuf_n_allocated = 0;
 long ud_num_free_vbuf = 0;
 long ud_num_vbuf_get = 0;
 long ud_num_vbuf_freed = 0;
-#endif
 
 static pthread_spinlock_t vbuf_lock;
 
@@ -69,10 +68,8 @@ void dump_vbuf(char* msg, vbuf* v)
     printf("%s: dump of vbuf %p, type = %d\n", msg, v, header->type);
     len = 100;
 
-    for (; i < len; ++i)
-    {
-        if (0 == i % 16)
-        {
+    for (; i < len; ++i) {
+        if (0 == i % 16) {
             printf("\n  ");
         }
 
@@ -86,21 +83,10 @@ void dump_vbuf(char* msg, vbuf* v)
 
 void mv2_print_vbuf_usage_usage()
 {
-    int tot_mem = 0;
-
-#if defined(_ENABLE_UD_) || defined(_MCST_SUPPORT_)
-    tot_mem = (vbuf_n_allocated * (rdma_vbuf_total_size + sizeof(struct vbuf)));
+    size_t tot_mem = (vbuf_n_allocated * (rdma_vbuf_total_size + sizeof(struct vbuf)));
     tot_mem += (ud_vbuf_n_allocated * (rdma_default_ud_mtu + sizeof(struct vbuf))); 
-    PRINT_INFO(DEBUG_MEM_verbose, "RC VBUFs:%d  UD VBUFs:%d TOT MEM:%d kB\n",
+    PRINT_INFO(DEBUG_MEM_verbose, "RC VBUFs:%ld  UD VBUFs:%ld TOT MEM:%ld kB\n",
                     vbuf_n_allocated, ud_vbuf_n_allocated, (tot_mem / 1024));
-#else
-    {
-        tot_mem = (vbuf_n_allocated * 
-                (rdma_vbuf_total_size + sizeof(struct vbuf)));
-        PRINT_INFO(DEBUG_MEM_verbose, "RC VBUF: %d  TOT MEM: %d kB\n",
-                vbuf_n_allocated, (tot_mem / 1024));
-    }
-#endif
 }
 
 int init_vbuf_lock(void)
@@ -116,46 +102,42 @@ int init_vbuf_lock(void)
 
 void deallocate_vbufs(int hca_num)
 {
-    vbuf_region *r = vbuf_region_head;
+    pthread_spin_lock(&vbuf_lock);
 
-    {
-        pthread_spin_lock(&vbuf_lock);
-    }
-
-    while (r)
-    {
-        if (r->mem_handle[hca_num] != NULL
-            && ibv_dereg_mr(r->mem_handle[hca_num]))
+    /* iterate over and deregister each vbuf region */
+    vbuf_region* r = vbuf_region_head;
+    while (r) {
+        /* deregister region if we have a handle to it */
+        if (r->mem_handle[hca_num] != NULL &&
+            ibv_dereg_mr(r->mem_handle[hca_num]))
         {
+            /* TODO: is errno set in this case? */
+            SPAWN_ERR("Failed to deregister vbuf region (ibv_dereg_mr rc=%d %s)", errno, strerror(errno));
             ibv_error_abort(IBV_RETURN_ERR, "could not deregister MR");
         }
 
-        //DEBUG_PRINT("deregister vbufs\n");
+        /* get next region */
         r = r->next;
     }
 
-    {
-         pthread_spin_unlock(&vbuf_lock);
-    }
+    pthread_spin_unlock(&vbuf_lock);
 }
 
 void deallocate_vbuf_region(void)
 {
-    vbuf_region *curr = vbuf_region_head;
-    vbuf_region *next = NULL;
-
+    vbuf_region* curr = vbuf_region_head;
     while (curr) {
-        next = curr->next;
         free(curr->malloc_start);
 
         if (rdma_enable_hugepage && curr->shmid >= 0) {
             shmdt(curr->malloc_buf_start);
-        } else 
-        {
+        } else {
             free(curr->malloc_buf_start);
         }
 
-        spawn_free(curr);
+        /* get pointer to next element and free this one */
+        vbuf_region* next = curr->next;
+        spawn_free(&curr);
         curr = next;
     }
 }
@@ -206,7 +188,6 @@ fn_fail:
 
 static int allocate_vbuf_region(int nvbufs)
 {
-
     struct vbuf_region *reg = NULL;
     void *mem = NULL;
     int i = 0;
@@ -358,18 +339,15 @@ static int allocate_vbuf_region(int nvbufs)
 }
 
 /* this function is only called by the init routines.
- * Cache the nic handle and ptag for later vbuf_region allocations.
- */
+ * Cache the nic handle and ptag for later vbuf_region allocations. */
 int allocate_vbufs(struct ibv_pd* ptag[], int nvbufs)
 {
-    int i = 0;
-
-    for (; i < rdma_num_hcas; ++i)
-    {
+    int i;
+    for (i = 0; i < rdma_num_hcas; ++i) {
         ptag_save[i] = ptag[i];
     }
 
-    if(allocate_vbuf_region(nvbufs) != 0) {
+    if (allocate_vbuf_region(nvbufs) != 0) {
         ibv_va_error_abort(GEN_EXIT_ERR,
             "VBUF reagion allocation failed. Pool size %d\n", 
                 vbuf_n_allocated);
@@ -432,46 +410,52 @@ vbuf* get_vbuf(void)
 
 void MRAILI_Release_vbuf(vbuf* v)
 {
-#if defined(_ENABLE_UD_) || defined(_MCST_SUPPORT_)
     /* This message might be in progress. Wait for ib send completion 
-     * to release this buffer to avoid to reusing buffer
-     */
+     * to release this buffer to avoid reusing buffer */
     if (v->flags & UD_VBUF_MCAST_MSG) {
         v->pending_send_polls--;
-        if(v->transport== IB_TRANSPORT_UD 
-           && (v->flags & UD_VBUF_SEND_INPROGRESS || v->pending_send_polls > 0)) {
+        if(v->transport == IB_TRANSPORT_UD  &&
+           (v->flags & UD_VBUF_SEND_INPROGRESS || v->pending_send_polls > 0))
+        {
+            /* TODO: when is this really added back to the free buffer? */
+
+            /* if number of pending sends has dropped to 0,
+             * mark vbuf that it's ready to be freed */
             if (v->pending_send_polls == 0) {
                 v->flags |= UD_VBUF_FREE_PENIDING;
             }
             return;
         }
     } else {
-        if(v->transport== IB_TRANSPORT_UD 
-                && (v->flags & UD_VBUF_SEND_INPROGRESS)) {
+        /* if send is still in progress (has not been ack'd),
+         * just mark vbuf as ready to be freed and return */
+        if(v->transport == IB_TRANSPORT_UD &&
+           (v->flags & UD_VBUF_SEND_INPROGRESS))
+        {
+            /* TODO: when is this really added back to the free buffer? */
+
+            /* mark vbuf that it's ready to be freed */
             v->flags |= UD_VBUF_FREE_PENIDING;
             return;
         }
     }
-#endif
 
     /* note this correctly handles appending to empty free list */
-    {
-        pthread_spin_lock(&vbuf_lock);
-    }
+    pthread_spin_lock(&vbuf_lock);
 
-    //DEBUG_PRINT("release_vbuf: releasing %p previous head = %p, padding %d\n", v, free_vbuf_head, v->padding);
+    //DEBUG_PRINT("release_vbuf: releasing %p previous head = %p, padding %d\n",
+    //    v, free_vbuf_head, v->padding);
 
-#if defined( _ENABLE_UD_) || defined(_MCST_SUPPORT_)
+    /* add vbuf to front of appropriate free list */
     if(v->transport == IB_TRANSPORT_UD) {
+        /* add vbuf to front of UD free list */
         assert(v != ud_free_vbuf_head);
         v->desc.next = ud_free_vbuf_head;
         ud_free_vbuf_head = v;
         ++ud_num_free_vbuf;
         ++ud_num_vbuf_freed;
-    } 
-    else 
-#endif /* _ENABLE_UD_ */
-    {
+    } else {
+        /* add vbuf to front of RC free list */
         assert(v != free_vbuf_head);
         v->desc.next = free_vbuf_head;
         free_vbuf_head = v;
@@ -479,27 +463,26 @@ void MRAILI_Release_vbuf(vbuf* v)
         ++num_vbuf_freed;
     }
 
-    if (v->padding != NORMAL_VBUF_FLAG
-        && v->padding != RPUT_VBUF_FLAG
-        && v->padding != RGET_VBUF_FLAG
-        && v->padding != COLL_VBUF_FLAG
-        && v->padding != RDMA_ONE_SIDED)
+    if (v->padding != NORMAL_VBUF_FLAG &&
+        v->padding != RPUT_VBUF_FLAG &&
+        v->padding != RGET_VBUF_FLAG &&
+        v->padding != COLL_VBUF_FLAG &&
+        v->padding != RDMA_ONE_SIDED)
     {
         ibv_error_abort(GEN_EXIT_ERR, "vbuf not correct.\n");
     }
 
-    *v->head_flag = 0;
-    v->pheader = NULL;
+    /* clear out fields to prepare vbuf for next use */
+    *v->head_flag   = 0;
+    v->pheader      = NULL;
     v->content_size = 0;
-    v->sreq = NULL;
-    v->vc = NULL;
+    v->sreq         = NULL;
+    v->vc           = NULL;
 
-    {
-        pthread_spin_unlock(&vbuf_lock);
-    }
+    /* note this correctly handles appending to empty free list */
+    pthread_spin_unlock(&vbuf_lock);
 }
 
-#if defined( _ENABLE_UD_) || defined(_MCST_SUPPORT_)
 static int allocate_ud_vbuf_region(int nvbufs)
 {
     int i;
@@ -639,49 +622,43 @@ vbuf* get_ud_vbuf(void)
 {
     vbuf* v = NULL;
 
-    {
-        pthread_spin_lock(&vbuf_lock);
-    }
+    pthread_spin_lock(&vbuf_lock);
 
-    if (NULL == ud_free_vbuf_head)
-    {
-        if(allocate_ud_vbuf_region(rdma_vbuf_secondary_pool_size) != 0) {
+    /* if we don't have any free vufs left, try to allocate more */
+    if (ud_free_vbuf_head == NULL) {
+        if (allocate_ud_vbuf_region(rdma_vbuf_secondary_pool_size) != 0) {
             ibv_va_error_abort(GEN_EXIT_ERR,
                     "UD VBUF reagion allocation failed. Pool size %d\n", vbuf_n_allocated);
         }
     }
 
-
+    /* pick item from head of list */
+    /* this correctly handles removing from single entry free list */
     v = ud_free_vbuf_head;
+    ud_free_vbuf_head = ud_free_vbuf_head->desc.next;
     --ud_num_free_vbuf;
     ++ud_num_vbuf_get;
 
-    /* this correctly handles removing from single entry free list */
-    ud_free_vbuf_head = ud_free_vbuf_head->desc.next;
-
     /* need to change this to RPUT_VBUF_FLAG later
      * if we are doing rput */
-    v->padding = NORMAL_VBUF_FLAG;
-    v->pheader = (void *)v->buffer;
-    v->transport = IB_TRANSPORT_UD;
+    v->padding     = NORMAL_VBUF_FLAG;
+    v->pheader     = (void *)v->buffer;
+    v->transport   = IB_TRANSPORT_UD;
     v->retry_count = 0;
-    v->flags = 0;
+    v->flags       = 0;
     v->pending_send_polls = 0;
 
     /* this is probably not the right place to initialize shandle to NULL.
      * Do it here for now because it will make sure it is always initialized.
      * Otherwise we would need to very carefully add the initialization in
-     * a dozen other places, and probably miss one.
-     */
-    v->sreq = NULL;
-    v->coalesce = 0;
+     * a dozen other places, and probably miss one. */
+    v->sreq         = NULL;
+    v->coalesce     = 0;
     v->content_size = 0;
-    v->eager = 0;
-    /* Decide which transport need to assign here */
+    v->eager        = 0;
+    /* TODO: Decide which transport need to assign here */
 
-    {
-        pthread_spin_unlock(&vbuf_lock);
-    }
+    pthread_spin_unlock(&vbuf_lock);
 
     return(v);
 }
@@ -703,63 +680,7 @@ void vbuf_init_ud_recv(vbuf* v, unsigned long len, int hca_num)
     v->desc.sg_entry.addr = (uintptr_t)(v->buffer);
     v->padding = NORMAL_VBUF_FLAG;
     v->rail = hca_num;
-
 }
-
-#endif /* _ENABLE_UD_ || _MCST_SUPPORT_*/
-
-#if 0
-void MRAILI_Release_recv_rdma(vbuf* v)
-{
-    vbuf *next_free = NULL;
-    MPIDI_VC_t * c = (MPIDI_VC_t *)v->vc;
-    int i;
-
-    int next = c->mrail.rfp.p_RDMA_recv_tail + 1;
-
-    if (next >= num_rdma_buffer)
-    {
-        next = 0;
-    }
-
-    next_free = &(c->mrail.rfp.RDMA_recv_buf[next]);
-    v->padding = FREE_FLAG;
-    *v->head_flag = 0;
-    v->sreq = NULL;
-    v->content_size = 0;
-
-    if (v != next_free)
-    {
-        return;
-    }
-
-    /* search all free buffers */
-    for (i = next; i != c->mrail.rfp.p_RDMA_recv;)
-    {
-        if (c->mrail.rfp.RDMA_recv_buf[i].padding == FREE_FLAG)
-        {
-            ++c->mrail.rfp.rdma_credit;
-
-            if (++c->mrail.rfp.p_RDMA_recv_tail >= num_rdma_buffer)
-            {
-                c->mrail.rfp.p_RDMA_recv_tail = 0;
-            }
-
-            c->mrail.rfp.RDMA_recv_buf[i].padding = BUSY_FLAG;
-            *c->mrail.rfp.RDMA_recv_buf[i].head_flag = 0;
-        }
-        else
-        {
-            break;
-        }
-
-        if (++i >= num_rdma_buffer)
-        {
-            i = 0;
-        }
-    }
-}
-#endif
 
 #undef FUNCNAME
 #define FUNCNAME vbuf_init_rdma_write
@@ -767,7 +688,6 @@ void MRAILI_Release_recv_rdma(vbuf* v)
 #define FCNAME MPIDI_QUOTE(FUNCNAME)
 void vbuf_init_rdma_write(vbuf* v)
 {
-
     v->desc.u.sr.next = NULL;
     v->desc.u.sr.opcode = IBV_WR_RDMA_WRITE;
     v->desc.u.sr.send_flags = IBV_SEND_SIGNALED;
@@ -776,7 +696,6 @@ void vbuf_init_rdma_write(vbuf* v)
     v->desc.u.sr.num_sge = 1;
     v->desc.u.sr.sg_list = &(v->desc.sg_entry);
     v->padding = FREE_FLAG;
-
 }
 
 #undef FUNCNAME
@@ -838,7 +757,6 @@ void vbuf_init_rget(
     int len,
     int rail)
 {
-
     v->desc.u.sr.next = NULL;
     v->desc.u.sr.send_flags = IBV_SEND_SIGNALED;
     v->desc.u.sr.opcode = IBV_WR_RDMA_READ;
@@ -855,7 +773,6 @@ void vbuf_init_rget(
     v->padding = RGET_VBUF_FLAG;
     v->rail = rail;	
     //DEBUG_PRINT("RDMA Read\n");
-
 }
 
 #undef FUNCNAME
@@ -871,7 +788,6 @@ void vbuf_init_rput(
     int len,
     int rail)
 {
-
     v->desc.u.sr.next = NULL;
     v->desc.u.sr.send_flags = IBV_SEND_SIGNALED;
     v->desc.u.sr.opcode = IBV_WR_RDMA_WRITE;
@@ -888,7 +804,6 @@ void vbuf_init_rput(
     v->padding = RPUT_VBUF_FLAG;
     v->rail = rail;	
     //DEBUG_PRINT("RDMA write\n");
-
 }
 
 #undef FUNCNAME
@@ -898,7 +813,6 @@ void vbuf_init_rput(
 void vbuf_init_rma_get(vbuf *v, void *l_addr, uint32_t lkey,
                        void *r_addr, uint32_t rkey, int len, int rail)
 {
-
     v->desc.u.sr.next = NULL;
     v->desc.u.sr.send_flags = IBV_SEND_SIGNALED;
     v->desc.u.sr.opcode = IBV_WR_RDMA_READ;
@@ -914,7 +828,6 @@ void vbuf_init_rma_get(vbuf *v, void *l_addr, uint32_t lkey,
     v->desc.sg_entry.addr = (uintptr_t)(l_addr);
     v->padding = RDMA_ONE_SIDED;
     v->rail = rail;
-
 }
 
 #undef FUNCNAME
@@ -924,7 +837,6 @@ void vbuf_init_rma_get(vbuf *v, void *l_addr, uint32_t lkey,
 void vbuf_init_rma_put(vbuf *v, void *l_addr, uint32_t lkey,
                        void *r_addr, uint32_t rkey, int len, int rail)
 {
-
     v->desc.u.sr.next = NULL;
     v->desc.u.sr.send_flags = IBV_SEND_SIGNALED;
     v->desc.u.sr.opcode = IBV_WR_RDMA_WRITE;
@@ -940,7 +852,6 @@ void vbuf_init_rma_put(vbuf *v, void *l_addr, uint32_t lkey,
     v->desc.sg_entry.addr = (uintptr_t)(l_addr);
     v->padding = RDMA_ONE_SIDED;
     v->rail = rail;
-
 }
 
 #undef FUNCNAME
@@ -951,7 +862,6 @@ void vbuf_init_rma_fetch_and_add(vbuf *v, void *l_addr, uint32_t lkey,
         void *r_addr, uint32_t rkey, uint64_t add,
         int rail)
 {   
-
     v->desc.u.sr.next = NULL;
     v->desc.u.sr.opcode = IBV_WR_ATOMIC_FETCH_AND_ADD;
     v->desc.u.sr.send_flags = IBV_SEND_SIGNALED;
@@ -968,7 +878,6 @@ void vbuf_init_rma_fetch_and_add(vbuf *v, void *l_addr, uint32_t lkey,
     v->desc.sg_entry.addr = (uintptr_t)(l_addr);
     v->padding = RDMA_ONE_SIDED;
     v->rail = rail;
-
 }
 
 #undef FUNCNAME
@@ -979,7 +888,6 @@ void vbuf_init_rma_compare_and_swap(vbuf *v, void *l_addr, uint32_t lkey,
                         void *r_addr, uint32_t rkey, uint64_t compare, 
                         uint64_t swap, int rail)
 {
-
     v->desc.u.sr.next = NULL;
     v->desc.u.sr.opcode = IBV_WR_ATOMIC_CMP_AND_SWP;
     v->desc.u.sr.send_flags = IBV_SEND_SIGNALED;
@@ -998,49 +906,6 @@ void vbuf_init_rma_compare_and_swap(vbuf *v, void *l_addr, uint32_t lkey,
 
     v->padding = RDMA_ONE_SIDED;
     v->rail = rail;
-
-
 }
- 
-
-#if defined(CKPT)
-
-#undef FUNCNAME
-#define FUNCNAME vbuf_reregister_all
-#undef FCNAME
-#define FCNAME MPIDI_QUOTE(FUNCNAME)
-void vbuf_reregister_all()
-{
-    int i = 0;
-    vbuf_region *vr = vbuf_region_head;
-
-
-    for (; i < rdma_num_hcas; ++i)
-    {
-        ptag_save[i] = mv2_MPIDI_CH3I_RDMA_Process.ptag[i];
-    }
-
-    while (vr)
-    {
-        for (i = 0; i < rdma_num_hcas; ++i)
-        {
-            vr->mem_handle[i] = ibv_reg_mr(
-                ptag_save[i],
-                vr->malloc_buf_start,
-                vr->count * rdma_vbuf_total_size,
-                IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE |
-                IBV_ACCESS_REMOTE_ATOMIC);
-
-            if (!vr->mem_handle[i])
-            {
-                ibv_error_abort(IBV_RETURN_ERR,"Cannot reregister vbuf region\n");
-            }
-        }
-
-        vr = vr->next;
-    }
-
-}
-#endif /* defined(CKPT) */
 
 /* vi:set sw=4 tw=80: */

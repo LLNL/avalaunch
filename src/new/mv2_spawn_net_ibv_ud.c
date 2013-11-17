@@ -13,7 +13,6 @@
 #include "mv2_spawn_net_vbuf.h"
 #include <ib_internal.h>
 
-#ifdef _ENABLE_UD_
 #include "mv2_spawn_net_ud.h"
 #include "mv2_spawn_net_ud_inline.h"
 #include <mv2_spawn_net_debug_utils.h>
@@ -22,77 +21,114 @@ long rdma_ud_last_check;
 
 extern mv2_proc_info_t proc;
 
+/* TODO: what is the ext queue? */
 static inline void mv2_ud_flush_ext_window(MPIDI_VC_t *vc)
 {
-    vbuf *next;
-    message_queue_t *q = &vc->mrail.ud.ext_window;
+    /* get pointer to ext window queue */
+    message_queue_t* q = &vc->mrail.ud.ext_window;
     while (q->head != NULL && 
-            vc->mrail.ud.send_window.count < rdma_default_ud_sendwin_size) {
-        next = (q->head)->extwin_msg.next;
+           vc->mrail.ud.send_window.count < rdma_default_ud_sendwin_size)
+    {
+        /* gt pointer to next element in list */
+        vbuf* next = (q->head)->extwin_msg.next;
+
+        /* send item at head of list */
         proc.post_send(vc, q->head, (q->head)->rail, NULL);
+        vc->mrail.ud.ext_win_send_count++;
+
         PRINT_DEBUG(DEBUG_UD_verbose>1,"Send ext window message(%p) nextseqno :"
                 "%d\n", next, vc->mrail.seqnum_next_tosend);
+
+        /* remove item from head of list */
         q->head = next;
         --q->count;
-        vc->mrail.ud.ext_win_send_count++;
+
+        /* TODO: apparently, we don't have to release vbuf? */
     }
+
+    /* update queue fields if we emptied the list */
     if (q->head == NULL) {
         assert(q->count == 0);
         q->tail = NULL;
     }
 }
 
+/* Given a VC and a seq number, remove all items in send queue up to
+ * and including this seq number. */
 static inline void mv2_ud_process_ack(MPIDI_VC_t *vc, uint16_t acknum)
 {
-    vbuf *sendwin_head = vc->mrail.ud.send_window.head;
+    PRINT_DEBUG(DEBUG_UD_verbose>2,"ack recieved: %d next_to_ack: %d\n",
+        acknum, vc->mrail.seqnum_next_toack);
 
-    PRINT_DEBUG(DEBUG_UD_verbose>2,"ack recieved: %d next_to_ack: %d\n",acknum, vc->mrail.seqnum_next_toack);
+    /* get vbuf at head of send queue */
+    vbuf* sendwin_head = vc->mrail.ud.send_window.head;
 
+    /* while we have a vbuf, and while its seq number is before seq
+     * number, remove it from send queue and unack queue */
     while (sendwin_head != NULL && 
-            INCL_BETWEEN (acknum, sendwin_head->seqnum, vc->mrail.seqnum_next_tosend))
+           INCL_BETWEEN(acknum, sendwin_head->seqnum, vc->mrail.seqnum_next_tosend))
     {
+        /* the current vbuf has been ack'd, so remove it from the send
+         * window and also the unack'd list */
         mv2_ud_send_window_remove(&vc->mrail.ud.send_window, sendwin_head);
         mv2_ud_unack_queue_remove(&(proc.unack_queue), sendwin_head);
+
+        /* release vbuf */
         MRAILI_Process_send(sendwin_head);
+
+        /* get next packet in send window */
         sendwin_head = vc->mrail.ud.send_window.head;
     }
 
-    /*see if we can flush from ext window queue */
+    /* see if we can flush from ext window queue */
     if (vc->mrail.ud.ext_window.head != NULL && 
-            vc->mrail.ud.send_window.count < rdma_default_ud_sendwin_size) {
+        vc->mrail.ud.send_window.count < rdma_default_ud_sendwin_size)
+    {
         mv2_ud_flush_ext_window(vc);
     }    
 }
 
+/* add vbuf to tail of apprecv queue */
 inline void mv2_ud_apprecv_window_add(message_queue_t *q, vbuf *v)
 {
+    /* set next and prev pointers ton vbuf */
     v->apprecvwin_msg.next = v->apprecvwin_msg.prev = NULL;
 
+    /* for empty list, update head, otherwise update next pointer
+     * of last item in list to point to vbuf */
     if(q->head == NULL) {
         q->head = v;
     } else {
         (q->tail)->apprecvwin_msg.next = v;
     }
 
+    /* point tail to vbuf and increase count */
     q->tail = v;
     q->count++;
 }
 
+/* remove and return vbuf from apprecv queue */
 inline vbuf* mv2_ud_apprecv_window_retrieve_and_remove(message_queue_t *q)
 {
-    vbuf *v = q->head;
+    /* get pointer to first item in list */
+    vbuf* v = q->head;
 
+    /* return right away if it's empty */
     if (v == NULL) {
         return NULL;
     }
 
+    /* update head to point to next item and decrement length of queue */
     q->head = v->apprecvwin_msg.next;
     q->count--;
+
+    /* if we emptied the list, update the tail */
     if (q->head == NULL ) {
         q->tail = NULL;
         assert(q->count == 0);
     }
 
+    /* clear next pointer in vbuf before return it */
     v->apprecvwin_msg.next = NULL;
 
     return v;
@@ -100,54 +136,85 @@ inline vbuf* mv2_ud_apprecv_window_retrieve_and_remove(message_queue_t *q)
 
 static inline void mv2_ud_place_recvwin(vbuf *v)
 {
-    MPIDI_VC_t *vc;
-    int recv_win_start;
-    int recv_win_end;
     int ret;
 
-    vc = v->vc;
-    recv_win_start = vc->mrail.seqnum_next_torecv;
-    recv_win_end = (recv_win_start + rdma_default_ud_recvwin_size) % MAX_SEQ_NUM;
+    /* get VC vbuf is for */
+    MPIDI_VC_t* vc = v->vc;
 
-    /* check if the packet is in the window or not */
+    /* TODO: can we avoid this modulo division? */
+    /* determine bounds of recv window */
+    int recv_win_start = vc->mrail.seqnum_next_torecv;
+    int recv_win_end = (recv_win_start + rdma_default_ud_recvwin_size) % MAX_SEQ_NUM;
+
+    /* check if the packet seq num is in the window or not */
     if (INCL_BETWEEN(v->seqnum, recv_win_start, recv_win_end)) {
         if (v->seqnum == vc->mrail.seqnum_next_torecv) {
-            PRINT_DEBUG(DEBUG_UD_verbose>2,"get one with in-order seqnum:%d \n",v->seqnum);
-            /* process in-order message; add to app_recv window */
+            PRINT_DEBUG(DEBUG_UD_verbose>2,"get one with in-order seqnum:%d \n",
+              v->seqnum);
+
+            /* packet is the one we expect, add to tail of VC receive queue */
             mv2_ud_apprecv_window_add(&vc->mrail.app_recv_window, v);
+
+            /* update our ack seq number to attach to outgoing packets */
             vc->mrail.seqnum_next_toack = vc->mrail.seqnum_next_torecv;
+
+            /* increment the sequence number we expect to get next */
             ++vc->mrail.seqnum_next_torecv;
+
+            /* mark VC that we need to send an ack message */
             if (v->transport == IB_TRANSPORT_UD) {
                 MARK_ACK_REQUIRED(vc);
             }
         } else {
-            /* we are not in order */
-            PRINT_DEBUG(DEBUG_UD_verbose>1,"Got out-of-order packet recv:%d expected:%d\n",v->seqnum, vc->mrail.seqnum_next_torecv);
+            PRINT_DEBUG(DEBUG_UD_verbose>1,"Got out-of-order packet recv:%d expected:%d\n",
+                v->seqnum, vc->mrail.seqnum_next_torecv);
+
+            /* in this case, the packet does not match the expected
+             * sequence number, but it is within the window range,
+             * add it to our (out-of-order) receive queue */
             ret = mv2_ud_recv_window_add(&vc->mrail.ud.recv_window, v, vc->mrail.seqnum_next_torecv);
             if (ret == MSG_IN_RECVWIN) {
+                /* release buffer if it is already in queue */
                 MPIDI_CH3I_MRAIL_Release_vbuf(v);
             }
 
+            /* mark VC that we need to send an ack message */
             if (v->transport == IB_TRANSPORT_UD) {
                 MARK_ACK_REQUIRED(vc);
             }
         }
 
-        /* process in-order messages in recv windiw head */
-        while ( vc->mrail.ud.recv_window.head != NULL && 
-                (vc->mrail.ud.recv_window.head->seqnum == 
-                 vc->mrail.seqnum_next_torecv)) {
-            PRINT_DEBUG(DEBUG_UD_verbose>1,"get one with in-order seqnum:%d \n",vc->mrail.seqnum_next_torecv);
-            /* process in-order message; add to app_recv window */
+        /* if we have items at front of (out-of-order) receive queue
+         * whose seq num matches expected seq num, extract them from
+         * recv queue and add them to VC recv queue */
+        while (vc->mrail.ud.recv_window.head != NULL && 
+               vc->mrail.ud.recv_window.head->seqnum == vc->mrail.seqnum_next_torecv)
+        {
+            PRINT_DEBUG(DEBUG_UD_verbose>1,"get one with in-order seqnum:%d \n",
+                vc->mrail.seqnum_next_torecv);
+
+            /* move item to VC apprecv queue */
             mv2_ud_apprecv_window_add(&vc->mrail.app_recv_window, vc->mrail.ud.recv_window.head);
 
+            /* remove item from recv queue */
             mv2_ud_recv_window_remove(&vc->mrail.ud.recv_window);
+
+            /* update our ack seq number to attach to outgoing packets */
             vc->mrail.seqnum_next_toack = vc->mrail.seqnum_next_torecv;
+
+            /* increment the sequence number we expect to get next */
             ++vc->mrail.seqnum_next_torecv;
         }
     } else {
-        PRINT_DEBUG(DEBUG_UD_verbose>1,"Message is not in recv window seqnum:%d win start:%d win end:%d\n", v->seqnum, recv_win_start, recv_win_end);
+        PRINT_DEBUG(DEBUG_UD_verbose>1,"Message is not in recv window seqnum:%d win start:%d win end:%d\n",
+            v->seqnum, recv_win_start, recv_win_end);
+
+        /* we got a packet that is now within the receive window,
+         * just throw it away */
         MPIDI_CH3I_MRAIL_Release_vbuf(v);
+
+        /* TODO: why? */
+        /* mark VC that we need to send an ack message */
         if (v->transport == IB_TRANSPORT_UD) {
             MARK_ACK_REQUIRED(vc);
         }
@@ -312,8 +379,11 @@ void mv2_ud_resend(vbuf *v)
 
 void MRAILI_Process_recv(vbuf *v) 
 {
+    /* get pointer to packet header */
     MPIDI_CH3I_MRAILI_Pkt_comm_header *p = v->pheader;
 
+    /* read ack seq number from incoming packet and clear packets
+     * up to and including this number from our send queue */
     mv2_ud_process_ack(v->vc, p->acknum);
 
     if (IS_CNTL_MSG(p) &&
@@ -325,6 +395,9 @@ void MRAILI_Process_recv(vbuf *v)
     }
 
     MV2_UD_ACK_CREDIT_CHECK(((MPIDI_VC_t *)v->vc), v);
+
+    /* insert packet in receive queues (or throw it away if seq num
+     * is out of current range */
     mv2_ud_place_recvwin(v); 
 
 fn_exit:
@@ -335,5 +408,3 @@ void mv2_check_resend()
 {
     mv2_ud_unackq_traverse(&proc.unack_queue);
 }
-
-#endif
