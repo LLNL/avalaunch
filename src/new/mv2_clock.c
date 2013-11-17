@@ -53,6 +53,9 @@
 #define _BSD_SOURCE
 #include <ib_internal.h>
 
+/* clock_gettime */
+#include <time.h>
+
 static double global_mhz = 0.0;
 
 #ifndef DEBUG
@@ -223,7 +226,13 @@ void mv2_init_timers()
 
 double mv2_get_time_us()
 {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC_RAW, &t);
+    double time = ((double)t.tv_sec) * 1000000.0 + ((double)t.tv_nsec) / 1000.0;
+    return time;
+#if 0
     return (get_cycles()/global_mhz);
+#endif
 }
 
 #else
