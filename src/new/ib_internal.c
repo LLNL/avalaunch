@@ -15,6 +15,9 @@
 #include <mv2_spawn_net_ud_inline.h>
 #include <mv2_spawn_net_debug_utils.h>
 
+/* need to block SIGCHLD in comm_thread */
+#include <signal.h>
+
 int num_rdma_buffer;
 int rdma_num_rails = 1;
 int rdma_num_hcas = 1;
@@ -747,7 +750,22 @@ spawn_net_endpoint* mv2_init_ud()
         return SPAWN_NET_ENDPOINT_NULL;
     }
 
+    /* disable SIGCHLD while we start comm thread */
+    sigset_t sigmask;
+    sigemptyset(&sigmask);
+    sigaddset(&sigmask, SIGCHLD);
+    ret = pthread_sigmask(SIG_BLOCK, &sigmask, NULL);
+    if (ret != 0) {
+        SPAWN_ERR("Failed to block SIGCHLD (pthread_sigmask rc=%d %s)", ret, strerror(ret));
+    }
+
     pthread_create(&comm_thread, &attr, cm_timeout_handler, NULL);
+
+    /* reenable SIGCHLD in main thread */
+    ret = pthread_sigmask(SIG_UNBLOCK, &sigmask, NULL);
+    if (ret != 0) {
+        SPAWN_ERR("Failed to unblock SIGCHLD (pthread_sigmask rc=%d %s)", ret, strerror(ret));
+    }
 
     return ep;
 }
