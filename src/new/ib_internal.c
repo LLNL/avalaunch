@@ -856,15 +856,14 @@ static vbuf* packet_read(MPIDI_VC_t* vc)
     return v;
 }
 
-static int mv2_send_connect_message(MPIDI_VC_t *vc)
+/* given a virtual channel, a packet type, and payload, construct and
+ * send UD packet */
+static inline int mv2_send_packet(
+    MPIDI_VC_t* vc,
+    enum MPIDI_CH3_Pkt_types type,
+    const void* payload,
+    size_t payload_size)
 {
-    /* message payload, specify id we want remote side to use when
-     * sending to us followed by our lid/qp */
-    char* payload = SPAWN_STRDUPF("%06x:%04x:%06x",
-        vc->mrail.readid, local_ep_info.lid, local_ep_info.qpn
-    );
-    size_t payload_size = strlen(payload) + 1;
-
     /* grab a packet */
     vbuf* v = get_ud_vbuf();
     if (v == NULL) {
@@ -872,21 +871,25 @@ static int mv2_send_connect_message(MPIDI_VC_t *vc)
         return SPAWN_FAILURE;
     }
 
-    /* Offset for the packet header */
+    /* compute size of packet header */
     size_t header_size = sizeof(MPIDI_CH3I_MRAILI_Pkt_comm_header);
+
+    /* check that we have space for payload */
     assert((MRAIL_MAX_UD_SIZE - header_size) >= payload_size);
 
-    /* set header fields */
-    MPIDI_CH3I_MRAILI_Pkt_comm_header* connect_pkt = v->pheader;
-    MPIDI_Pkt_init(connect_pkt, MPIDI_CH3_PKT_UD_CONNECT);
-    connect_pkt->acknum = vc->mrail.seqnum_next_toack;
-    connect_pkt->rail   = v->rail;
+    /* set packet header fields */
+    MPIDI_CH3I_MRAILI_Pkt_comm_header* p = v->pheader;
+    MPIDI_Pkt_init(p, type);
+    p->acknum = vc->mrail.seqnum_next_toack;
+    p->rail   = v->rail;
 
     /* copy in payload */
-    char* ptr = (char*)v->buffer + header_size;
-    memcpy(ptr, payload, payload_size);
+    if (payload_size > 0) {
+        char* ptr = (char*)v->buffer + header_size;
+        memcpy(ptr, payload, payload_size);
+    }
 
-    /* compute packet size */
+    /* set  packet size */
     v->content_size = header_size + payload_size;
 
     /* prepare packet for send */
@@ -896,6 +899,24 @@ static int mv2_send_connect_message(MPIDI_VC_t *vc)
     proc.post_send(vc, v, 0, NULL);
 
     return SPAWN_SUCCESS;
+}
+
+static int mv2_send_connect_message(MPIDI_VC_t *vc)
+{
+    /* message payload: specify id we want remote side to use when
+     * sending to us followed by our lid/qp */
+    char* payload = SPAWN_STRDUPF("%06x:%04x:%06x",
+        vc->mrail.readid, local_ep_info.lid, local_ep_info.qpn
+    );
+    size_t payload_size = strlen(payload) + 1;
+
+    /* send the packet */
+    int rc = mv2_send_packet(vc, MPIDI_CH3_PKT_UD_CONNECT, payload, payload_size);
+
+    /* free payload memory */
+    spawn_free(&payload);
+
+    return rc;
 }
 
 /* blocks until element arrives on connect queue,
@@ -941,37 +962,13 @@ static int mv2_send_accept_message(MPIDI_VC_t *vc)
     char* payload = SPAWN_STRDUPF("%06x", vc->mrail.readid);
     size_t payload_size = strlen(payload) + 1;
 
-    /* grab a packet */
-    vbuf* v = get_ud_vbuf();
-    if (v == NULL) {
-        SPAWN_ERR("Failed to get vbuf for accept msg");
-        return SPAWN_FAILURE;
-    }
+    /* send the packet */
+    int rc = mv2_send_packet(vc, MPIDI_CH3_PKT_UD_ACCEPT, payload, payload_size);
 
-    /* Offset for the packet header */
-    size_t header_size = sizeof(MPIDI_CH3I_MRAILI_Pkt_comm_header);
-    assert((MRAIL_MAX_UD_SIZE - header_size) >= payload_size);
+    /* free payload memory */
+    spawn_free(&payload);
 
-    /* set header fields */
-    MPIDI_CH3I_MRAILI_Pkt_comm_header* connect_pkt = v->pheader;
-    MPIDI_Pkt_init(connect_pkt, MPIDI_CH3_PKT_UD_ACCEPT);
-    connect_pkt->acknum = vc->mrail.seqnum_next_toack;
-    connect_pkt->rail   = v->rail;
-
-    /* copy in payload */
-    char* ptr = (char*)v->buffer + header_size;
-    memcpy(ptr, payload, payload_size);
-
-    /* compute packet size */
-    v->content_size = header_size + payload_size;
-
-    /* prepare packet for send */
-    vbuf_init_send(v, v->content_size, v->rail);
-
-    /* and send it */
-    proc.post_send(vc, v, 0, NULL);
-
-    return SPAWN_SUCCESS;
+    return rc;
 }
 
 static int mv2_recv_accept_message(MPIDI_VC_t* vc)
@@ -1121,37 +1118,14 @@ int mv2_ud_send(MPIDI_VC_t *vc, const void* buf, size_t size)
             bytes = payload_size;
         }
 
-        /* get a packet */
-        vbuf* v = get_ud_vbuf();
-        if (v == NULL) {
-            /* TODO: need to worry about this? */
-            SPAWN_ERR("Failed to get vbuf for sending");
-            return SPAWN_FAILURE;
-        }
-
-        /* fill in packet header fields */
-        MPIDI_CH3I_MRAILI_Pkt_comm_header* pkt = v->pheader;
-        MPIDI_Pkt_init(pkt, MPIDI_CH3_PKT_UD_DATA);
-        pkt->acknum = vc->mrail.seqnum_next_toack;
-        pkt->rail   = v->rail;
-
-        /* fill in the message payload */
-        char* ptr  = (char*)v->buffer + header_size;
+        /* get pointer to data */
         char* data = (char*)buf + nwritten;
-        memcpy(ptr, data, bytes);
 
-        /* set packet size */
-        v->content_size = header_size + bytes;
-
-        /* prepare packet for send */
-        vbuf_init_send(v, v->content_size, v->rail);
-
-        if (vc->mrail.state != MRAILI_UD_CONNECTED) {
-            /* TODO: what's this do? */
-            mv2_ud_ext_window_add(&vc->mrail.ud.ext_window, v);
-        } else {
-            /* send packet */
-            proc.post_send(vc, v, 0, NULL);
+        /* send packet */
+        int tmp_rc = mv2_send_packet(vc, MPIDI_CH3_PKT_UD_DATA, data, bytes);
+        if (tmp_rc != SPAWN_SUCCESS) {
+            rc = tmp_rc;
+            break;
         }
 
         /* go to next part of message */
