@@ -1445,7 +1445,7 @@ session_init (int argc, char * argv[])
         if (value != NULL) {
             strmap_set(s->params, "LOCAL", value);
         } else {
-            strmap_set(s->params, "LOCAL", "sh");
+            strmap_set(s->params, "LOCAL", "direct");
         }
         value = strmap_get(s->params, "LOCAL");
         if (strcmp(value, "sh")     != 0 &&
