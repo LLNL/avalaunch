@@ -1075,9 +1075,6 @@ spawn_net_channel* mv2_ep_accept()
     MPIDI_VC_t* vc = vc_alloc();
 
     /* record lid/qp in VC */
-    mv2_ud_exch_info_t ep_info;
-    ep_info.lid = lid;
-    ep_info.qpn = qpn;
     vc_set_addr(vc, &ep_info, RDMA_DEFAULT_PORT);
 
     /* record remote id as write id */
