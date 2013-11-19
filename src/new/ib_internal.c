@@ -824,9 +824,9 @@ void MPIDI_CH3I_MRAIL_Release_vbuf(vbuf * v)
     }
 }
 
+/* empty all events from completion queue queue */
 static void drain_cq_events()
 {
-    /* empty all events from queue */
     int rc = mv2_poll_cq();
     while (rc == 1) {
         rc = mv2_poll_cq();
@@ -843,6 +843,10 @@ static vbuf* packet_read(MPIDI_VC_t* vc)
     /* look for entry in apprecv queue */
     vbuf* v = mv2_ud_apprecv_window_retrieve_and_remove(&vc->mrail.app_recv_window);
     while (v == NULL) {
+        /* TODO: at this point, we should block for incoming event */
+
+        /* release the lock for some time to let other threads make
+         * progress */
         comm_unlock();
 //        nanosleep(&cm_timeout, &remain);
         comm_lock();
@@ -858,7 +862,7 @@ static vbuf* packet_read(MPIDI_VC_t* vc)
 
 /* given a virtual channel, a packet type, and payload, construct and
  * send UD packet */
-static inline int mv2_send_packet(
+static inline int packet_send(
     MPIDI_VC_t* vc,
     enum MPIDI_CH3_Pkt_types type,
     const void* payload,
@@ -911,7 +915,7 @@ static int mv2_send_connect_message(MPIDI_VC_t *vc)
     size_t payload_size = strlen(payload) + 1;
 
     /* send the packet */
-    int rc = mv2_send_packet(vc, MPIDI_CH3_PKT_UD_CONNECT, payload, payload_size);
+    int rc = packet_send(vc, MPIDI_CH3_PKT_UD_CONNECT, payload, payload_size);
 
     /* free payload memory */
     spawn_free(&payload);
@@ -928,6 +932,8 @@ static vbuf* mv2_recv_connect_message()
 
     /* wait until we see at item at head of connect queue */
     while (connect_head == NULL) {
+        /* TODO: at this point, we should block for incoming event */
+
         comm_unlock();
 //        nanosleep(&cm_timeout, &remain);
         comm_lock();
@@ -963,7 +969,7 @@ static int mv2_send_accept_message(MPIDI_VC_t *vc)
     size_t payload_size = strlen(payload) + 1;
 
     /* send the packet */
-    int rc = mv2_send_packet(vc, MPIDI_CH3_PKT_UD_ACCEPT, payload, payload_size);
+    int rc = packet_send(vc, MPIDI_CH3_PKT_UD_ACCEPT, payload, payload_size);
 
     /* free payload memory */
     spawn_free(&payload);
@@ -989,9 +995,8 @@ static int mv2_recv_accept_message(MPIDI_VC_t* vc)
     }
 
     /* TODO: avoid casting up from int here */
-    uint64_t writeid = (uint64_t) id;
-
     /* set our write id */
+    uint64_t writeid = (uint64_t) id;
     vc->mrail.writeid = writeid;
 
     /* put vbuf back on free list */
@@ -1004,7 +1009,6 @@ spawn_net_channel* mv2_ep_connect(const char *name)
 {
     /* extract lid and queue pair address from endpoint name */
     unsigned int lid, qpn;
-
     int parsed = sscanf(name, "IBUD:%04x:%06x", &lid, &qpn);
     if (parsed != 2) {
         SPAWN_ERR("Couldn't parse ep info from %s", name);
@@ -1055,13 +1059,17 @@ spawn_net_channel* mv2_ep_accept()
     char* payload = PKT_DATA_OFFSET(v, header_size);
 
     /* get id and endpoint name from message payload */
-    int id, lid, qpn;
+    unsigned int id, lid, qpn;
     int parsed = sscanf(payload, "%06x:%04x:%06x", &id, &lid, &qpn);
     if (parsed != 3) {
         SPAWN_ERR("Couldn't parse ep info from %s", payload);
         return SPAWN_NET_CHANNEL_NULL;
     }
-    uint64_t writeid = id;
+
+    /* store lid and queue pair */
+    mv2_ud_exch_info_t ep_info;
+    ep_info.lid = lid;
+    ep_info.qpn = qpn;
 
     /* allocate new vc */
     MPIDI_VC_t* vc = vc_alloc();
@@ -1073,12 +1081,15 @@ spawn_net_channel* mv2_ep_accept()
     vc_set_addr(vc, &ep_info, RDMA_DEFAULT_PORT);
 
     /* record remote id as write id */
+    uint64_t writeid = (uint64_t) id;
     vc->mrail.writeid = writeid;
 
-    /* Set VC */
+    /* record pointer to VC in vbuf */
     v->vc = vc;
+
     /* put vbuf back on free list */
     MRAILI_Process_recv(v);
+
     /* Increment the next expected seq num */
     ++vc->mrail.seqnum_next_torecv;
 
@@ -1122,7 +1133,7 @@ int mv2_ud_send(MPIDI_VC_t *vc, const void* buf, size_t size)
         char* data = (char*)buf + nwritten;
 
         /* send packet */
-        int tmp_rc = mv2_send_packet(vc, MPIDI_CH3_PKT_UD_DATA, data, bytes);
+        int tmp_rc = packet_send(vc, MPIDI_CH3_PKT_UD_DATA, data, bytes);
         if (tmp_rc != SPAWN_SUCCESS) {
             rc = tmp_rc;
             break;
