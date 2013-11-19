@@ -90,15 +90,15 @@ static void vc_init(MPIDI_VC_t* vc)
 {
     vc->mrail.state = MRAILI_INIT;
 
-    vc->mrail.ack_need_tosend = 0;
+    vc->mrail.ack_need_tosend    = 0;
     vc->mrail.seqnum_next_tosend = 0;
     vc->mrail.seqnum_next_torecv = 0;
-    vc->mrail.seqnum_next_toack = UINT16_MAX;
+    vc->mrail.seqnum_next_toack  = UINT16_MAX;
 
-    vc->mrail.ud.cntl_acks = 0; 
-    vc->mrail.ud.ack_pending = 0;
-    vc->mrail.ud.resend_count = 0;
-    vc->mrail.ud.total_messages = 0;
+    vc->mrail.ud.cntl_acks          = 0; 
+    vc->mrail.ud.ack_pending        = 0;
+    vc->mrail.ud.resend_count       = 0;
+    vc->mrail.ud.total_messages     = 0;
     vc->mrail.ud.ext_win_send_count = 0;
 
     MESSAGE_QUEUE_INIT(&(vc->mrail.ud.send_window));
@@ -221,6 +221,19 @@ typedef struct vbuf_list_t {
 
 static vbuf_list* connect_head = NULL;
 static vbuf_list* connect_tail = NULL;
+
+/* tracks list of accepted connection requests, which is used to
+ * filter duplicate connection requests */
+typedef struct connected_list_t {
+    unsigned int lid; /* remote LID */
+    unsigned int qpn; /* remote Queue Pair Number */
+    unsigned int id;  /* write id we use to write to remote side */
+    MPIDI_VC_t*  vc;  /* open vc to remote side */
+    struct connected_list_t* next;
+} connected_list;
+
+static connected_list* connected_head = NULL;
+static connected_list* connected_tail = NULL;
 
 static int mv2_post_ud_recv_buffers(int num_bufs, mv2_ud_ctx_t *ud_ctx)
 {
@@ -399,6 +412,16 @@ static int mv2_wait_on_channel()
     mv2_poll_cq();
 
     return 0;
+}
+
+/* empty all events from completion queue queue */
+static void drain_cq_events()
+{
+    int rc = mv2_poll_cq();
+    while (rc == 1) {
+        rc = mv2_poll_cq();
+    }
+    return;
 }
 
 /* ===== Begin: Initialization functions ===== */
@@ -824,16 +847,6 @@ void MPIDI_CH3I_MRAIL_Release_vbuf(vbuf * v)
     }
 }
 
-/* empty all events from completion queue queue */
-static void drain_cq_events()
-{
-    int rc = mv2_poll_cq();
-    while (rc == 1) {
-        rc = mv2_poll_cq();
-    }
-    return;
-}
-
 /* blocks until packet comes in on specified VC */
 static vbuf* packet_read(MPIDI_VC_t* vc)
 {
@@ -871,7 +884,7 @@ static inline int packet_send(
     /* grab a packet */
     vbuf* v = get_ud_vbuf();
     if (v == NULL) {
-        SPAWN_ERR("Failed to get vbuf for connect msg");
+        SPAWN_ERR("Failed to get vbuf");
         return SPAWN_FAILURE;
     }
 
@@ -893,7 +906,7 @@ static inline int packet_send(
         memcpy(ptr, payload, payload_size);
     }
 
-    /* set  packet size */
+    /* set packet size */
     v->content_size = header_size + payload_size;
 
     /* prepare packet for send */
@@ -903,24 +916,6 @@ static inline int packet_send(
     proc.post_send(vc, v, 0, NULL);
 
     return SPAWN_SUCCESS;
-}
-
-static int mv2_send_connect_message(MPIDI_VC_t *vc)
-{
-    /* message payload: specify id we want remote side to use when
-     * sending to us followed by our lid/qp */
-    char* payload = SPAWN_STRDUPF("%06x:%04x:%06x",
-        vc->mrail.readid, local_ep_info.lid, local_ep_info.qpn
-    );
-    size_t payload_size = strlen(payload) + 1;
-
-    /* send the packet */
-    int rc = packet_send(vc, MPIDI_CH3_PKT_UD_CONNECT, payload, payload_size);
-
-    /* free payload memory */
-    spawn_free(&payload);
-
-    return rc;
 }
 
 /* blocks until element arrives on connect queue,
@@ -961,22 +956,6 @@ static vbuf* mv2_recv_connect_message()
     return v;
 }
 
-static int mv2_send_accept_message(MPIDI_VC_t *vc)
-{
-    /* message payload, specify id we want remote side to use when
-     * sending to us followed by our lid/qp */
-    char* payload = SPAWN_STRDUPF("%06x", vc->mrail.readid);
-    size_t payload_size = strlen(payload) + 1;
-
-    /* send the packet */
-    int rc = packet_send(vc, MPIDI_CH3_PKT_UD_ACCEPT, payload, payload_size);
-
-    /* free payload memory */
-    spawn_free(&payload);
-
-    return rc;
-}
-
 static int mv2_recv_accept_message(MPIDI_VC_t* vc)
 {
     /* first incoming packet should be accept */
@@ -991,6 +970,7 @@ static int mv2_recv_accept_message(MPIDI_VC_t* vc)
     int parsed = sscanf(payload, "%06x", &id);
     if (parsed != 1) {
         SPAWN_ERR("Couldn't parse write id from accept message");
+        MRAILI_Release_vbuf(v);
         return SPAWN_FAILURE;
     }
 
@@ -1026,8 +1006,18 @@ spawn_net_channel* mv2_ep_connect(const char *name)
     /* point channel to remote endpoint */
     vc_set_addr(vc, &ep_info, RDMA_DEFAULT_PORT);
 
-    /* send connect message to destination */
-    mv2_send_connect_message(vc);
+    /* build payload for connect message, specify id we want remote
+     * side to use when sending to us followed by our lid/qp */
+    char* payload = SPAWN_STRDUPF("%06x:%04x:%06x",
+        vc->mrail.readid, local_ep_info.lid, local_ep_info.qpn
+    );
+    size_t payload_size = strlen(payload) + 1;
+
+    /* send connect packet */
+    int rc = packet_send(vc, MPIDI_CH3_PKT_UD_CONNECT, payload, payload_size);
+
+    /* free payload memory */
+    spawn_free(&payload);
 
     /* wait for accept message and set vc->mrail.writeid */
     mv2_recv_accept_message(vc);
@@ -1051,28 +1041,79 @@ spawn_net_channel* mv2_ep_connect(const char *name)
 
 spawn_net_channel* mv2_ep_accept()
 {
+    /* NOTE: If we're slow to connect, the process that sent us the
+     * connect packet may have timed out and sent a duplicate request.
+     * Both packets may be in our connection request queue, and we
+     * want to ignore any duplicates.  To do this, we keep track of
+     * current connections by recording remote lid/qpn/writeid and
+     * then silently drop extras. */
+
     /* wait for connect message */
-    vbuf* v = mv2_recv_connect_message();
-
-    /* get pointer to payload */
-    size_t header_size = sizeof(MPIDI_CH3I_MRAILI_Pkt_comm_header);
-    char* payload = PKT_DATA_OFFSET(v, header_size);
-
-    /* get id and endpoint name from message payload */
+    vbuf* v = NULL;
     unsigned int id, lid, qpn;
-    int parsed = sscanf(payload, "%06x:%04x:%06x", &id, &lid, &qpn);
-    if (parsed != 3) {
-        SPAWN_ERR("Couldn't parse ep info from %s", payload);
-        return SPAWN_NET_CHANNEL_NULL;
+    while (v == NULL ) {
+        /* get next vbuf from connection request queue */
+        v = mv2_recv_connect_message();
+
+        /* get pointer to payload */
+        size_t header_size = sizeof(MPIDI_CH3I_MRAILI_Pkt_comm_header);
+        char* connect_payload = PKT_DATA_OFFSET(v, header_size);
+
+        /* TODO: read lid/qpn from vbuf and not payload to avoid
+         * spoofing */
+
+        /* get id and endpoint name from message payload */
+        int parsed = sscanf(connect_payload, "%06x:%04x:%06x", &id, &lid, &qpn);
+        if (parsed != 3) {
+            SPAWN_ERR("Couldn't parse ep info from %s", connect_payload);
+            return NULL;
+        }
+
+        /* check that we don't already have a matching connection */
+        connected_list* elem = connected_head;
+        while (elem != NULL) {
+            /* check whether this connect request matches one we're
+             * already connected to */
+            if (elem->lid == lid &&
+                elem->qpn == qpn &&
+                elem->id  == id)
+            {
+                /* we're already connected to this process, free the
+                 * vbuf and look for another request message */
+                MRAILI_Release_vbuf(v);
+                v = NULL;
+                break;
+            }
+
+            /* no match so far, try the next item in connected list */
+            elem = elem->next;
+        }
     }
+
+    /* allocate new vc */
+    MPIDI_VC_t* vc = vc_alloc();
+
+    /* allocate and initialize new item for connected list */
+    connected_list* elem = (connected_list*) SPAWN_MALLOC(sizeof(connected_list));
+    elem->lid  = lid;
+    elem->qpn  = qpn;
+    elem->id   = id;
+    elem->vc   = vc;
+    elem->next = NULL;
+
+    /* append item to connected list */
+    if (connected_head == NULL) {
+        connected_head = elem;
+    }
+    if (connected_tail != NULL) {
+        connected_tail->next = elem;
+    }
+    connected_tail = elem;
 
     /* store lid and queue pair */
     mv2_ud_exch_info_t ep_info;
     ep_info.lid = lid;
     ep_info.qpn = qpn;
-
-    /* allocate new vc */
-    MPIDI_VC_t* vc = vc_alloc();
 
     /* record lid/qp in VC */
     vc_set_addr(vc, &ep_info, RDMA_DEFAULT_PORT);
@@ -1081,17 +1122,25 @@ spawn_net_channel* mv2_ep_accept()
     uint64_t writeid = (uint64_t) id;
     vc->mrail.writeid = writeid;
 
-    /* record pointer to VC in vbuf */
+    /* record pointer to VC in vbuf (needed by Process_recv) */
     v->vc = vc;
 
     /* put vbuf back on free list */
     MRAILI_Process_recv(v);
 
     /* Increment the next expected seq num */
-    ++vc->mrail.seqnum_next_torecv;
+    vc->mrail.seqnum_next_torecv++;
 
-    /* send accept message */
-    mv2_send_accept_message(vc);
+    /* build accept message, specify id we want remote side to use when
+     * sending to us followed by our lid/qp */
+    char* payload = SPAWN_STRDUPF("%06x", vc->mrail.readid);
+    size_t payload_size = strlen(payload) + 1;
+
+    /* send the accept packet */
+    int rc = packet_send(vc, MPIDI_CH3_PKT_UD_ACCEPT, payload, payload_size);
+
+    /* free payload memory */
+    spawn_free(&payload);
 
     /* mark vc as connected */
     vc->mrail.state = MRAILI_UD_CONNECTED;

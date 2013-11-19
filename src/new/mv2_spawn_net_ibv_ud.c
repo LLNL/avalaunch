@@ -246,7 +246,7 @@ int post_ud_send(MPIDI_VC_t* vc, vbuf* v, int rail, mv2_ud_ctx_t *send_ud_ctx)
     v->vc = (void *)vc;
 
     /* write rail id and send context into packet header */
-    MPIDI_CH3I_MRAILI_Pkt_comm_header *p = v->pheader;
+    MPIDI_CH3I_MRAILI_Pkt_comm_header* p = v->pheader;
     p->rail = rail;
     p->src.rank = vc->mrail.writeid;
 
