@@ -272,18 +272,22 @@ static int mv2_post_ud_recv_buffers(int num_bufs, mv2_ud_ctx_t *ud_ctx)
 /* iterate over all active vc's and send ACK messages if necessary */
 static inline void mv2_ud_send_acks()
 {
-    int i;
-    int size = ud_vc_info_id;
-    for (i = 0; i < size; i++) {
+    /* walk list of connected virtual channels */
+    connected_list* elem = connected_head;
+    while (elem != NULL) {
         /* get pointer to vc */
-        MPIDI_VC_t *vc;
-        MV2_Get_vc(i, &vc);
+        MPIDI_VC_t* vc = elem->vc;
 
         /* send ack if necessary */
         if (vc->mrail.ack_need_tosend) {
             mv2_send_explicit_ack(vc);
         }
+
+        /* go to next virtual channel */
+        elem = elem->next;
     }
+
+    return;
 }
 
 static int mv2_poll_cq()
@@ -344,16 +348,16 @@ static int mv2_poll_cq()
                 if (p->type != MPIDI_CH3_PKT_UD_CONNECT) {
                     /* src field is valid (unless we have a connect message),
                      * use src id to get vc */
-                    MPIDI_VC_t* vc;
-                    MV2_Get_vc(p->src.rank, &vc);
-
-                    /* check that vc is valid */
-                    if (vc == NULL) {
-                        //SPAWN_ERR("Incoming packet conext invalid");
+                    uint64_t index = p->src.rank;
+                    if (index >= ud_vc_info_id) {
+                        SPAWN_ERR("Packet conext invalid");
                         MRAILI_Release_vbuf(v);
                         v = NULL;
                         break;
                     }
+
+                    /* get pointer to vc */
+                    MPIDI_VC_t* vc = ud_vc_info[index];
 
                     /* for UD packets, check that source lid and source
                      * qpn match expected vc to avoid spoofing */
@@ -362,7 +366,7 @@ static int mv2_poll_cq()
                         if (ud_info->lid != wc->slid ||
                             ud_info->qpn != wc->src_qp)
                         {
-                            //SPAWN_ERR("Packet source lid/qpn do not match expected values");
+                            SPAWN_ERR("Packet source lid/qpn do not match expected values");
                             MRAILI_Release_vbuf(v);
                             v = NULL;
                             break;

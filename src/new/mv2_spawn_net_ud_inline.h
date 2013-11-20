@@ -43,8 +43,6 @@ enum {
     }                                                               \
 }
 
-#define MV2_Get_vc(index_, vcp_) *(vcp_) = ud_vc_info[index_]
-
 static inline void mv2_ud_ext_sendq_queue(message_queue_t *q, vbuf *v)
 {
     v->desc.next = NULL;
