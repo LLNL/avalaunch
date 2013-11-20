@@ -119,6 +119,8 @@ do {                                                \
     }                                               \
 } while (0)
 
+/* ibverbs reserves the first 40 bytes of each UD packet, this may
+ * sometimes contain valid data for a Global Routine Header */
 #define MV2_UD_GRH_LEN (40)
 
 #define PKT_TRANSPORT_OFFSET(_v) ((_v->transport == IB_TRANSPORT_UD) ? MV2_UD_GRH_LEN : 0)

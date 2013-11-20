@@ -72,18 +72,6 @@ static pthread_t comm_thread;
 
 void* cm_timeout_handler(void *arg);
 
-#define MV2_UD_SEND_ACKS() {            \
-    int i;                              \
-    MPIDI_VC_t *vc;                     \
-    int size = ud_vc_info_id;           \
-    for (i=0; i<size; i++) {            \
-        MV2_Get_vc(i, &vc);             \
-        if (vc->mrail.ack_need_tosend) {\
-            mv2_send_explicit_ack(vc);  \
-        }                               \
-    }                                   \
-}
-
 /*******************************************
  * Manage VC objects
  ******************************************/
@@ -98,15 +86,16 @@ static void vc_init(MPIDI_VC_t* vc)
     vc->mrail.seqnum_next_torecv = 0;
     vc->mrail.seqnum_next_toack  = UINT16_MAX;
 
-    vc->mrail.ud.cntl_acks          = 0; 
-    vc->mrail.ud.ack_pending        = 0;
-    vc->mrail.ud.resend_count       = 0;
-    vc->mrail.ud.total_messages     = 0;
-    vc->mrail.ud.ext_win_send_count = 0;
+    mv2_ud_vc_info_t* ud_info = &vc->mrail.ud;
+    ud_info->cntl_acks          = 0; 
+    ud_info->ack_pending        = 0;
+    ud_info->resend_count       = 0;
+    ud_info->total_messages     = 0;
+    ud_info->ext_win_send_count = 0;
 
-    MESSAGE_QUEUE_INIT(&(vc->mrail.ud.send_window));
-    MESSAGE_QUEUE_INIT(&(vc->mrail.ud.ext_window));
-    MESSAGE_QUEUE_INIT(&(vc->mrail.ud.recv_window));
+    MESSAGE_QUEUE_INIT(&(ud_info->send_window));
+    MESSAGE_QUEUE_INIT(&(ud_info->ext_window));
+    MESSAGE_QUEUE_INIT(&(ud_info->recv_window));
     MESSAGE_QUEUE_INIT(&(vc->mrail.app_recv_window));
 
     return;
@@ -217,13 +206,15 @@ static void vc_free(MPIDI_VC_t** pvc)
 
 /* this queue tracks a list of pending connect messages,
  * the accept function pulls items from this list */
-typedef struct vbuf_list_t {
-    vbuf* v;
-    struct vbuf_list_t* next;
-} vbuf_list;
+typedef struct connect_list_t {
+    vbuf* v;      /* pointer to vbuf for this message */
+    uint32_t lid; /* source lid */
+    uint32_t qpn; /* source queue pair number */
+    struct connect_list_t* next;
+} connect_list;
 
-static vbuf_list* connect_head = NULL;
-static vbuf_list* connect_tail = NULL;
+static connect_list* connect_head = NULL;
+static connect_list* connect_tail = NULL;
 
 /* tracks list of accepted connection requests, which is used to
  * filter duplicate connection requests */
@@ -278,6 +269,23 @@ static int mv2_post_ud_recv_buffers(int num_bufs, mv2_ud_ctx_t *ud_ctx)
     return count;
 }
 
+/* iterate over all active vc's and send ACK messages if necessary */
+static inline void mv2_ud_send_acks()
+{
+    int i;
+    int size = ud_vc_info_id;
+    for (i = 0; i < size; i++) {
+        /* get pointer to vc */
+        MPIDI_VC_t *vc;
+        MV2_Get_vc(i, &vc);
+
+        /* send ack if necessary */
+        if (vc->mrail.ack_need_tosend) {
+            mv2_send_explicit_ack(vc);
+        }
+    }
+}
+
 static int mv2_poll_cq()
 {
     /* get pointer to completion queue */
@@ -305,10 +313,10 @@ static int mv2_poll_cq()
             exit(-1);
         }
 
-        /* Get VBUF */
+        /* get vbuf associated with this work request */
         vbuf* v = (vbuf *) ((uintptr_t) wc->wr_id);
 
-        /* get packet header */
+        /* get pointer to packet header in vbuf */
         SET_PKT_LEN_HEADER(v, wcs[i]);
         SET_PKT_HEADER_OFFSET(v);
         MPIDI_CH3I_MRAILI_Pkt_comm_header* p = v->pheader;
@@ -339,12 +347,30 @@ static int mv2_poll_cq()
                     MPIDI_VC_t* vc;
                     MV2_Get_vc(p->src.rank, &vc);
 
-                    /* TODO: should check that source lid (wc.slid)
-                     * and source qpn (wc.src_qp) match expected vc
-                     * to avoid spoofing */
+                    /* check that vc is valid */
+                    if (vc == NULL) {
+                        //SPAWN_ERR("Incoming packet conext invalid");
+                        MRAILI_Release_vbuf(v);
+                        v = NULL;
+                        break;
+                    }
 
-                    v->vc   = vc;
-                    v->rail = p->rail;
+                    /* for UD packets, check that source lid and source
+                     * qpn match expected vc to avoid spoofing */
+                    if (v->transport == IB_TRANSPORT_UD) {
+                        mv2_ud_vc_info_t* ud_info = &vc->mrail.ud;
+                        if (ud_info->lid != wc->slid ||
+                            ud_info->qpn != wc->src_qp)
+                        {
+                            //SPAWN_ERR("Packet source lid/qpn do not match expected values");
+                            MRAILI_Release_vbuf(v);
+                            v = NULL;
+                            break;
+                        }
+                    }
+
+                    v->vc     = vc;
+                    v->rail   = p->rail;
                     v->seqnum = p->seqnum;
 
                     MRAILI_Process_recv(v);
@@ -353,13 +379,11 @@ static int mv2_poll_cq()
                      * so we can't associate msg with a vc yet, we stick this
                      * on the queue that accept looks to later */
 
-                    /* TODO: record source lid (wc.slid) and source
-                     * qpn (wc.src_qp) with connect request to later
-                     * associate with vc to check for spoofing in recvs */
-
                     /* allocate and initialize new element for connect queue */
-                    vbuf_list* elem = (vbuf_list*) SPAWN_MALLOC(sizeof(vbuf_list));
-                    elem->v = v;
+                    connect_list* elem = (connect_list*) SPAWN_MALLOC(sizeof(connect_list));
+                    elem->v    = v;          /* record pointer to vbuf */
+                    elem->lid  = wc->slid;   /* record source lid */
+                    elem->qpn  = wc->src_qp; /* record source qpn */
                     elem->next = NULL;
 
                     /* append elem to connect queue */
@@ -397,7 +421,7 @@ static int mv2_wait_on_channel()
     long delay = time - rdma_ud_last_check;
     if (delay > rdma_ud_progress_timeout) {
         mv2_check_resend();
-        MV2_UD_SEND_ACKS();
+        mv2_ud_send_acks();
         rdma_ud_last_check = mv2_get_time_us();
     }
 
@@ -838,7 +862,7 @@ void* cm_timeout_handler(void *arg)
             /* send explicit acks out on all vc's if we need to,
              * this ensures acks flow out even if main thread is
              * busy doing other work */
-            MV2_UD_SEND_ACKS();
+            mv2_ud_send_acks();
 
             /* process any messages that may have come in, we may
              * clear messages we'd otherwise try to resend below */
@@ -975,7 +999,7 @@ static vbuf* mv2_recv_connect_message()
     }
 
     /* get pointer to element */
-    vbuf_list* elem = connect_head;
+    connect_list* elem = connect_head;
 
     /* extract element from queue */
     connect_head = elem->next;
