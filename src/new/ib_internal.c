@@ -289,7 +289,7 @@ static int mv2_poll_cq()
 
     /* check that we didn't get an error polling */
     if (ne < 0) {
-        SPAWN_ERR("poll cq error (ibv_poll_cq rc=%d %s)", ne, strerror(ne));
+        SPAWN_ERR("poll cq error (ibv_poll_cq rc=%d)", ne);
         exit(-1);
     }
 
@@ -354,7 +354,7 @@ static int mv2_poll_cq()
                      * on the queue that accept looks to later */
 
                     /* TODO: record source lid (wc.slid) and source
-                     * qpn (wc.src_qp) with connect request to laster
+                     * qpn (wc.src_qp) with connect request to later
                      * associate with vc to check for spoofing in recvs */
 
                     /* allocate and initialize new element for connect queue */
@@ -382,7 +382,7 @@ static int mv2_poll_cq()
                 }
                 break;
             default:
-                SPAWN_ERR("Invalid opcode from ibv_poll_cq() %d", wc->opcode);
+                SPAWN_ERR("Invalid opcode from ibv_poll_cq: %d", wc->opcode);
                 break;
         }
     }
