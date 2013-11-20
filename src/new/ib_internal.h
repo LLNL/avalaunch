@@ -137,8 +137,6 @@ typedef struct _mv2_hca_info_t {
     struct ibv_device_attr device_attr;
 } mv2_hca_info_t;
 
-extern int my_pg_rank;
-extern int my_pg_size;
 extern mv2_hca_info_t g_hca_info;
 extern int rdma_num_hcas;
 extern int rdma_num_rails;
@@ -151,8 +149,6 @@ extern uint8_t rdma_enable_only_ud;
 extern uint8_t rdma_use_ud_zcopy;
 extern uint16_t rdma_default_ud_mtu;
 extern uint32_t rdma_hybrid_enable_threshold;
-extern uint32_t rdma_default_max_ud_send_wqe;
-extern uint32_t rdma_default_max_ud_recv_wqe;
 extern uint32_t rdma_default_ud_sendwin_size;
 extern uint32_t rdma_default_ud_recvwin_size;
 extern long rdma_ud_progress_timeout;

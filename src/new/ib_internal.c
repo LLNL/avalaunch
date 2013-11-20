@@ -240,17 +240,9 @@ static connected_list* connected_tail = NULL;
 
 static int mv2_post_ud_recv_buffers(int num_bufs, mv2_ud_ctx_t *ud_ctx)
 {
-    /* check that we don't exceed the max number of work queue elements */
-    if (num_bufs > rdma_default_max_ud_recv_wqe) {
-        ibv_va_error_abort(
-                GEN_ASSERT_ERR,
-                "Try to post %d to UD recv buffers, max %d\n",
-                num_bufs, rdma_default_max_ud_recv_wqe);
-    }
-
     /* post our vbufs */
-    int i;
-    for (i = 0; i < num_bufs; ++i) {
+    int count = 0;
+    while (count < num_bufs) {
         /* get a new vbuf */
         vbuf* v = get_ud_vbuf();
         if (v == NULL) {
@@ -263,7 +255,7 @@ static int mv2_post_ud_recv_buffers(int num_bufs, mv2_ud_ctx_t *ud_ctx)
 
         /* post vbuf to receive queue */
         int ret;
-        struct ibv_recv_wr* bad_wr = NULL;
+        struct ibv_recv_wr* bad_wr;
         if (ud_ctx->qp->srq) {
             ret = ibv_post_srq_recv(ud_ctx->qp->srq, &v->desc.u.rr, &bad_wr);
         } else {
@@ -275,11 +267,15 @@ static int mv2_post_ud_recv_buffers(int num_bufs, mv2_ud_ctx_t *ud_ctx)
             MRAILI_Release_vbuf(v);
             break;
         }
+
+        /* prepare next recv */
+        count++;
     }
 
-    PRINT_DEBUG(DEBUG_UD_verbose>0 ,"Posted %d buffers of size:%d to UD QP\n",num_bufs, rdma_default_ud_mtu);
+    PRINT_DEBUG(DEBUG_UD_verbose>0 ,"Posted %d buffers of size:%d to UD QP\n",
+        num_bufs, rdma_default_ud_mtu);
 
-    return i;
+    return count;
 }
 
 static int mv2_poll_cq()
@@ -288,28 +284,36 @@ static int mv2_poll_cq()
     struct ibv_cq* cq = g_hca_info.cq_hndl;
 
     /* poll cq */
-    struct ibv_wc wc;
-    int ne = ibv_poll_cq(cq, 1, &wc);
+    struct ibv_wc wcs[64];
+    int ne = ibv_poll_cq(cq, 64, wcs);
 
-    /* check return code */
-    if (ne == 1) {
-        /* we got an entry, process it */
+    /* check that we didn't get an error polling */
+    if (ne < 0) {
+        SPAWN_ERR("poll cq error (ibv_poll_cq rc=%d %s)", ne, strerror(ne));
+        exit(-1);
+    }
+
+    /* process entries if we got any */
+    int i;
+    for (i = 0; i < ne; i++) {
+        /* get pointer to next entry */
+        struct ibv_wc* wc = &wcs[i];
 
         /* first, check that entry was successful */
-        if (IBV_WC_SUCCESS != wc.status) {
-            SPAWN_ERR("IBV_WC_SUCCESS != wc.status (%d)", wc.status);
+        if (IBV_WC_SUCCESS != wc->status) {
+            SPAWN_ERR("IBV_WC_SUCCESS != wc.status (%d)", wc->status);
             exit(-1);
         }
 
         /* Get VBUF */
-        vbuf* v = (vbuf *) ((uintptr_t) wc.wr_id);
+        vbuf* v = (vbuf *) ((uintptr_t) wc->wr_id);
 
         /* get packet header */
-        SET_PKT_LEN_HEADER(v, wc);
+        SET_PKT_LEN_HEADER(v, wcs[i]);
         SET_PKT_HEADER_OFFSET(v);
         MPIDI_CH3I_MRAILI_Pkt_comm_header* p = v->pheader;
 
-        switch (wc.opcode) {
+        switch (wc->opcode) {
             case IBV_WC_SEND:
             case IBV_WC_RDMA_READ:
             case IBV_WC_RDMA_WRITE:
@@ -328,13 +332,16 @@ static int mv2_poll_cq()
                 v = NULL;
                 break;
             case IBV_WC_RECV:
-                //printf("Received pkt: size = %d\n", v->content_size);
                 /* we don't have a source id for connect messages */
                 if (p->type != MPIDI_CH3_PKT_UD_CONNECT) {
                     /* src field is valid (unless we have a connect message),
                      * use src id to get vc */
                     MPIDI_VC_t* vc;
                     MV2_Get_vc(p->src.rank, &vc);
+
+                    /* TODO: should check that source lid (wc.slid)
+                     * and source qpn (wc.src_qp) match expected vc
+                     * to avoid spoofing */
 
                     v->vc   = vc;
                     v->rail = p->rail;
@@ -345,6 +352,10 @@ static int mv2_poll_cq()
                     /* a connect message does not have a valid src id field,
                      * so we can't associate msg with a vc yet, we stick this
                      * on the queue that accept looks to later */
+
+                    /* TODO: record source lid (wc.slid) and source
+                     * qpn (wc.src_qp) with connect request to laster
+                     * associate with vc to check for spoofing in recvs */
 
                     /* allocate and initialize new element for connect queue */
                     vbuf_list* elem = (vbuf_list*) SPAWN_MALLOC(sizeof(vbuf_list));
@@ -361,20 +372,19 @@ static int mv2_poll_cq()
                     connect_tail = elem;
                 }
 
+                /* decrement the count of number of posted receives,
+                 * and if we fall below the low-water limit, post more */ 
                 proc.ud_ctx->num_recvs_posted--;
                 if(proc.ud_ctx->num_recvs_posted < proc.ud_ctx->credit_preserve) {
-                    proc.ud_ctx->num_recvs_posted += mv2_post_ud_recv_buffers(
-                            (RDMA_DEFAULT_MAX_UD_RECV_WQE - proc.ud_ctx->num_recvs_posted),
-                            proc.ud_ctx);
+                    int remaining = rdma_default_max_ud_recv_wqe - proc.ud_ctx->num_recvs_posted;
+                    int posted = mv2_post_ud_recv_buffers(remaining, proc.ud_ctx);
+                    proc.ud_ctx->num_recvs_posted += posted;
                 }
                 break;
             default:
-                SPAWN_ERR("Invalid opcode from ibv_poll_cq()");
+                SPAWN_ERR("Invalid opcode from ibv_poll_cq() %d", wc->opcode);
                 break;
         }
-    } else if (ne < 0) {
-        SPAWN_ERR("poll cq error (ibv_poll_cq rc=%d %s)", ne, strerror(ne));
-        exit(-1);
     }
 
     return ne;
@@ -421,7 +431,7 @@ static int mv2_wait_on_channel()
 static void drain_cq_events()
 {
     int rc = mv2_poll_cq();
-    while (rc == 1) {
+    while (rc > 0) {
         rc = mv2_poll_cq();
     }
     return;
@@ -656,7 +666,7 @@ static mv2_ud_ctx_t* mv2_ud_create_ctx(mv2_ud_qp_info_t *qp_info)
     memset(ctx, 0, sizeof(mv2_ud_ctx_t));
 
     ctx->qp = mv2_ud_create_qp(qp_info);
-    if(! ctx->qp) {
+    if(ctx->qp == NULL) {
         SPAWN_ERR("Error in creating UD QP");
         return NULL;
     }
@@ -679,17 +689,14 @@ static void mv2_ud_destroy_ctx(mv2_ud_ctx_t *ctx)
 /* Initialize UD Context */
 spawn_net_endpoint* mv2_init_ud()
 {
-    int ret = 0;
-    pthread_attr_t attr;
-    mv2_ud_qp_info_t qp_info;   
-    spawn_net_endpoint *ep = SPAWN_NET_ENDPOINT_NULL;
 
     /* Init lock for vbuf */
     init_vbuf_lock();
 
-    ret = pthread_mutex_init(&comm_lock_object, 0);
+    int ret = pthread_mutex_init(&comm_lock_object, 0);
     if (ret != 0) {
-        SPAWN_ERR("Failed to init comm_lock_object (pthread_mutex_init ret=%d %s)", ret, strerror(ret));
+        SPAWN_ERR("Failed to init comm_lock_object (pthread_mutex_init ret=%d %s)",
+            ret, strerror(ret));
         ibv_error_abort(-1, "Failed to init comm_lock_object\n");
     }   
 
@@ -698,32 +705,37 @@ spawn_net_endpoint* mv2_init_ud()
     /* Allocate vbufs */
     allocate_ud_vbufs(RDMA_DEFAULT_NUM_VBUFS);
 
+    mv2_ud_qp_info_t qp_info;   
     qp_info.pd                  = g_hca_info.pd;
     qp_info.srq                 = NULL;
     qp_info.sq_psn              = RDMA_DEFAULT_PSN;
     qp_info.send_cq             = g_hca_info.cq_hndl;
     qp_info.recv_cq             = g_hca_info.cq_hndl;
-    qp_info.cap.max_send_wr     = RDMA_DEFAULT_MAX_UD_SEND_WQE;
-    qp_info.cap.max_recv_wr     = RDMA_DEFAULT_MAX_UD_RECV_WQE;
+    qp_info.cap.max_send_wr     = rdma_default_max_ud_send_wqe;
+    qp_info.cap.max_recv_wr     = rdma_default_max_ud_recv_wqe;
     qp_info.cap.max_send_sge    = RDMA_DEFAULT_MAX_SG_LIST;
     qp_info.cap.max_recv_sge    = RDMA_DEFAULT_MAX_SG_LIST;
     qp_info.cap.max_inline_data = RDMA_DEFAULT_MAX_INLINE_SIZE;
 
     proc.ud_ctx = mv2_ud_create_ctx(&qp_info);
-    if (!proc.ud_ctx) {          
+    if (proc.ud_ctx == NULL) {          
         SPAWN_ERR("Error in create UD qp");
         return SPAWN_NET_ENDPOINT_NULL;
     }
     
-    proc.ud_ctx->send_wqes_avail     = RDMA_DEFAULT_MAX_UD_SEND_WQE - 50;
+    proc.ud_ctx->send_wqes_avail     = rdma_default_max_ud_send_wqe - 50;
     proc.ud_ctx->ext_sendq_count     = 0;
     MESSAGE_QUEUE_INIT(&proc.ud_ctx->ext_send_queue);
 
     proc.ud_ctx->hca_num             = 0;
     proc.ud_ctx->num_recvs_posted    = 0;
-    proc.ud_ctx->credit_preserve     = (RDMA_DEFAULT_MAX_UD_RECV_WQE / 4);
-    proc.ud_ctx->num_recvs_posted    += mv2_post_ud_recv_buffers(
-             (RDMA_DEFAULT_MAX_UD_RECV_WQE - proc.ud_ctx->num_recvs_posted), proc.ud_ctx);
+    proc.ud_ctx->credit_preserve     = (rdma_default_max_ud_recv_wqe / 4);
+
+    /* post initial UD recv requests */
+    int remaining = rdma_default_max_ud_recv_wqe - proc.ud_ctx->num_recvs_posted;
+    int posted = mv2_post_ud_recv_buffers(remaining, proc.ud_ctx);
+    proc.ud_ctx->num_recvs_posted = posted;
+
     MESSAGE_QUEUE_INIT(&proc.unack_queue);
 
     proc.post_send = post_ud_send;
@@ -733,12 +745,13 @@ spawn_net_endpoint* mv2_init_ud()
     local_ep_info.qpn = proc.ud_ctx->qp->qp_num;
 
     /* allocate new endpoint and fill in its fields */
-    ep = SPAWN_MALLOC(sizeof(spawn_net_endpoint));
+    spawn_net_endpoint* ep = SPAWN_MALLOC(sizeof(spawn_net_endpoint));
     ep->type = SPAWN_NET_TYPE_IBUD;
     ep->name = SPAWN_STRDUPF("IBUD:%04x:%06x", local_ep_info.lid, local_ep_info.qpn);
     ep->data = NULL;
 
     /*Spawn comm thread */
+    pthread_attr_t attr;
     if (pthread_attr_init(&attr)) {
         SPAWN_ERR("Unable to init thread attr");
         return SPAWN_NET_ENDPOINT_NULL;
