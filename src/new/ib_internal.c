@@ -39,9 +39,9 @@ uint32_t rdma_default_ud_sendwin_size = 400;
 /* Maximum number of out-of-order messages that will be buffered */
 uint32_t rdma_default_ud_recvwin_size = 2501;
 /* Time (usec) until ACK status is checked (and ACKs are sent) */
-long rdma_ud_progress_timeout = 48000;
+long rdma_ud_progress_timeout = 25000;
 /* Time (usec) until a message is resent */
-long rdma_ud_retry_timeout = 500000;
+long rdma_ud_retry_timeout = 50000;
 long rdma_ud_max_retry_timeout = 20000000;
 long rdma_ud_last_check;
 long rdma_ud_retransmissions=0;
@@ -816,24 +816,30 @@ void* cm_timeout_handler(void *arg)
 #endif
 
         /* resend messages and send acks if we're due */
-        long time = mv2_get_time_us();
-        long delay = time - rdma_ud_last_check;
-        if (delay > rdma_ud_progress_timeout) {
+//        long time = mv2_get_time_us();
+//        long delay = time - rdma_ud_last_check;
+//        if (delay > rdma_ud_progress_timeout) {
             /* time is up, grab lock and process acks */
             comm_lock();
 
+            /* send explicit acks out on all vc's if we need to,
+             * this ensures acks flow out even if main thread is
+             * busy doing other work */
+            MV2_UD_SEND_ACKS();
+
+            /* process any messages that may have come in, we may
+             * clear messages we'd otherwise try to resend below */
+            drain_cq_events();
+
             /* resend any unack'd packets whose timeout has expired */
             mv2_check_resend();
-
-            /* send explicit acks out on all vc's if we need to */
-            MV2_UD_SEND_ACKS();
 
             /* done sending messages, release lock */
             comm_unlock();
 
             /* record the last time we checked acks */
-            rdma_ud_last_check = mv2_get_time_us();
-        }
+//            rdma_ud_last_check = mv2_get_time_us();
+//        }
     }
 
     return NULL;
