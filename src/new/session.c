@@ -645,7 +645,7 @@ static char* copy_to_tmp(const char* src)
 }
 
 /* fork process, child executes remote copy of file from local host to remote host */
-static pid_t copy_exe(const char* host, const char* exepath)
+static pid_t copy_exe(const strmap* params, const char* host, const char* exepath)
 {
     pid_t cpid = fork();
 
@@ -653,27 +653,41 @@ static pid_t copy_exe(const char* host, const char* exepath)
         SPAWN_ERR("create_process (fork() errno=%d %s)", errno, strerror(errno));
         return -1;
     } else if (cpid == 0) {
-        /* get name of remote copy command */
-        const char shname[] = "rcp";
+        /* we switch off SH=ssh/rsh to use scp/rcp */
+        /* get name of remote shell */
+        const char* shname = strmap_get(params, "SH");
         if (shname == NULL) {
             SPAWN_ERR("Failed to read name of remote shell from SH key");
-            return -1;
+            return 1;
         }
 
-        /* check that command is valid */
-        if (strcmp(shname, "rcp") != 0 &&
-            strcmp(shname, "scp") != 0)
+        /* determine whether to use rsh or ssh */
+        if (strcmp(shname, "rsh") != 0 &&
+            strcmp(shname, "ssh") != 0)
         {
             SPAWN_ERR("Unknown launch remote shell: `%s'", shname);
-            return -1;
+            return 1;
+        }
+
+        const char scp_key[] = "scp";
+        const char rcp_key[] = "rcp";
+        char* key;
+        if (strcmp(shname, "rsh") == 0) {
+            key = rcp_key;
+        } else if (strcmp(shname, "ssh") == 0) {
+            key = scp_key;
+        } else {
+            SPAWN_ERR("Unknown launch remote shell: `%s'", shname);
+            return 1;
         }
 
         /* get path of remote copy command */
-        const char shpath[] = "/usr/bin/rcp";
+        const char* shpath = strmap_get(params, key);
         if (shpath == NULL) {
             SPAWN_ERR("Path to sh command not set");
             return 1;
         }
+
 
         /* build destination file name */
         const char* dstpath = SPAWN_STRDUPF("%s:%s", host, exepath);
@@ -1458,7 +1472,9 @@ session_init (int argc, char * argv[])
         /* search for following commands in advance if path search
          * optimization is enabled: ssh, rsh, sh, env */
         find_command(s->params, "ssh");
+        find_command(s->params, "scp");
         find_command(s->params, "rsh");
+        find_command(s->params, "rcp");
         find_command(s->params, "sh");
         find_command(s->params, "env");
 
@@ -1579,7 +1595,7 @@ session_start (struct session_t * s)
     /* we'll map global id to local child id */
     strmap* childmap = strmap_new();
 
-    /* rcp launcher exe to /tmp on remote hosts */
+    /* rcp/scp the launcher executable to /tmp on remote hosts */
     clock_gettime(CLOCK_MONOTONIC_RAW, &t_copy_launcher_start);
     if (copy_launcher) {
         if (!nodeid) { tid = begin_delta("copy launcher exe"); }
@@ -1598,7 +1614,7 @@ session_start (struct session_t * s)
             }
 
             /* launch child process */
-            pids[i] = copy_exe(host, spawn_exe);
+            pids[i] = copy_exe(s->params, host, spawn_exe);
         }
 
         /* wait for all copies to complete */
