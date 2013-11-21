@@ -90,7 +90,6 @@ static void vc_init(MPIDI_VC_t* vc)
     ud_info->cntl_acks          = 0; 
     ud_info->ack_pending        = 0;
     ud_info->resend_count       = 0;
-    ud_info->total_messages     = 0;
     ud_info->ext_win_send_count = 0;
 
     MESSAGE_QUEUE_INIT(&(ud_info->send_window));
