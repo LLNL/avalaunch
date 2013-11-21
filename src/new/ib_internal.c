@@ -108,7 +108,7 @@ static MPIDI_VC_t* vc_alloc()
     /* increment our counter for next time */
     ud_vc_info_id++;
 
-    /* check whether we need to allocate more VC's */
+    /* check whether we need to allocate more vc strucutres */
     if (id >= ud_vc_infos) {
         /* increase capacity of array */
         if (ud_vc_infos > 0) {
@@ -117,7 +117,7 @@ static MPIDI_VC_t* vc_alloc()
             ud_vc_infos = 1;
         }
 
-        /* allocate space to hold VC pointers */
+        /* allocate space to hold vc pointers */
         size_t vcsize = ud_vc_infos * sizeof(MPIDI_VC_t*);
         MPIDI_VC_t** vcs = (MPIDI_VC_t**) SPAWN_MALLOC(vcsize);
 
@@ -132,8 +132,10 @@ static MPIDI_VC_t* vc_alloc()
         ud_vc_info = vcs;
     }
 
-    /* allocate and initialize a new VC */
+    /* allocate vc structure */
     MPIDI_VC_t* vc = (MPIDI_VC_t*) SPAWN_MALLOC(sizeof(MPIDI_VC_t));
+
+    /* initialize vc */
     vc_init(vc);
 
     /* record address of vc in array */
@@ -150,24 +152,29 @@ static MPIDI_VC_t* vc_alloc()
 
 static int vc_set_addr(MPIDI_VC_t* vc, mv2_ud_exch_info_t *rem_info, int port)
 {
+    /* don't bother to set anything if the state is already connecting
+     * or connected */
     if (vc->state == MRAILI_UD_CONNECTING ||
         vc->state == MRAILI_UD_CONNECTED)
     {
-        /* Duplicate message - return */
+        /* duplicate message - return */
         return 0;
     }
 
-    //PRINT_DEBUG(DEBUG_UD_verbose>0,"lid:%d\n", rem_info->lid );
-    
+    /* clear address handle attribute structure */
     struct ibv_ah_attr ah_attr;
     memset(&ah_attr, 0, sizeof(ah_attr));
 
-    ah_attr.sl              = RDMA_DEFAULT_SERVICE_LEVEL;
-    ah_attr.dlid            = rem_info->lid;
-    ah_attr.port_num        = port;
-    ah_attr.is_global       = 0; 
-    ah_attr.src_path_bits   = 0; 
+    /* initialize attribute values */
+    /* TODO: set grh field? */
+    ah_attr.dlid          = rem_info->lid;
+    ah_attr.sl            = RDMA_DEFAULT_SERVICE_LEVEL;
+    ah_attr.src_path_bits = 0; 
+    /* TODO: set static_rate field? */
+    ah_attr.is_global     = 0; 
+    ah_attr.port_num      = port;
 
+    /* create IB address handle and record in vc */
     vc->ah = ibv_create_ah(g_hca_info.pd, &ah_attr);
     if(vc->ah == NULL){    
         /* TODO: man page doesn't say anything about errno */
@@ -175,8 +182,10 @@ static int vc_set_addr(MPIDI_VC_t* vc, mv2_ud_exch_info_t *rem_info, int port)
         return -1;
     }
 
+    /* change vc state to "connecting" */
     vc->state = MRAILI_UD_CONNECTING;
 
+    /* record remote lid and qpn in vc */
     vc->lid = rem_info->lid;
     vc->qpn = rem_info->qpn;
 
@@ -229,6 +238,8 @@ static connected_list* connected_tail = NULL;
 
 static int mv2_post_ud_recv_buffers(int num_bufs, mv2_ud_ctx_t *ud_ctx)
 {
+    /* TODO: post buffers as a linked list to be more efficient? */
+
     /* post our vbufs */
     int count = 0;
     while (count < num_bufs) {
@@ -466,7 +477,6 @@ static void drain_cq_events()
     return;
 }
 
-/* ===== Begin: Initialization functions ===== */
 /* Get HCA parameters */
 static int mv2_get_hca_info(int devnum, mv2_hca_info_t *hca_info)
 {
@@ -688,40 +698,31 @@ static struct ibv_qp* mv2_ud_create_qp(mv2_ud_qp_info_t *qp_info)
     return qp;
 }
 
-/* Create UD Context */
-static mv2_ud_ctx_t* mv2_ud_create_ctx(mv2_ud_qp_info_t *qp_info)
-{
-    mv2_ud_ctx_t* ctx = (mv2_ud_ctx_t*) SPAWN_MALLOC(sizeof(mv2_ud_ctx_t));
-    memset(ctx, 0, sizeof(mv2_ud_ctx_t));
-
-    ctx->qp = mv2_ud_create_qp(qp_info);
-    if(ctx->qp == NULL) {
-        SPAWN_ERR("Error in creating UD QP");
-        return NULL;
-    }
-
-    return ctx;
-}
-
 /* Destroy UD Context */
 static void mv2_ud_destroy_ctx(mv2_ud_ctx_t *ctx)
 {
+    /* destroy UD QP if we have one */
     if (ctx->qp) {
         ibv_destroy_qp(ctx->qp);
     }
+
+    /* now free context data structure */
     spawn_free(&ctx);
+
     spawn_free(&ud_vc_info);
 
     pthread_cancel(comm_thread);
+
+    return;
 }
 
 /* Initialize UD Context */
 spawn_net_endpoint* mv2_init_ud()
 {
-
     /* Init lock for vbuf */
     init_vbuf_lock();
 
+    /* initialize lock for communication */
     int ret = pthread_mutex_init(&comm_lock_object, 0);
     if (ret != 0) {
         SPAWN_ERR("Failed to init comm_lock_object (pthread_mutex_init ret=%d %s)",
@@ -731,10 +732,23 @@ spawn_net_endpoint* mv2_init_ud()
 
     rdma_ud_max_ack_pending = rdma_default_ud_sendwin_size / 4;
 
-    /* Allocate vbufs */
+    /* allocate vbufs */
     allocate_ud_vbufs(RDMA_DEFAULT_NUM_VBUFS);
 
-    mv2_ud_qp_info_t qp_info;   
+    /* allocate UD context structure */
+    mv2_ud_ctx_t* ctx = (mv2_ud_ctx_t*) SPAWN_MALLOC(sizeof(mv2_ud_ctx_t));
+
+    /* initialize context fields */
+    ctx->qp               = NULL;
+    ctx->hca_num          = 0;
+    ctx->send_wqes_avail  = rdma_default_max_ud_send_wqe - 50;
+    ctx->num_recvs_posted = 0;
+    ctx->credit_preserve  = (rdma_default_max_ud_recv_wqe / 4);
+    MESSAGE_QUEUE_INIT(&ctx->ext_send_queue);
+    ctx->ext_sendq_count  = 0;
+
+    /* set parameters for UD queue pair */
+    mv2_ud_qp_info_t qp_info;
     qp_info.pd                  = g_hca_info.pd;
     qp_info.srq                 = NULL;
     qp_info.sq_psn              = RDMA_DEFAULT_PSN;
@@ -746,30 +760,28 @@ spawn_net_endpoint* mv2_init_ud()
     qp_info.cap.max_recv_sge    = RDMA_DEFAULT_MAX_SG_LIST;
     qp_info.cap.max_inline_data = RDMA_DEFAULT_MAX_INLINE_SIZE;
 
-    proc.ud_ctx = mv2_ud_create_ctx(&qp_info);
-    if (proc.ud_ctx == NULL) {          
-        SPAWN_ERR("Error in create UD qp");
+    /* create UD queue pair and attach to context */
+    ctx->qp = mv2_ud_create_qp(&qp_info);
+    if(ctx->qp == NULL) {
+        SPAWN_ERR("Error in creating UD QP");
         return SPAWN_NET_ENDPOINT_NULL;
     }
-    
-    proc.ud_ctx->send_wqes_avail     = rdma_default_max_ud_send_wqe - 50;
-    proc.ud_ctx->ext_sendq_count     = 0;
-    MESSAGE_QUEUE_INIT(&proc.ud_ctx->ext_send_queue);
-
-    proc.ud_ctx->hca_num             = 0;
-    proc.ud_ctx->num_recvs_posted    = 0;
-    proc.ud_ctx->credit_preserve     = (rdma_default_max_ud_recv_wqe / 4);
 
     /* post initial UD recv requests */
-    int remaining = rdma_default_max_ud_recv_wqe - proc.ud_ctx->num_recvs_posted;
-    int posted = mv2_post_ud_recv_buffers(remaining, proc.ud_ctx);
-    proc.ud_ctx->num_recvs_posted = posted;
+    int remaining = rdma_default_max_ud_recv_wqe - ctx->num_recvs_posted;
+    int posted = mv2_post_ud_recv_buffers(remaining, ctx);
+    ctx->num_recvs_posted = posted;
 
+    /* save context in global proc structure */
+    proc.ud_ctx = ctx;
+
+    /* initialize global unack'd queue */
     MESSAGE_QUEUE_INIT(&proc.unack_queue);
 
+    /* record function pointer to send routine */
     proc.post_send = post_ud_send;
 
-    /* Create end point */
+    /* create end point */
     local_ep_info.lid = g_hca_info.port_attr[0].lid;
     local_ep_info.qpn = proc.ud_ctx->qp->qp_num;
 
@@ -779,13 +791,14 @@ spawn_net_endpoint* mv2_init_ud()
     ep->name = SPAWN_STRDUPF("IBUD:%04x:%06x", local_ep_info.lid, local_ep_info.qpn);
     ep->data = NULL;
 
-    /*Spawn comm thread */
+    /* initialize attributes to create comm thread */
     pthread_attr_t attr;
     if (pthread_attr_init(&attr)) {
         SPAWN_ERR("Unable to init thread attr");
         return SPAWN_NET_ENDPOINT_NULL;
     }
 
+    /* set stack size for comm thred */
     ret = pthread_attr_setstacksize(&attr, DEFAULT_CM_THREAD_STACKSIZE);
     if (ret && ret != EINVAL) {
         SPAWN_ERR("Unable to set stack size");
@@ -801,6 +814,7 @@ spawn_net_endpoint* mv2_init_ud()
         SPAWN_ERR("Failed to block SIGCHLD (pthread_sigmask rc=%d %s)", ret, strerror(ret));
     }
 
+    /* start comm thread */
     pthread_create(&comm_thread, &attr, cm_timeout_handler, NULL);
 
     /* reenable SIGCHLD in main thread */
@@ -812,11 +826,7 @@ spawn_net_endpoint* mv2_init_ud()
     return ep;
 }
 
-/* ===== End: Initialization functions ===== */
-
-/* ===== Begin: Send/Recv functions ===== */
-
-/*Interface to lock/unlock connection manager*/
+/* interface to lock/unlock connection manager */
 void comm_lock(void)
 {           
     int rc = pthread_mutex_lock(&comm_lock_object);
@@ -835,6 +845,7 @@ void comm_unlock(void)
     return;
 }
 
+/* this is the function executed by the communication progress thread */
 void* cm_timeout_handler(void *arg)
 {
     int nspin = 0;
@@ -1061,13 +1072,13 @@ spawn_net_channel* mv2_ep_connect(const char *name)
         return SPAWN_NET_CHANNEL_NULL;
     }
 
+    /* allocate and initialize a new virtual channel */
+    MPIDI_VC_t* vc = vc_alloc();
+
     /* store lid and queue pair */
     mv2_ud_exch_info_t ep_info;
     ep_info.lid = lid;
     ep_info.qpn = qpn;
-
-    /* allocate and initialize a new virtual channel */
-    MPIDI_VC_t* vc = vc_alloc();
 
     /* point channel to remote endpoint */
     vc_set_addr(vc, &ep_info, RDMA_DEFAULT_PORT);
@@ -1289,5 +1300,3 @@ int mv2_ud_recv(MPIDI_VC_t* vc, void* buf, size_t size)
 
     return rc;
 }
-
-/* ===== End: Send/Recv functions ===== */

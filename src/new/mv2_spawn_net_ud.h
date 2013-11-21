@@ -24,16 +24,28 @@
  * the number of outstanding receives, and a pointer to a message
  * queue of packets to be sent as soon as send WQEs become available.
  *
- * Then, for each remote endpoint that a process "connects" to, we
- * track details in a "virtual connection".  Each packet sent on a
+ * The UD context manages the list of packets to be submitted to the
+ * QP.  There is a maximum number of sends that can be outstanding
+ * on the QP at a given time, which is set by the number of send
+ * work elements.  If the number of packets ready to be sent exceeds
+ * this limit, they are queued in the UD context extended send queue.
+ * Whenever a send completes, new packets are sent from the extended
+ * send queue.
+ *
+ * There is also a global "unack'd queue", which tracks messages that
+ * have been sent on the UP QP but not yet acknowledged by their
+ * destination process.
+ *
+ * For each remote endpoint that a process "connects" to, we track
+ * details in a "virtual connection".  Each packet sent on a
  * virtual connection is assigned a sequence number.  Sequence numbers
  * are 16-bit integers that increment with each packet sent and wrap
  * around.  A sliding window of sequence numbers are valid at any
- * given instant, and processes use ACKS to manage this window.  Each
- * VC manages several queues (called windows): send, extended send,
- * in-order received, out-of-order receieved, and unack'd.
+ * given instant, and processes use ACKS to manage the sliding window.
+ * Each VC manages several queues (called windows): send, extended send,
+ * in-order received, and out-of-order receieved.
  *
- * - send window - tracks packets handed to the UD context.
+ * - send window - tracks packets handed off to the UD context.
  *
  * - extended send window - tracks packets ready to be sent on the VC,
  *   but not yet handed off to the UD context.
@@ -44,26 +56,23 @@
  * - out-of-order receive window - tracks a list of received packets
  *   that includes one or more missing packets
  *
- * - unack'd window - records a list of packets that must be ACK'd
- *   by the destination
- *
  * When sending a packet, it is added to the send window if there is
  * room.  Otherwise, it is added to the extended send window.  When a
  * packet is added to the send window, it is submitted to the UD
  * context.  In this way, the send window enforces a limit on the
  * number of packets a VC can have outstanding on the UD context.
  *
- * Each control message (except explicit ACKS) is added to the
- * "unack'd window" when actually sent by the UD context.  This records
- * packets yet to be acknowledged from the destination, as well as a
- * timestamp on when the packet was last sent.  A thread peridoically
- * wakes up and scans the unack'd list to resend packets that have
- * exceeded their timeout.
+ * When the UD context actually sends a message, the packet is added
+ * to the "unack'd queue" (unless it does not have a valid sequence
+ * number).  This queue records packets yet to be acknowledged from the
+ * destination.  Each entry has a timestamp to record when the packet
+ * was last sent.  A thread periodically wakes up to scan the unack'd
+ * list and resends any packets that have exceeded their timeout.
  *
  * When a process sends a message to another process, it also records
  * the sequence number for the latest packet it has received from the
- * destination.  Upon receiving the message, the destination will
- * clear any packets from its send and unack'd windows up to and
+ * destination.  Upon receipt of the message, the destination will
+ * clear any packets from its send window and unack'd queue up to and
  * including that sequence number.  After removing packets from the
  * send window, more packets can be queued by taking them from the
  * VC extended send window.
@@ -73,9 +82,9 @@
  *
  * There is also an out-of-order receive window which records packets
  * that have been received but cannot be appended to the in-order queue
- * because one or more packets may be missing.  With each received
- * packet, this queue is checked and packets are moved to the in-order
- * receive queue if possible.
+ * because one or more packets are missing.  With each received packet,
+ * the out-of-order receive queue is checked and packets are moved to
+ * the in-order receive queue if possible.
  *
  * In case there are no data packets flowing back from receiver to
  * sender to carry implicit acks, explicit ack messages are sent in
@@ -152,16 +161,16 @@ typedef struct message_queue_t {
 
 /* ud context - tracks access to open UD QP on HCA */
 typedef struct _mv2_ud_ctx_t {
+    struct ibv_qp *qp;        /* UD QP */
     int hca_num;              /* id of HCA to use, starts at 0 */
     int send_wqes_avail;      /* number of available send work queue elements for UD QP */
     int num_recvs_posted;     /* number of receive elements currently posted */
-    int default_mtu_sz;       /* UD packet size */
     int credit_preserve;      /* low-water mark for number of posted receives */
-    struct ibv_qp *qp;        /* UD QP */
     message_queue_t ext_send_queue; /* UD extended send queue */
     uint64_t ext_sendq_count; /* cumulative number of messages sent from UD extended send queue */
 } mv2_ud_ctx_t;
 
+/* structure to pass to mv2_ud_create_qp to create an ibv_qp */
 typedef struct mv2_ud_qp_info {
     struct ibv_cq      *send_cq;
     struct ibv_cq      *recv_cq;
@@ -250,11 +259,13 @@ typedef struct MPIDI_VC
     uint64_t ext_win_send_count; /* number of sends from extended send wnidow */
 } MPIDI_VC_t;
 
+/* allocated as a global data structure to bind a UD context and
+ * unack'd queue */
 typedef struct _mv2_proc_info_t {
     mv2_ud_ctx_t*       ud_ctx;      /* pointer to UD context */
     message_queue_t     unack_queue; /* queue of sent packets yet to be ACK'd */
     mv2_ud_zcopy_info_t zcopy_info;
-    int (*post_send)(MPIDI_VC_t * vc, vbuf * v, int rail, mv2_ud_ctx_t *send_ud_ctx);
+    int (*post_send)(MPIDI_VC_t* vc, vbuf* v, int rail, mv2_ud_ctx_t* send_ud_ctx);
 } mv2_proc_info_t;
 
 void mv2_ud_zcopy_poll_cq(mv2_ud_zcopy_info_t *zcopy_info, mv2_ud_ctx_t *ud_ctx,
