@@ -118,19 +118,12 @@ do {                                            \
 
 #define MAX_SEQ_NUM (UINT16_MAX)
 
-/* srcid  - source context id to identify sender context */
-/* seqnum - sequence number tracking packet sent from source */
-/* acknum - most recent sequence number that source has received */
-/* rail   - rail id to send packet on */
-#define MPIDI_CH3I_MRAILI_IBA_PKT_DECL \
-    uint64_t srcid;             \
-    uint16_t seqnum;            \
-    uint16_t acknum;            \
-    uint8_t  rail;              
-
 typedef struct MPIDI_CH3I_MRAILI_Pkt_comm_header_t {
-    uint8_t type;
-    MPIDI_CH3I_MRAILI_IBA_PKT_DECL
+    uint8_t  type;   /* packet type (see ib_internal.h) */
+    uint64_t srcid;  /* source context id to identify sender */
+    uint16_t seqnum; /* sequence number from source */
+    uint16_t acknum; /* most recent seq number source has received from us */
+    uint8_t  rail;   /* rail id to send packet on */
 } MPIDI_CH3I_MRAILI_Pkt_comm_header;
 
 /* VC state values */
@@ -152,8 +145,8 @@ typedef struct message_queue_t {
 /* initialize fields of a message queue */
 #define MESSAGE_QUEUE_INIT(q)   \
 {                               \
-    (q)->head = NULL;           \
-    (q)->tail = NULL;           \
+    (q)->head  = NULL;          \
+    (q)->tail  = NULL;          \
     (q)->count = 0 ;            \
 }
 
@@ -208,17 +201,21 @@ typedef struct _mv2_ud_zcopy_info_t {
     mv2_ud_ctx_t **rndv_ud_qps;
 } mv2_ud_zcopy_info_t;
 
-typedef struct MPIDI_CH3_Pkt_zcopy_finish_t
-{
-    uint8_t type;
-    MPIDI_CH3I_MRAILI_IBA_PKT_DECL
+typedef struct MPIDI_CH3_Pkt_zcopy_finish_t {
+    uint8_t  type;   /* packet type (see ib_internal.h) */
+    uint64_t srcid;  /* source context id to identify sender */
+    uint16_t seqnum; /* sequence number from source */
+    uint16_t acknum; /* most recent seq number source has received from us */
+    uint8_t  rail;   /* rail id to send packet on */
     int hca_index;
 } MPIDI_CH3_Pkt_zcopy_finish_t;
         
-typedef struct MPIDI_CH3_Pkt_zcopy_ack_t
-{       
-    uint8_t type;
-    MPIDI_CH3I_MRAILI_IBA_PKT_DECL
+typedef struct MPIDI_CH3_Pkt_zcopy_ack_t {       
+    uint8_t  type;   /* packet type (see ib_internal.h) */
+    uint64_t srcid;  /* source context id to identify sender */
+    uint16_t seqnum; /* sequence number from source */
+    uint16_t acknum; /* most recent seq number source has received from us */
+    uint8_t  rail;   /* rail id to send packet on */
 } MPIDI_CH3_Pkt_zcopy_ack_t;
 
 /* ud vc info - tracks connection info between process pair */
@@ -254,10 +251,10 @@ typedef struct MPIDI_VC
 } MPIDI_VC_t;
 
 typedef struct _mv2_proc_info_t {
-    mv2_ud_ctx_t                *ud_ctx;
-    message_queue_t             unack_queue;
-    mv2_ud_zcopy_info_t         zcopy_info;
-    int   (*post_send)(MPIDI_VC_t * vc, vbuf * v, int rail, mv2_ud_ctx_t *send_ud_ctx);
+    mv2_ud_ctx_t*       ud_ctx;      /* pointer to UD context */
+    message_queue_t     unack_queue; /* queue of sent packets yet to be ACK'd */
+    mv2_ud_zcopy_info_t zcopy_info;
+    int (*post_send)(MPIDI_VC_t * vc, vbuf * v, int rail, mv2_ud_ctx_t *send_ud_ctx);
 } mv2_proc_info_t;
 
 void mv2_ud_zcopy_poll_cq(mv2_ud_zcopy_info_t *zcopy_info, mv2_ud_ctx_t *ud_ctx,
@@ -276,4 +273,3 @@ int mv2_ud_send(MPIDI_VC_t* vc, const void* buf, size_t size);
 int mv2_ud_recv(MPIDI_VC_t* vc, void* buf, size_t size);
 
 #endif /* #ifndef _MV2_UD_H_ */
-
