@@ -48,15 +48,17 @@
  *   by the destination
  *
  * When sending a packet, it is added to the send window if there is
- * room.  Otherwise, it is added to the extended send window.  The
- * send window enforces a limit on the number of packets each VC can
- * have outstanding on the UD context.
+ * room.  Otherwise, it is added to the extended send window.  When a
+ * packet is added to the send window, it is submitted to the UD
+ * context.  In this way, the send window enforces a limit on the
+ * number of packets a VC can have outstanding on the UD context.
  *
- * Also each message (which is assigned a sequence number) is added to
- * the "unack'd window" during the send.  This records packets yet to be
- * acknowledged from the destination, as well as a timestamp on when the
- * packet was last sent.  A thread peridoically wakes up and scans the
- * unack'd list to resend packets that have exceeded their timeout.
+ * Each control message (except explicit ACKS) is added to the
+ * "unack'd window" when actually sent by the UD context.  This records
+ * packets yet to be acknowledged from the destination, as well as a
+ * timestamp on when the packet was last sent.  A thread peridoically
+ * wakes up and scans the unack'd list to resend packets that have
+ * exceeded their timeout.
  *
  * When a process sends a message to another process, it also records
  * the sequence number for the latest packet it has received from the
@@ -75,12 +77,12 @@
  * packet, this queue is checked and packets are moved to the in-order
  * receive queue if possible.
  *
- * In case there are no data packets flowing from receiver to sender
- * to carry implicit acks, there are explicit ack messages sent in
+ * In case there are no data packets flowing back from receiver to
+ * sender to carry implicit acks, explicit ack messages are sent in
  * different circumstances.
  *
  * The thread that periodically wakes to check whether packets need to
- * be resent will also sent "explicit acks" if necessary.  An explicit
+ * be resent will also send "explicit acks" if necessary.  An explicit
  * ack is sent whenever an ack needs to be sent but a piggy-backed ack
  * has not been sent for a certain amount of time.
  *
@@ -176,22 +178,6 @@ typedef struct mv2_ud_qp_info {
     uint32_t           sq_psn;
 } mv2_ud_qp_info_t;
 
-/* ud vc info - tracks connection info between process pair */
-typedef struct _mv2_ud_vc_info_t {
-    struct ibv_ah *ah;           /* IB address of remote process */
-    uint32_t qpn;                /* queue pair number of remote process */
-    uint16_t lid;                /* lid of remote process */
-    uint16_t ack_pending;        /* number of messages we've received w/o sending an ack */
-    message_queue_t send_window; /* VC send window */
-    message_queue_t ext_window;  /* VC extended send window */
-    message_queue_t recv_window; /* VC out-of-order receive window */
-
-    /* profiling counters */
-    uint64_t cntl_acks;          /* number of explicit ACK messages sent */
-    uint64_t resend_count;       /* number of resend operations */
-    uint64_t ext_win_send_count; /* number of sends from extended send wnidow */
-} mv2_ud_vc_info_t;
-
 /* IB address info for ud exhange */
 typedef struct _mv2_ud_exch_info_t {
     uint16_t lid; /* lid of process */
@@ -222,21 +208,6 @@ typedef struct _mv2_ud_zcopy_info_t {
     mv2_ud_ctx_t **rndv_ud_qps;
 } mv2_ud_zcopy_info_t;
 
-typedef struct MPIDI_CH3I_MRAIL_VC_t
-{
-    uint16_t    seqnum_next_tosend;  /* next sequence number to use when sending */
-    uint16_t    seqnum_next_torecv;  /* next sequence number needed for tail of in-order app receive window */
-    uint16_t    seqnum_next_toack;   /* sequence number to ACK in next ACK message */
-    uint16_t    ack_need_tosend;     /* whether we need to send an ACK on this VC */
-    uint16_t    state;               /* state of VC */
-    message_queue_t app_recv_window; /* in-order receive window */
-
-    mv2_ud_vc_info_t ud;
-
-    uint64_t readid;  /* remote proc labels its packets with this id when sending to us */
-    uint64_t writeid; /* we label our outgoing packets with this id */
-} MPIDI_CH3I_MRAIL_VC;
-
 typedef struct MPIDI_CH3_Pkt_zcopy_finish_t
 {
     uint8_t type;
@@ -250,11 +221,36 @@ typedef struct MPIDI_CH3_Pkt_zcopy_ack_t
     MPIDI_CH3I_MRAILI_IBA_PKT_DECL
 } MPIDI_CH3_Pkt_zcopy_ack_t;
 
-#define MPIDI_CH3I_VC_RDMA_DECL MPIDI_CH3I_MRAIL_VC mrail;
-
+/* ud vc info - tracks connection info between process pair */
 typedef struct MPIDI_VC
 {
-    MPIDI_CH3I_VC_RDMA_DECL
+    /* remote address info and VC state */
+    struct ibv_ah *ah;            /* IB address of remote process */
+    uint32_t qpn;                 /* queue pair number of remote process */
+    uint16_t lid;                 /* lid of remote process */
+    uint16_t state;               /* state of VC */
+
+    /* read/write context ids */
+    uint64_t readid;              /* remote proc labels its packets with this id when sending to us */
+    uint64_t writeid;             /* we label our outgoing packets with this id */
+
+    /* track sequence numbers and acks */
+    uint16_t seqnum_next_tosend;  /* next sequence number to use when sending */
+    uint16_t seqnum_next_torecv;  /* next sequence number needed for tail of in-order app receive window */
+    uint16_t seqnum_next_toack;   /* sequence number to ACK in next ACK message */
+    uint16_t ack_need_tosend;     /* whether we need to send an ACK on this VC */
+    uint16_t ack_pending;         /* number of messages we've received w/o sending an ack */
+
+    /* message queues */
+    message_queue_t send_window;  /* VC send window */
+    message_queue_t ext_window;   /* VC extended send window */
+    message_queue_t recv_window;  /* VC out-of-order receive window */
+    message_queue_t app_recv_window; /* in-order receive window */
+
+    /* profiling counters */
+    uint64_t cntl_acks;          /* number of explicit ACK messages sent */
+    uint64_t resend_count;       /* number of resend operations */
+    uint64_t ext_win_send_count; /* number of sends from extended send wnidow */
 } MPIDI_VC_t;
 
 typedef struct _mv2_proc_info_t {

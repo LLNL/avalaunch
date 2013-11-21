@@ -79,23 +79,22 @@ void* cm_timeout_handler(void *arg);
 /* initialize UD VC */
 static void vc_init(MPIDI_VC_t* vc)
 {
-    vc->mrail.state = MRAILI_INIT;
+    vc->state = MRAILI_INIT;
 
-    vc->mrail.ack_need_tosend    = 0;
-    vc->mrail.seqnum_next_tosend = 0;
-    vc->mrail.seqnum_next_torecv = 0;
-    vc->mrail.seqnum_next_toack  = UINT16_MAX;
+    vc->seqnum_next_tosend = 0;
+    vc->seqnum_next_torecv = 0;
+    vc->seqnum_next_toack  = UINT16_MAX;
+    vc->ack_need_tosend    = 0;
+    vc->ack_pending        = 0;
 
-    mv2_ud_vc_info_t* ud_info = &vc->mrail.ud;
-    ud_info->cntl_acks          = 0; 
-    ud_info->ack_pending        = 0;
-    ud_info->resend_count       = 0;
-    ud_info->ext_win_send_count = 0;
+    vc->cntl_acks          = 0; 
+    vc->resend_count       = 0;
+    vc->ext_win_send_count = 0;
 
-    MESSAGE_QUEUE_INIT(&(ud_info->send_window));
-    MESSAGE_QUEUE_INIT(&(ud_info->ext_window));
-    MESSAGE_QUEUE_INIT(&(ud_info->recv_window));
-    MESSAGE_QUEUE_INIT(&(vc->mrail.app_recv_window));
+    MESSAGE_QUEUE_INIT(&(vc->send_window));
+    MESSAGE_QUEUE_INIT(&(vc->ext_window));
+    MESSAGE_QUEUE_INIT(&(vc->recv_window));
+    MESSAGE_QUEUE_INIT(&(vc->app_recv_window));
 
     return;
 }
@@ -143,7 +142,7 @@ static MPIDI_VC_t* vc_alloc()
     /* set our read id, other end of channel will label its outgoing
      * messages with this id when sending to us (our readid is their
      * writeid) */
-    vc->mrail.readid = id;
+    vc->readid = id;
 
     /* return vc to caller */
     return vc;
@@ -151,8 +150,8 @@ static MPIDI_VC_t* vc_alloc()
 
 static int vc_set_addr(MPIDI_VC_t* vc, mv2_ud_exch_info_t *rem_info, int port)
 {
-    if (vc->mrail.state == MRAILI_UD_CONNECTING ||
-        vc->mrail.state == MRAILI_UD_CONNECTED)
+    if (vc->state == MRAILI_UD_CONNECTING ||
+        vc->state == MRAILI_UD_CONNECTED)
     {
         /* Duplicate message - return */
         return 0;
@@ -169,17 +168,17 @@ static int vc_set_addr(MPIDI_VC_t* vc, mv2_ud_exch_info_t *rem_info, int port)
     ah_attr.is_global       = 0; 
     ah_attr.src_path_bits   = 0; 
 
-    vc->mrail.ud.ah = ibv_create_ah(g_hca_info.pd, &ah_attr);
-    if(vc->mrail.ud.ah == NULL){    
+    vc->ah = ibv_create_ah(g_hca_info.pd, &ah_attr);
+    if(vc->ah == NULL){    
         /* TODO: man page doesn't say anything about errno */
         SPAWN_ERR("Error in creating address handle (ibv_create_ah errno=%d %s)", errno, strerror(errno));
         return -1;
     }
 
-    vc->mrail.state = MRAILI_UD_CONNECTING;
+    vc->state = MRAILI_UD_CONNECTING;
 
-    vc->mrail.ud.lid = rem_info->lid;
-    vc->mrail.ud.qpn = rem_info->qpn;
+    vc->lid = rem_info->lid;
+    vc->qpn = rem_info->qpn;
 
     return 0;
 }
@@ -278,7 +277,7 @@ static inline void mv2_ud_send_acks()
         MPIDI_VC_t* vc = elem->vc;
 
         /* send ack if necessary */
-        if (vc->mrail.ack_need_tosend) {
+        if (vc->ack_need_tosend) {
             mv2_send_explicit_ack(vc);
         }
 
@@ -365,9 +364,8 @@ static int mv2_poll_cq()
                     /* for UD packets, check that source lid and source
                      * qpn match expected vc to avoid spoofing */
                     if (v->transport == IB_TRANSPORT_UD) {
-                        mv2_ud_vc_info_t* ud_info = &vc->mrail.ud;
-                        if (ud_info->lid != wc->slid ||
-                            ud_info->qpn != wc->src_qp)
+                        if (vc->lid != wc->slid ||
+                            vc->qpn != wc->src_qp)
                         {
                             SPAWN_ERR("Packet source lid/qpn do not match expected values");
                             MRAILI_Release_vbuf(v);
@@ -922,7 +920,7 @@ static vbuf* packet_read(MPIDI_VC_t* vc)
     drain_cq_events();
 
     /* look for entry in apprecv queue */
-    vbuf* v = mv2_ud_apprecv_window_retrieve_and_remove(&vc->mrail.app_recv_window);
+    vbuf* v = mv2_ud_apprecv_window_retrieve_and_remove(&vc->app_recv_window);
     while (v == NULL) {
         /* TODO: at this point, we should block for incoming event */
 
@@ -936,7 +934,7 @@ static vbuf* packet_read(MPIDI_VC_t* vc)
         drain_cq_events();
 
         /* look for entry in apprecv queue */
-        v = mv2_ud_apprecv_window_retrieve_and_remove(&vc->mrail.app_recv_window);
+        v = mv2_ud_apprecv_window_retrieve_and_remove(&vc->app_recv_window);
     }
     return v;
 }
@@ -1045,7 +1043,7 @@ static int mv2_recv_accept_message(MPIDI_VC_t* vc)
     /* TODO: avoid casting up from int here */
     /* set our write id */
     uint64_t writeid = (uint64_t) id;
-    vc->mrail.writeid = writeid;
+    vc->writeid = writeid;
 
     /* put vbuf back on free list */
     MRAILI_Release_vbuf(v);
@@ -1077,7 +1075,7 @@ spawn_net_channel* mv2_ep_connect(const char *name)
     /* build payload for connect message, specify id we want remote
      * side to use when sending to us followed by our lid/qp */
     char* payload = SPAWN_STRDUPF("%06x:%04x:%06x",
-        vc->mrail.readid, local_ep_info.lid, local_ep_info.qpn
+        vc->readid, local_ep_info.lid, local_ep_info.qpn
     );
     size_t payload_size = strlen(payload) + 1;
 
@@ -1087,11 +1085,11 @@ spawn_net_channel* mv2_ep_connect(const char *name)
     /* free payload memory */
     spawn_free(&payload);
 
-    /* wait for accept message and set vc->mrail.writeid */
+    /* wait for accept message and set vc->writeid */
     mv2_recv_accept_message(vc);
 
     /* Change state to connected */
-    vc->mrail.state = MRAILI_UD_CONNECTED;
+    vc->state = MRAILI_UD_CONNECTED;
 
     /* allocate spawn net channel data structure */
     spawn_net_channel* ch = SPAWN_MALLOC(sizeof(spawn_net_channel));
@@ -1188,7 +1186,7 @@ spawn_net_channel* mv2_ep_accept()
 
     /* record remote id as write id */
     uint64_t writeid = (uint64_t) id;
-    vc->mrail.writeid = writeid;
+    vc->writeid = writeid;
 
     /* record pointer to VC in vbuf (needed by Process_recv) */
     v->vc = vc;
@@ -1197,11 +1195,11 @@ spawn_net_channel* mv2_ep_accept()
     MRAILI_Process_recv(v);
 
     /* Increment the next expected seq num */
-    vc->mrail.seqnum_next_torecv++;
+    vc->seqnum_next_torecv++;
 
     /* build accept message, specify id we want remote side to use when
      * sending to us followed by our lid/qp */
-    char* payload = SPAWN_STRDUPF("%06x", vc->mrail.readid);
+    char* payload = SPAWN_STRDUPF("%06x", vc->readid);
     size_t payload_size = strlen(payload) + 1;
 
     /* send the accept packet */
@@ -1211,7 +1209,7 @@ spawn_net_channel* mv2_ep_accept()
     spawn_free(&payload);
 
     /* mark vc as connected */
-    vc->mrail.state = MRAILI_UD_CONNECTED;
+    vc->state = MRAILI_UD_CONNECTED;
 
     /* allocate new channel data structure */
     spawn_net_channel* ch = SPAWN_MALLOC(sizeof(spawn_net_channel));

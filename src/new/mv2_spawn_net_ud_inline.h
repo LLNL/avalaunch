@@ -18,30 +18,6 @@ enum {
     MSG_QUEUED_RECVWIN,
     MSG_IN_RECVWIN
 };
-#define IBV_UD_POST_SR(_v, _ud_vc, _ud_ctx) {                       \
-    int __ret;                                                      \
-    if(((_v)->desc.sg_entry.length <= rdma_max_inline_size))        \
-    {                                                               \
-        (_v)->desc.u.sr.send_flags = (enum ibv_send_flags)          \
-                (IBV_SEND_SIGNALED | IBV_SEND_INLINE);              \
-    } else {                                                        \
-        (_v)->desc.u.sr.send_flags = IBV_SEND_SIGNALED ;            \
-    }                                                               \
-    (_v)->desc.u.sr.wr.ud.ah = (_ud_vc).ah;                         \
-    (_v)->desc.u.sr.wr.ud.remote_qpn =  (_ud_vc).qpn;               \
-    if ((_ud_ctx)->send_wqes_avail <=0 ||                           \
-            (NULL != (_ud_ctx)->ext_send_queue.head)) {             \
-        mv2_ud_ext_sendq_queue(&(_ud_ctx)->ext_send_queue, _v);     \
-    } else {                                                        \
-        (_ud_ctx)->send_wqes_avail--;                               \
-        __ret = ibv_post_send((_ud_ctx->qp),                        \
-                &((_v)->desc.u.sr),&((_v)->desc.y.bad_sr));         \
-        if(__ret) {                                                 \
-            fprintf(stderr, "failed to send\n ");                   \
-            ibv_error_abort(-1, "ud send failed");                  \
-        }                                                           \
-    }                                                               \
-}
 
 static inline void mv2_ud_ext_sendq_queue(message_queue_t *q, vbuf *v)
 {
@@ -135,22 +111,6 @@ static inline void mv2_ud_unack_queue_remove(message_queue_t *q, vbuf *v)
     }
     v->unack_msg.next = v->unack_msg.prev = NULL;
     q->count--;
-}
-
-static inline void mv2_ud_track_send(mv2_ud_vc_info_t *ud_vc, message_queue_t *unack_queue, vbuf *v)
-{
-    rdma_ud_last_check = mv2_get_time_us();
-    if (v->transport == IB_TRANSPORT_RC) {
-        return;
-    }
-    if(v->in_sendwin) {
-        return;
-    }
-    v->timestamp = mv2_get_time_us();
-    /* Add vbuf to the send window */
-    mv2_ud_send_window_add(&(ud_vc->send_window), v);
-    /* Add vbuf to global unack queue */
-    mv2_ud_unack_queue_add(unack_queue, v);
 }
 
 static inline int mv2_ud_recv_window_add(message_queue_t *q, vbuf *v, int recv_win_start)

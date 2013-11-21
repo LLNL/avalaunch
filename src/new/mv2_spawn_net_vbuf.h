@@ -110,15 +110,6 @@ typedef enum {
 #define UD_VBUF_RETRY_ALWAYS        (0x04)
 #define UD_VBUF_MCAST_MSG           (0x08)
 
-#define MRAILI_Get_buffer(_vc, _v)                  \
-do {                                                \
-    if((_vc)->mrail.state & MRAILI_RC_CONNECTED) {  \
-        (_v) = get_vbuf();                          \
-    } else  {                                       \
-        (_v) = get_ud_vbuf();                       \
-    }                                               \
-} while (0)
-
 /* ibverbs reserves the first 40 bytes of each UD packet, this may
  * sometimes contain valid data for a Global Routine Header */
 #define MV2_UD_GRH_LEN (40)
