@@ -73,12 +73,6 @@
 
 #define DEFAULT_NUM_RPOOLS         (1)
 
-#   define MPIDI_Pkt_init(pkt_, type_)              \
-    {                               \
-    memset((void *) (pkt_), 0xfc, sizeof(*pkt_));   \
-    (pkt_)->type = (type_);                 \
-    }
-
 #define GEN_EXIT_ERR     -1     /* general error which forces us to abort */
 #define GEN_ASSERT_ERR   -2     /* general assert error */
 #define IBV_RETURN_ERR   -3     /* gen2 function return error */
@@ -107,23 +101,15 @@
 
 #define MIN(x, y) (((x) < (y))?(x):(y))
 
-enum MPIDI_CH3_Pkt_types
-{
-    MPIDI_CH3_PKT_UD_CONNECT,
-    MPIDI_CH3_PKT_UD_ACCEPT,
-    MPIDI_CH3_PKT_UD_DISCONNECT,
-    MPIDI_CH3_PKT_UD_DATA,
-    MPIDI_CH3_PKT_ZCOPY_FINISH,
-    MPIDI_CH3_PKT_ZCOPY_ACK,
-    MPIDI_CH3_PKT_MCST,
-    MPIDI_CH3_PKT_MCST_NACK,
-    MPIDI_CH3_PKT_MCST_INIT,
-    MPIDI_CH3_PKT_MCST_INIT_ACK,
-    MPIDI_CH3_PKT_NOOP,
-    MPIDI_CH3_PKT_FLOW_CNTL_UPDATE,
-    MPIDI_CH3_PKT_END_ALL,
-    MPIDI_CH3_PKT_INVALID = -1 /* forces a signed enum to quash warnings */
-};
+/* packet types: must fit within uint8_t, set highest order bit to
+ * denote control packets */
+#define MPIDI_CH3_PKT_CONTROL_BIT   (0x80)
+
+#define MPIDI_CH3_PKT_UD_CONNECT    (0x80)
+#define MPIDI_CH3_PKT_UD_ACCEPT     (0x81)
+#define MPIDI_CH3_PKT_UD_DISCONNECT (0x82)
+#define MPIDI_CH3_PKT_UD_ACK        (0x83)
+#define MPIDI_CH3_PKT_UD_DATA       (0x04)
 
 /* hca_info */
 typedef struct _mv2_hca_info_t {

@@ -595,7 +595,7 @@ static int allocate_ud_vbuf_region(int nvbufs)
 
         /* set pointer to data buffer */
         char* ptr = (char *)vbuf_dma_buffer + i * rdma_default_ud_mtu;
-        cur->buffer = ptr;
+        cur->buffer = (void*) ptr;
 
         /* set pointer to head flag, comes as last bytes of buffer */
         cur->head_flag = (VBUF_FLAG_TYPE *) (ptr + rdma_default_ud_mtu - sizeof(cur->head_flag));

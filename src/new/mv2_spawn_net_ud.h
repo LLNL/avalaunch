@@ -48,26 +48,13 @@ do {                                            \
     (q)->count = 0 ;            \
 }
 
-#define VC_SRC_INFO \
-    union {                     \
-        uint32_t smp_index;     \
-        uint64_t rank;          \
-    } src;                      
-
-#ifdef CRC_CHECK
-#define VC_CRC_INFO  unsigned long crc;
-#else
-#define VC_CRC_INFO  
-#endif
-
+/* source context id to identify sender context */
+/* sequence number tracking packet sent from source */
+/* most recent sequence number that source has received */
 #define MPIDI_CH3I_MRAILI_IBA_PKT_DECL \
+    uint64_t srcid;             \
     uint16_t seqnum;            \
     uint16_t acknum;            \
-    uint8_t  remote_credit;     \
-    uint8_t  rdma_credit;       \
-    VC_SRC_INFO                 \
-    VC_CRC_INFO                 \
-    uint8_t  vbuf_credit;       \
     uint8_t  rail;              
 
 typedef struct MPIDI_CH3I_MRAILI_Pkt_comm_header_t {

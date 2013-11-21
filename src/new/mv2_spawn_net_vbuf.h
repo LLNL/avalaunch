@@ -125,19 +125,6 @@ do {                                                \
 
 #define PKT_TRANSPORT_OFFSET(_v) ((_v->transport == IB_TRANSPORT_UD) ? MV2_UD_GRH_LEN : 0)
 
-/* extend this macro if there is more control messages */
-#define IS_CNTL_MSG(p) \
-    (p->type ==  MPIDI_CH3_PKT_FLOW_CNTL_UPDATE || \
-     p->type ==  MPIDI_CH3_PKT_UD_CONNECT || \
-     p->type ==  MPIDI_CH3_PKT_UD_ACCEPT || \
-     p->type ==  MPIDI_CH3_PKT_UD_DISCONNECT || \
-     p->type ==  MPIDI_CH3_PKT_NOOP)
-
-#define IS_MCAST_MSG(p) \
-    (p->type == MPIDI_CH3_PKT_MCST || \
-        p->type == MPIDI_CH3_PKT_MCST_INIT || \
-            (mcast_use_mcast_nack && p->type == MPIDI_CH3_PKT_MCST_NACK))
-
 #define SET_PKT_LEN_HEADER(_v, _wc) {                                       \
     if(IB_TRANSPORT_UD == (_v)->transport) {                                \
         (_v)->content_size = (_wc).byte_len - MV2_UD_GRH_LEN ;              \

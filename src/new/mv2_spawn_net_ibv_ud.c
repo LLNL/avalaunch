@@ -22,7 +22,7 @@ long rdma_ud_last_check;
 extern mv2_proc_info_t proc;
 
 /* churn through and send as many as packets as we can from the
- * extended send queue */
+ * VC extended send queue */
 static inline void mv2_ud_flush_ext_window(MPIDI_VC_t *vc)
 {
     /* get pointer to ud info, send queue, and extended send queue */
@@ -32,12 +32,11 @@ static inline void mv2_ud_flush_ext_window(MPIDI_VC_t *vc)
 
     /* get pointer to head of extended send queue */
     vbuf* cur = extwin->head;
-    while (cur != NULL && sendwin->count < rdma_default_ud_sendwin_size) {
+    while (cur != NULL &&
+           sendwin->count < rdma_default_ud_sendwin_size)
+    {
         /* get pointer to next element in list */
         vbuf* next = cur->extwin_msg.next;
-
-        PRINT_DEBUG(DEBUG_UD_verbose>1,"Send ext window message(%p) nextseqno :"
-                "%d\n", next, vc->mrail.seqnum_next_tosend);
 
         /* remove item from head of list */
         extwin->head = next;
@@ -56,13 +55,15 @@ static inline void mv2_ud_flush_ext_window(MPIDI_VC_t *vc)
 
     /* update queue fields if we emptied the list */
     if (extwin->head == NULL) {
-        assert(extwin->count == 0);
         extwin->tail = NULL;
+        assert(extwin->count == 0);
     }
+
+    return;
 }
 
-/* Given a VC and a seq number, remove all items in send queue up to
- * and including this seq number. */
+/* given a VC and a seq number, remove all items in send and unack'd
+ * queues up to and including this seq number */
 static inline void mv2_ud_process_ack(MPIDI_VC_t *vc, uint16_t acknum)
 {
     PRINT_DEBUG(DEBUG_UD_verbose>2,"ack recieved: %d next_to_ack: %d\n",
@@ -71,15 +72,14 @@ static inline void mv2_ud_process_ack(MPIDI_VC_t *vc, uint16_t acknum)
     /* get pointer to ud info, send queue, and extended send queue */
     mv2_ud_vc_info_t* ud_info = &vc->mrail.ud;
     message_queue_t* sendwin = &ud_info->send_window;
-    message_queue_t* extwin = &ud_info->ext_window;
+    message_queue_t* extwin  = &ud_info->ext_window;
 
     /* while we have a vbuf, and while its seq number is before seq
-     * number, remove it from send queue and unack queue */
+     * number in ack, remove it from send and unack queues */
     vbuf* cur = sendwin->head;
-    while (cur != NULL && INCL_BETWEEN(acknum, cur->seqnum, vc->mrail.seqnum_next_tosend)) {
-        /* get pointer to next element in list */
-        vbuf* next = cur->extwin_msg.next;
-
+    while (cur != NULL &&
+           INCL_BETWEEN(acknum, cur->seqnum, vc->mrail.seqnum_next_tosend))
+    {
         /* the current vbuf has been ack'd, so remove it from the send
          * window and also the unack'd list */
         mv2_ud_send_window_remove(sendwin, cur);
@@ -93,16 +93,21 @@ static inline void mv2_ud_process_ack(MPIDI_VC_t *vc, uint16_t acknum)
     }
 
     /* see if we can flush from ext window queue */
-    if (extwin->head != NULL && sendwin->count < rdma_default_ud_sendwin_size) {
+    if (extwin->head != NULL &&
+        sendwin->count < rdma_default_ud_sendwin_size)
+    {
         mv2_ud_flush_ext_window(vc);
-    }    
+    }
+
+    return;
 }
 
 /* add vbuf to tail of apprecv queue */
 inline void mv2_ud_apprecv_window_add(message_queue_t *q, vbuf *v)
 {
     /* set next and prev pointers ton vbuf */
-    v->apprecvwin_msg.next = v->apprecvwin_msg.prev = NULL;
+    v->apprecvwin_msg.next = NULL;
+    v->apprecvwin_msg.prev = NULL;
 
     /* for empty list, update head, otherwise update next pointer
      * of last item in list to point to vbuf */
@@ -115,6 +120,8 @@ inline void mv2_ud_apprecv_window_add(message_queue_t *q, vbuf *v)
     /* point tail to vbuf and increase count */
     q->tail = v;
     q->count++;
+
+    return;
 }
 
 /* remove and return vbuf from apprecv queue */
@@ -151,10 +158,12 @@ static inline void mv2_ud_place_recvwin(vbuf *v)
     /* get VC vbuf is for */
     MPIDI_VC_t* vc = v->vc;
 
-    /* TODO: can we avoid this modulo division? */
     /* determine bounds of recv window */
     int recv_win_start = vc->mrail.seqnum_next_torecv;
-    int recv_win_end = (recv_win_start + rdma_default_ud_recvwin_size) % MAX_SEQ_NUM;
+    int recv_win_end = recv_win_start + rdma_default_ud_recvwin_size;
+    while (recv_win_end > MAX_SEQ_NUM) {
+        recv_win_end -= MAX_SEQ_NUM;
+    }
 
     /* check if the packet seq num is in the window or not */
     if (INCL_BETWEEN(v->seqnum, recv_win_start, recv_win_end)) {
@@ -174,7 +183,7 @@ static inline void mv2_ud_place_recvwin(vbuf *v)
             vc->mrail.seqnum_next_toack = vc->mrail.seqnum_next_torecv;
 
             /* increment the sequence number we expect to get next */
-            ++vc->mrail.seqnum_next_torecv;
+            vc->mrail.seqnum_next_torecv++;
 
             /* mark VC that we need to send an ack message */
             if (v->transport == IB_TRANSPORT_UD) {
@@ -201,7 +210,7 @@ static inline void mv2_ud_place_recvwin(vbuf *v)
 
         /* if we have items at front of (out-of-order) receive queue
          * whose seq num matches expected seq num, extract them from
-         * recv queue and add them to VC recv queue */
+         * out-of-order recv queue and add them to app recv queue */
         while (recvwin->head != NULL && 
                recvwin->head->seqnum == vc->mrail.seqnum_next_torecv)
         {
@@ -211,20 +220,20 @@ static inline void mv2_ud_place_recvwin(vbuf *v)
             /* move item to VC apprecv queue */
             mv2_ud_apprecv_window_add(&vc->mrail.app_recv_window, recvwin->head);
 
-            /* remove item from recv queue */
+            /* remove item from head of out-of-order recv queue */
             mv2_ud_recv_window_remove(recvwin);
 
             /* update our ack seq number to attach to outgoing packets */
             vc->mrail.seqnum_next_toack = vc->mrail.seqnum_next_torecv;
 
             /* increment the sequence number we expect to get next */
-            ++vc->mrail.seqnum_next_torecv;
+            vc->mrail.seqnum_next_torecv++;
         }
     } else {
         PRINT_DEBUG(DEBUG_UD_verbose>1,"Message is not in recv window seqnum:%d win start:%d win end:%d\n",
             v->seqnum, recv_win_start, recv_win_end);
 
-        /* we got a packet that is now within the receive window,
+        /* we got a packet that is not within the receive window,
          * just throw it away */
         MPIDI_CH3I_MRAIL_Release_vbuf(v);
 
@@ -234,6 +243,8 @@ static inline void mv2_ud_place_recvwin(vbuf *v)
             vc->mrail.ack_need_tosend = 1;
         }
     }
+
+    return;
 }
 
 int post_ud_send(MPIDI_VC_t* vc, vbuf* v, int rail, mv2_ud_ctx_t *send_ud_ctx)
@@ -247,8 +258,8 @@ int post_ud_send(MPIDI_VC_t* vc, vbuf* v, int rail, mv2_ud_ctx_t *send_ud_ctx)
 
     /* write rail id and send context into packet header */
     MPIDI_CH3I_MRAILI_Pkt_comm_header* p = v->pheader;
-    p->rail = rail;
-    p->src.rank = vc->mrail.writeid;
+    p->rail  = rail;
+    p->srcid = vc->mrail.writeid;
 
     /* if we have too many outstanding sends, or if we have other items
      * on the extended send queue, insert vbuf in extended send queue
@@ -256,12 +267,13 @@ int post_ud_send(MPIDI_VC_t* vc, vbuf* v, int rail, mv2_ud_ctx_t *send_ud_ctx)
     mv2_ud_vc_info_t* ud_info = &vc->mrail.ud;
     message_queue_t* sendwin = &ud_info->send_window;
     message_queue_t* extwin  = &ud_info->ext_window;
-    if (sendwin->count > rdma_default_ud_sendwin_size || (extwin->head != NULL && extwin->head != v))
+    if (sendwin->count > rdma_default_ud_sendwin_size ||
+       (extwin->head != NULL && extwin->head != v))
     {
         mv2_ud_ext_window_add(extwin, v);
 
         PRINT_DEBUG(DEBUG_UD_verbose>1,"msg(%p) queued to ext window size:%d\n",
-            v, ud_info->ext_window.count);
+            v, extwin->count);
 
         return 0;
     }
@@ -300,36 +312,67 @@ int post_ud_send(MPIDI_VC_t* vc, vbuf* v, int rail, mv2_ud_ctx_t *send_ud_ctx)
 
 static inline void mv2_ud_ext_sendq_send(MPIDI_VC_t *vc, mv2_ud_ctx_t *ud_ctx)
 {
-    vbuf *v;
-    while (ud_ctx->send_wqes_avail > 0 && ud_ctx->ext_send_queue.head) {
-        v = ud_ctx->ext_send_queue.head;
-        ud_ctx->ext_send_queue.head = ud_ctx->ext_send_queue.head->desc.next;
-        if (NULL == ud_ctx->ext_send_queue.head) {
-            ud_ctx->ext_send_queue.tail = NULL;
-        }
-        ud_ctx->ext_send_queue.count--;
-        v->desc.next = NULL;
+    /* get pointer to UD context extended send queue */
+    message_queue_t* q = &ud_ctx->ext_send_queue;
 
-        /* can we reset ack to latest? */
-        ud_ctx->send_wqes_avail--;
-        if (ibv_post_send(ud_ctx->qp, &(v->desc.u.sr),&(v->desc.y.bad_sr))) {
-            ibv_error_abort(-1, "extend sendq send  failed");
+    /* while we have slots available in the send queue and items on
+     * the UD context extended send queue, send them */
+    vbuf* cur = q->head;
+    while (cur != NULL && ud_ctx->send_wqes_avail > 0) {
+        /* get pointer to next item */
+        vbuf* next = cur->desc.next;
+
+        /* remove item from extended send queue */
+        q->head = next;
+        if (q->head == NULL) {
+            q->tail = NULL;
         }
+        q->count--;
+
+        /* sever item from list */
+        cur->desc.next = NULL;
+
+        /* TODO: can we reset ack to latest? */
+        /* send item */
+        ud_ctx->send_wqes_avail--;
+        int ret = ibv_post_send(ud_ctx->qp, &(cur->desc.u.sr), &(cur->desc.y.bad_sr));
+        if (ret != 0) {
+            SPAWN_ERR("extend sendq send failed (ibv_post_send rc=%d %s)", ret, strerror(ret));
+            exit(-1);
+        }
+
+        /* track number of sends from extended queue */
         ud_ctx->ext_sendq_count++;
-        PRINT_DEBUG(DEBUG_UD_verbose>1,"sending from ext send queue seqnum :%d qlen:%d\n", v->seqnum, ud_ctx->ext_send_queue.count);
-    } 
+
+        PRINT_DEBUG(DEBUG_UD_verbose>1,"sending from ext send queue seqnum: %d qlen: %d\n",
+            cur->seqnum, q->count);
+
+        /* go on to next item in queue */
+        cur = next;
+    }
+
+    return;
 }
 
+/* when a send work element completes, issue another */
 void mv2_ud_update_send_credits(vbuf *v)
 {
-    mv2_ud_ctx_t *ud_ctx;
-    ud_ctx = proc.ud_ctx;
+    /* increment number of available send work queue elements */
+    mv2_ud_ctx_t* ud_ctx = proc.ud_ctx;
     ud_ctx->send_wqes_avail++;
-    PRINT_DEBUG(DEBUG_UD_verbose>2,"available wqes : %d seqno:%d \n",ud_ctx->send_wqes_avail, v->seqnum);
-    if (NULL != ud_ctx->ext_send_queue.head 
-            && ud_ctx->send_wqes_avail > 0) {
+
+    PRINT_DEBUG(DEBUG_UD_verbose>2,"available wqes: %d seqno: %d\n",
+        ud_ctx->send_wqes_avail, v->seqnum);
+
+    /* if we have items on UD context extended send queue and available
+     * slots in send queue, send some items from extended queue */
+    if (ud_ctx->ext_send_queue.head != NULL &&
+        ud_ctx->send_wqes_avail > 0)
+    {
         mv2_ud_ext_sendq_send(v->vc, ud_ctx);   
     }
+
+    return;
 }
 
 /* send control message with ack update */
@@ -350,14 +393,13 @@ void mv2_send_explicit_ack(MPIDI_VC_t *vc)
     vbuf_init_send(v, size, rail);
 
     /* get pointer to packet header */
-    MPIDI_CH3I_MRAILI_Pkt_comm_header *p = v->pheader;
+    MPIDI_CH3I_MRAILI_Pkt_comm_header* p = v->pheader;
+    memset((void*)p, 0xfc, sizeof(MPIDI_CH3I_MRAILI_Pkt_comm_header));
 
-    /* mark packet as ACK message */
-    MPIDI_Pkt_init(p, MPIDI_CH3_PKT_FLOW_CNTL_UPDATE);
-
-    /* write rail and send context into packet header */
-    p->rail = rail;
-    p->src.rank = vc->mrail.writeid;
+    /* write type, rail, and send context into packet header */
+    p->type  = MPIDI_CH3_PKT_UD_ACK;
+    p->rail  = rail;
+    p->srcid = vc->mrail.writeid;
 
     /* control messages don't have a seq numer */
     v->seqnum = -1;
@@ -377,12 +419,14 @@ void mv2_send_explicit_ack(MPIDI_VC_t *vc)
     /* keep track of total number of control messages sent */
     vc->mrail.ud.cntl_acks++;
 
-    PRINT_DEBUG(DEBUG_UD_verbose>1,"Sent explicit ACK to :%d acknum:%d\n", vc->pg_rank, p->acknum);
+    PRINT_DEBUG(DEBUG_UD_verbose>1,"Sent explicit ACK to :%d acknum:%d\n",
+        vc->pg_rank, p->acknum);
+
+    return;
 }
 
 static void mv2_ud_resend(vbuf *v)
 {
-
     /* if vbuf is marked as send-in-progress, don't send again,
      * unless "always retry" flag is set */
     if (v->flags & UD_VBUF_SEND_INPROGRESS && 
@@ -415,24 +459,30 @@ static void mv2_ud_resend(vbuf *v)
     p->acknum = vc->mrail.seqnum_next_toack;
     vc->mrail.ack_need_tosend = 0;
 
+    /* TODO: why not set ack_pending to 0 here? */
+
     /* mark vbuf as send-in-progress */
     v->flags |= UD_VBUF_SEND_INPROGRESS;
 
     /* get pointer to UD context */
     mv2_ud_ctx_t* ud_ctx = proc.ud_ctx;
 
-    /* send vbuf (or add to extended send queue if we don't have credits) */
-    if (ud_ctx->send_wqes_avail <= 0) {
-        mv2_ud_ext_sendq_queue(&ud_ctx->ext_send_queue, v);
-    } else {
+    /* send vbuf (or add to extended UD send queue if we don't have credits) */
+    if (ud_ctx->send_wqes_avail > 0) {
         ud_ctx->send_wqes_avail--;
-        if (ibv_post_send(ud_ctx->qp, &(v->desc.u.sr), &(v->desc.y.bad_sr))) {
-            ibv_error_abort(-1, "reliability resend failed");
+        int ret = ibv_post_send(ud_ctx->qp, &(v->desc.u.sr), &(v->desc.y.bad_sr));
+        if (ret != 0) {
+            SPAWN_ERR("reliability resend failed (ibv_post_send rc=%d %s)", ret, strerror(ret));
+            exit(-1);
         }
+    } else {
+        mv2_ud_ext_sendq_queue(&ud_ctx->ext_send_queue, v);
     }
 
     /* increment our total resend count */
     vc->mrail.ud.resend_count++;
+
+    return;
 }    
 
 void MRAILI_Process_recv(vbuf *v) 
@@ -447,13 +497,17 @@ void MRAILI_Process_recv(vbuf *v)
     MPIDI_CH3I_MRAILI_Pkt_comm_header *p = v->pheader;
 
     /* read ack seq number from incoming packet and clear packets
-     * up to and including this number from our send queue */
+     * up to and including this number from send and unack'd queues */
     mv2_ud_process_ack(vc, p->acknum);
 
-    if (IS_CNTL_MSG(p) &&
+    /* TODO: test a bit in packet type rather than one-by-one */
+
+    /* if this is a control message, we're done (no need to send ack
+     * or add packet to receive queues) */
+    if ((p->type & MPIDI_CH3_PKT_CONTROL_BIT) &&
         p->type != MPIDI_CH3_PKT_UD_ACCEPT)
     {
-        PRINT_DEBUG(DEBUG_UD_verbose>1,"recv cntl message ack:%d \n", p->acknum);
+        PRINT_DEBUG(DEBUG_UD_verbose>1,"recv cntl message ack: %d\n", p->acknum);
         MRAILI_Release_vbuf(v);
         goto fn_exit;
     }
@@ -488,7 +542,7 @@ void mv2_check_resend()
 
     /* walk through unack'd list */
     vbuf* cur = q->head;
-    while(cur) {
+    while (cur != NULL) {
         //TODO:: if (cur->left_to_send == 0 || cur->retry_always) {
 
         /* get log of retry count for this packet */
@@ -505,7 +559,7 @@ void mv2_check_resend()
         if ((delay > (rdma_ud_retry_timeout * r)) ||
             (delay > rdma_ud_max_retry_timeout))
         {
-            PRINT_DEBUG(DEBUG_UD_verbose>1,"resend seqnum:%d retry : %d \n",
+            PRINT_DEBUG(DEBUG_UD_verbose>1,"resend seqnum: %d retry: %d\n",
                 cur->seqnum, cur->retry_count);
 
             /* we've waited long enough, try again and update
@@ -520,5 +574,7 @@ void mv2_check_resend()
 
         /* go on to next item in list */
         cur = cur->unack_msg.next;
-    } 
+    }
+
+    return;
 }

@@ -329,8 +329,12 @@ static int mv2_poll_cq()
             case IBV_WC_SEND:
             case IBV_WC_RDMA_READ:
             case IBV_WC_RDMA_WRITE:
+                /* now that a send completed, issue pending sends if
+                 * we have any */
                 mv2_ud_update_send_credits(v);
 
+                /* if SEND_INPROGRESS and FREE_PENDING flags are set,
+                 * release the vbuf */
                 if (v->flags & UD_VBUF_SEND_INPROGRESS) {
                     v->flags &= ~(UD_VBUF_SEND_INPROGRESS);
 
@@ -348,7 +352,7 @@ static int mv2_poll_cq()
                 if (p->type != MPIDI_CH3_PKT_UD_CONNECT) {
                     /* src field is valid (unless we have a connect message),
                      * use src id to get vc */
-                    uint64_t index = p->src.rank;
+                    uint64_t index = p->srcid;
                     if (index >= ud_vc_info_id) {
                         SPAWN_ERR("Packet conext invalid");
                         MRAILI_Release_vbuf(v);
@@ -942,7 +946,7 @@ static vbuf* packet_read(MPIDI_VC_t* vc)
  * send UD packet */
 static inline int packet_send(
     MPIDI_VC_t* vc,
-    enum MPIDI_CH3_Pkt_types type,
+    uint8_t type,
     const void* payload,
     size_t payload_size)
 {
@@ -961,9 +965,8 @@ static inline int packet_send(
 
     /* set packet header fields */
     MPIDI_CH3I_MRAILI_Pkt_comm_header* p = v->pheader;
-    MPIDI_Pkt_init(p, type);
-    p->acknum = vc->mrail.seqnum_next_toack;
-    p->rail   = v->rail;
+    memset((void*)p, 0xfc, sizeof(MPIDI_CH3I_MRAILI_Pkt_comm_header));
+    p->type = type;
 
     /* copy in payload */
     if (payload_size > 0) {
@@ -975,10 +978,11 @@ static inline int packet_send(
     v->content_size = header_size + payload_size;
 
     /* prepare packet for send */
-    vbuf_init_send(v, v->content_size, v->rail);
+    int rail = 0;
+    vbuf_init_send(v, v->content_size, rail);
 
     /* and send it */
-    proc.post_send(vc, v, 0, NULL);
+    proc.post_send(vc, v, rail, NULL);
 
     return SPAWN_SUCCESS;
 }
