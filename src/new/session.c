@@ -658,15 +658,15 @@ static pid_t copy_exe(const strmap* params, const char* host, const char* exepat
         const char* shname = strmap_get(params, "SH");
         if (shname == NULL) {
             SPAWN_ERR("Failed to read name of remote shell from SH key");
-            return 1;
+            _exit(EXIT_FAILURE);
         }
 
         /* determine whether to use rsh or ssh */
         if (strcmp(shname, "rsh") != 0 &&
             strcmp(shname, "ssh") != 0)
         {
-            SPAWN_ERR("Unknown launch remote shell: `%s'", shname);
-            return 1;
+            SPAWN_ERR("Unknown remote shell: `%s'", shname);
+            _exit(EXIT_FAILURE);
         }
 
         const char scp_key[] = "scp";
@@ -677,15 +677,15 @@ static pid_t copy_exe(const strmap* params, const char* host, const char* exepat
         } else if (strcmp(shname, "ssh") == 0) {
             key = scp_key;
         } else {
-            SPAWN_ERR("Unknown launch remote shell: `%s'", shname);
-            return 1;
+            SPAWN_ERR("Unknown remote shell: `%s'", shname);
+            _exit(EXIT_FAILURE);
         }
 
         /* get path of remote copy command */
         const char* shpath = strmap_get(params, key);
         if (shpath == NULL) {
-            SPAWN_ERR("Path to sh command not set");
-            return 1;
+            SPAWN_ERR("Path to remote copy command not set");
+            _exit(EXIT_FAILURE);
         }
 
 
