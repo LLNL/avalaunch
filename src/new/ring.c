@@ -5,6 +5,24 @@
 #include <stdlib.h>
 #include <string.h>
 
+/*******************************
+ * MPIR
+ ******************************/
+
+#ifndef VOLATILE
+#if defined(__STDC__) || defined(__cplusplus)
+#define VOLATILE volatile
+#else
+#define VOLATILE
+#endif
+#endif
+
+extern VOLATILE int MPIR_debug_gate;
+
+/*******************************
+ * End MPIR
+ ******************************/
+
 /* simple library that exchanges variable length data
  * among procs to create a ring */
 int ring_create(
@@ -15,6 +33,11 @@ int ring_create(
   char** right)
 {
   char* value;
+
+  /* if being debugged, wait for debugger to attach */
+  if ((value = getenv("MV2_MPIR")) != NULL) {
+    while (MPIR_debug_gate == 0);
+  }
 
   /* read server addr */
   char* server_name = NULL;

@@ -7,6 +7,24 @@
 #include <stdlib.h>
 #include <string.h>
 
+/*******************************
+ * MPIR
+ ******************************/
+
+#ifndef VOLATILE
+#if defined(__STDC__) || defined(__cplusplus)
+#define VOLATILE volatile
+#else
+#define VOLATILE
+#endif
+#endif
+
+extern VOLATILE int MPIR_debug_gate;
+
+/*******************************
+ * End MPIR
+ ******************************/
+
 static int initialized  = 0;
 spawn_net_endpoint* global_ep = SPAWN_NET_ENDPOINT_NULL;
 static char* server_name = NULL;
@@ -30,6 +48,13 @@ static const char command_finalize[] = "FINALIZE";
 
 int PMI_Init( int *spawned )
 {
+  const char* value;
+
+  /* if being debugged, wait for debugger to attach */
+  if ((value = getenv("MV2_MPIR")) != NULL) {
+    while (MPIR_debug_gate == 0);
+  }
+
   /* check that we got a variable to write our flag value to */
   if (spawned == NULL) {
     return PMI_ERR_INVALID_ARG;
@@ -41,8 +66,6 @@ int PMI_Init( int *spawned )
   /* allocate new strmaps */
   put = strmap_new();
   commit = strmap_new();
-
-  const char* value;
 
   /* read PMI server addr */
   server_name = NULL;

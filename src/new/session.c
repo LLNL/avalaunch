@@ -22,6 +22,13 @@
 #include <fcntl.h>
 #include <sys/wait.h>
 
+#define KEY_NET_TCP  "tcp"
+#define KEY_NET_IBUD "ibud"
+#define KEY_LOCAL_SHELL  "sh"
+#define KEY_LOCAL_DIRECT "direct"
+#define KEY_MPIR_SPAWN "spawn"
+#define KEY_MPIR_APP   "app"
+
 /*******************************
  * MPIR
  ******************************/
@@ -597,9 +604,9 @@ static pid_t fork_proc(
             if (local == NULL) {
                 SPAWN_ERR("Failed to read LOCAL key");
             } else {
-                if (strcmp(local, "sh") == 0) {
+                if (strcmp(local, KEY_LOCAL_SHELL) == 0) {
                     exec_shell(params, cwd, exe, argmap, envmap);
-                } else if (strcmp(local, "direct") == 0) {
+                } else if (strcmp(local, KEY_LOCAL_DIRECT) == 0) {
                     exec_direct(params, cwd, exe, argmap, envmap);
                 } else {
                     SPAWN_ERR("Unknown LOCAL key value `%s'", local);
@@ -1370,6 +1377,13 @@ static process_group* app_start(session* s, const strmap* params)
     const char* app_procs_str = strmap_get(params, "PPN");
     int numprocs = atoi(app_procs_str);
 
+    /* determine whether we're being debugged */
+    int mpir_app = 0;
+    const char* mpir_str = strmap_get(s->params, "MPIR");
+    if (mpir_str != NULL && strcmp(mpir_str, KEY_MPIR_APP) == 0) {
+        mpir_app = 1;
+    }
+
     /* record number of procs we'll start locally,
      * and allocate space to store pid of each process */
     pg->num = numprocs;
@@ -1415,7 +1429,12 @@ static process_group* app_start(session* s, const strmap* params)
         /* create map for env vars */
         strmap* envmap = strmap_new();
         strmap_setf(envmap, "ENV0=MV2_PMI_ADDR=%s", ep_name);
-        strmap_setf(envmap, "ENVS=%d", 1);
+        if (mpir_app) {
+            strmap_set(envmap, "ENV1" ,"MV2_MPIR=1");
+            strmap_setf(envmap, "ENVS=%d", 2);
+        } else {
+            strmap_setf(envmap, "ENVS=%d", 1);
+        }
 
         /* launch child process */
         pid_t pid = fork_proc(NULL, s->params, app_dir, app_exe, argmap, envmap);
@@ -1428,29 +1447,67 @@ static process_group* app_start(session* s, const strmap* params)
     signal_to_root(s);
     if (!rank) { end_delta(tid); }
 
-#if 0
-    /* gather host, pid, exe to root spawn process for debugging */
-    if (!rank) { tid = begin_delta("gather app proc info"); }
-    signal_from_root(s);
-    char* hostname = spawn_hostname();
-    strmap* procmap = strmap_new();
-    for (i = 0; i < numprocs; i++) {
-        int child_rank = rank * numprocs + i;
-        strmap_setf(procmap, "H%d=%s",  child_rank, hostname);
-        strmap_setf(procmap, "P%d=%ld", child_rank, pg->pids[i]);
-        strmap_setf(procmap, "E%d=%s",  child_rank, app_exe);
+    /* if user wants to debug app procs, gather pids and set MPIR variables */
+    if (mpir_app) {
+        /* gather host, pid, exe to root spawn process for debugging */
+        if (!rank) { tid = begin_delta("gather app proc info"); }
+        signal_from_root(s);
+        char* hostname = spawn_hostname();
+
+        strmap* procmap = strmap_new();
+        for (i = 0; i < numprocs; i++) {
+            int child_rank = rank * numprocs + i;
+            strmap_setf(procmap, "H%d=%s",  child_rank, hostname);
+            strmap_setf(procmap, "P%d=%ld", child_rank, pg->pids[i]);
+            strmap_setf(procmap, "E%d=%s",  child_rank, app_exe);
+        }
+
+        gather_strmap(procmap, s->tree);
+
+        if (!rank) {
+            printf("App proc host, pid, exe map:\n");
+            strmap_print(procmap);
+            printf("\n");
+        }
+
+        spawn_free(&hostname);
+        signal_to_root(s);
+        if (!rank) { end_delta(tid); }
+
+        /* now we have info on root to fill in MPIR proc table */
+        if (rank == 0) {
+            /* allocate space for proc table */
+            MPIR_proctable_size = s->tree->ranks * numprocs;
+            MPIR_proctable = (MPIR_PROCDESC*) SPAWN_MALLOC(MPIR_proctable_size * sizeof(MPIR_PROCDESC));
+
+            /* fill in proc table */
+            for (i = 0; i < MPIR_proctable_size; i++) {
+                /* get pointer to proc descriptor */
+                MPIR_PROCDESC* desc = &MPIR_proctable[i];
+
+                /* fill in host name */
+                char* host_str = strmap_getf(procmap, "H%d", i);
+                desc->host_name = host_str;
+
+                /* fill in exe name */
+                char* exe_str = strmap_getf(procmap, "E%d", i);
+                desc->executable_name = exe_str;
+
+                /* fill in pid */
+                char* pid_str = strmap_getf(procmap, "P%d", i);
+                int pid = atoi(pid_str);
+                desc->pid = pid;
+            }
+
+            /* tell debugger we're ready for it to attach */
+            MPIR_debug_state = MPIR_DEBUG_SPAWNED;
+            MPIR_Breakpoint();
+        }
+
+        strmap_delete(&procmap);
+
+        signal_from_root(s);
     }
-    gather_strmap(procmap, s->tree);
-    if (!rank) {
-        printf("App proc host, pid, exe map:\n");
-        strmap_print(procmap);
-        printf("\n");
-    }
-    strmap_delete(&procmap);
-    spawn_free(&hostname);
-    signal_to_root(s);
-    if (!rank) { end_delta(tid); }
-#endif
 
     /* execute PMI exchange */
     if (use_pmi) {
@@ -1524,7 +1581,20 @@ session* session_init (int argc, char * argv[])
         if (MPIR_being_debugged) {
             /* tell MPIR that we are the main starter process */
             MPIR_i_am_starter = 1;
-            strmap_set(s->params, "MPIR", "1");
+
+            /* determine whether user wants to debug spawn tree or app */
+            if ((value = getenv("MV2_SPAWN_DBG")) != NULL) {
+                if (strcmp(value, KEY_MPIR_SPAWN) != 0 &&
+                    strcmp(value, KEY_MPIR_APP)   != 0)
+                {
+                    SPAWN_ERR("MV2_SPAWN_DBG must be either \"%s\" or \"%s\"",
+                        KEY_MPIR_SPAWN, KEY_MPIR_APP);
+                    _exit(EXIT_FAILURE);
+                }
+                strmap_set(s->params, "MPIR", value);
+            } else {
+                strmap_set(s->params, "MPIR", KEY_MPIR_SPAWN);
+            }
         }
 
         /* check whether user wants us to rcp launcher executable */
@@ -1553,12 +1623,13 @@ session* session_init (int argc, char * argv[])
         /* determine which type of endpoint we should open */
         spawn_net_type type = SPAWN_NET_TYPE_TCP;
         if ((value = getenv("MV2_SPAWN_NET")) != NULL) {
-            if (strcmp(value, "tcp") == 0) {
+            if (strcmp(value, KEY_NET_TCP) == 0) {
                 type = SPAWN_NET_TYPE_TCP;
-            } else if (strcmp(value, "ibud") == 0) {
+            } else if (strcmp(value, KEY_NET_IBUD) == 0) {
                 type = SPAWN_NET_TYPE_IBUD;
             } else {
-                SPAWN_ERR("MV2_SPAWN_NET must be either \"tcp\" or \"ibud\"");
+                SPAWN_ERR("MV2_SPAWN_NET must be either \"%s\" or \"%s\"",
+                    KEY_NET_TCP, KEY_NET_IBUD);
                 _exit(EXIT_FAILURE);
             }
         }
@@ -1613,13 +1684,14 @@ session* session_init (int argc, char * argv[])
         if (value != NULL) {
             strmap_set(s->params, "LOCAL", value);
         } else {
-            strmap_set(s->params, "LOCAL", "direct");
+            strmap_set(s->params, "LOCAL", KEY_LOCAL_DIRECT);
         }
         value = strmap_get(s->params, "LOCAL");
-        if (strcmp(value, "sh")     != 0 &&
-            strcmp(value, "direct") != 0)
+        if (strcmp(value, KEY_LOCAL_SHELL)  != 0 &&
+            strcmp(value, KEY_LOCAL_DIRECT) != 0)
         {
-            SPAWN_ERR("MV2_SPAWN_LOCAL must be either \"sh\" or \"direct\"");
+            SPAWN_ERR("MV2_SPAWN_LOCAL must be either \"%s\" or \"%s\"",
+                KEY_LOCAL_SHELL, KEY_LOCAL_DIRECT);
             _exit(EXIT_FAILURE);
         }
 
@@ -1922,7 +1994,7 @@ int session_start (session * s)
 
     /* at this point we can fill in MPIR proc table for spawn procs */
     char* mpir_str = strmap_get(s->params, "MPIR");
-    if (mpir_str != NULL) {
+    if (mpir_str != NULL && strcmp(mpir_str, KEY_MPIR_SPAWN) == 0) {
         if (nodeid == 0) {
             /* allocate space for proc table */
             MPIR_proctable_size = s->tree->ranks;

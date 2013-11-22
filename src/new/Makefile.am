@@ -35,5 +35,6 @@ libpmi_la_SOURCES = \
   spawn_net_util.c spawn_net_util.h \
   spawn_util.c spawn_util.h \
   strmap.c strmap.h \
+  mpir.c \
   ring.c ring.h \
   pmi.c pmi.h
