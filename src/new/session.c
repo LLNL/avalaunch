@@ -22,6 +22,53 @@
 #include <fcntl.h>
 #include <sys/wait.h>
 
+/*******************************
+ * MPIR
+ ******************************/
+
+#ifndef VOLATILE
+#if defined(__STDC__) || defined(__cplusplus)
+#define VOLATILE volatile
+#else
+#define VOLATILE
+#endif
+#endif
+
+typedef struct {
+    char *host_name;
+    char *executable_name;
+    int pid;
+} MPIR_PROCDESC;
+
+VOLATILE int MPIR_being_debugged = 0;
+
+MPIR_PROCDESC *MPIR_proctable = NULL;
+
+int MPIR_proctable_size = 0;
+
+#define MPIR_NULL 0
+#define MPIR_DEBUG_SPAWNED 1
+#define MPIR_DEBUG_ABORTING 2
+
+VOLATILE int MPIR_debug_state = MPIR_NULL;
+
+//VOLATILE int MPIR_debug_gate = 0;
+
+/* root spawn will set this to 1 */
+int MPIR_i_am_starter = 0;
+
+/* we don't have message queues */
+int MPIR_ignore_queues;
+
+void MPIR_Breakpoint()
+{
+    return;
+}
+
+/*******************************
+ * End MPIR
+ ******************************/
+
 typedef struct spawn_tree_struct {
     int rank;                      /* our global rank (0 to ranks-1) */
     int ranks;                     /* number of nodes in tree */
@@ -1473,6 +1520,13 @@ session* session_init (int argc, char * argv[])
     } else {
         /* no parent, we are the root, create parameters strmap */
 
+        /* we set the MPIR key if we are launched by debugger */
+        if (MPIR_being_debugged) {
+            /* tell MPIR that we are the main starter process */
+            MPIR_i_am_starter = 1;
+            strmap_set(s->params, "MPIR", "1");
+        }
+
         /* check whether user wants us to rcp launcher executable */
         if ((value = getenv("MV2_SPAWN_COPY")) != NULL) {
             copy_launcher = atoi(value);
@@ -1866,7 +1920,40 @@ int session_start (session * s)
         printf("\n");
     }
 
-    /* TODO: at this point we could fill in MPIR to attach to spawn tree */
+    /* at this point we can fill in MPIR proc table for spawn procs */
+    char* mpir_str = strmap_get(s->params, "MPIR");
+    if (mpir_str != NULL) {
+        if (nodeid == 0) {
+            /* allocate space for proc table */
+            MPIR_proctable_size = s->tree->ranks;
+            MPIR_proctable = (MPIR_PROCDESC*) SPAWN_MALLOC(MPIR_proctable_size * sizeof(MPIR_PROCDESC));
+
+            /* fill in proc table */
+            for (i = 0; i < MPIR_proctable_size; i++) {
+                /* get pointer to proc descriptor */
+                MPIR_PROCDESC* desc = &MPIR_proctable[i];
+
+                /* fill in host name */
+                char* host = strmap_getf(s->params, "%d", i);
+                desc->host_name = host;
+
+                /* fill in exe name */
+                desc->executable_name = spawn_exe;
+
+                /* fill in pid */
+                char* pid_str = strmap_getf(spawnproc_strmap, "%d", i);
+                int pid = atoi(pid_str);
+                desc->pid = pid;
+            }
+
+            /* tell debugger we're ready for it to attach */
+            MPIR_debug_state = MPIR_DEBUG_SPAWNED;
+            MPIR_Breakpoint();
+        }
+
+        /* hold all procs on signal from root */
+        signal_from_root(s);
+    }
 
     strmap_delete(&spawnproc_strmap);
 
