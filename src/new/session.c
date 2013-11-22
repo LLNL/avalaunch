@@ -29,23 +29,33 @@ typedef struct spawn_tree_struct {
     int children;                  /* number of children we have */
     int* child_ranks;              /* global ranks of our children */
     spawn_net_channel** child_chs; /* channels to children */
+    char** child_hosts;            /* host names where children are running */
+    pid_t* child_pids;             /* local pids of children */
 } spawn_tree;
 
-struct session_t {
-    char const * spawn_parent;    /* name of our parent's endpoint */
-    char const * spawn_id;        /* id given to us by parent, we echo this back on connect */
-    char const * ep_name;         /* name of our endpoint */
-    spawn_net_endpoint* ep;       /* our endpoint */
-    spawn_tree * tree;            /* data structure that tracks tree info */
-    strmap* params;               /* spawn parameters sent from parent after connect */
-};
+typedef struct session_struct {
+    char const* spawn_parent; /* name of our parent's endpoint */
+    char const* spawn_id;     /* id given to us by parent, we echo this back on connect */
+    char const* ep_name;      /* name of our endpoint */
+    spawn_net_endpoint* ep;   /* our endpoint */
+    spawn_tree* tree;         /* data structure that tracks tree info */
+    strmap* params;           /* spawn parameters sent from parent after connect */
+} session;
+
+typedef struct process_group_struct {
+    strmap* params; /* parameters specified to start process group */
+    uint64_t num;   /* number of processes */
+    pid_t* pids;    /* list of pids */
+} process_group;
+
+/* TODO: need to map pid to process group */
 
 static int call_stop_event_handler = 0;
 static int call_node_finalize = 0;
 
 static int copy_launcher = 0; /* set to 1 to copy launcher to /tmp while unfurling tree */
 
-void session_destroy (struct session_t *);
+void session_destroy(session*);
 
 /* allocates a string and returns current working dir,
  * caller should later free string with spawn_free */
@@ -80,7 +90,11 @@ static char* spawn_getcwd()
 static char* spawn_hostname()
 {
     struct utsname buf;
-    uname(&buf);
+    int rc = uname(&buf);
+    if (rc == -1) {
+        SPAWN_ERR("Failed to get hostname (uname errno=%d %s)", errno, strerror(errno));
+        return NULL;
+    }
     char* name = SPAWN_STRDUP(buf.nodename);
     return name;
 }
@@ -95,6 +109,8 @@ static spawn_tree* tree_new()
     t->children    = 0;
     t->child_ranks = NULL;
     t->child_chs   = NULL;
+    t->child_hosts = NULL;
+    t->child_pids  = NULL;
 
     return t;
 }
@@ -111,11 +127,14 @@ static void tree_delete(spawn_tree** pt)
     int i;
     for (i = 0; i < t->children; i++) {
         spawn_net_disconnect(&(t->child_chs[i]));
+        spawn_free(&(t->child_hosts[i]));
     }
 
     /* free child ids and channels */
     spawn_free(&(t->child_ranks));
     spawn_free(&(t->child_chs));
+    spawn_free(&(t->child_hosts));
+    spawn_free(&(t->child_pids));
 
     /* free connection to parent */
     spawn_net_disconnect(&(t->parent_ch));
@@ -136,12 +155,16 @@ static void tree_create_kary(int rank, int ranks, int k, spawn_tree* t)
     t->ranks = ranks;
 
     if (max_children > 0) {
-        t->child_ranks  = (int*) SPAWN_MALLOC(max_children * sizeof(int));
-        t->child_chs  = (spawn_net_channel**) SPAWN_MALLOC(max_children * sizeof(spawn_net_channel));
+        t->child_ranks = (int*) SPAWN_MALLOC(max_children * sizeof(int));
+        t->child_chs   = (spawn_net_channel**) SPAWN_MALLOC(max_children * sizeof(spawn_net_channel));
+        t->child_hosts = (char**) SPAWN_MALLOC(max_children * sizeof(char*));
+        t->child_pids  = (pid_t*) SPAWN_MALLOC(max_children * sizeof(pid_t));
     }
 
     for (i = 0; i < max_children; i++) {
-        t->child_chs[i] = SPAWN_NET_CHANNEL_NULL;
+        t->child_chs[i]   = SPAWN_NET_CHANNEL_NULL;
+        t->child_hosts[i] = NULL;
+        t->child_pids[i]  = -1;
     }
 
     /* find our parent rank and the ranks of our children */
@@ -470,7 +493,7 @@ static int exec_direct(
 }
 
 /* fork process, child execs specified command */
-static int temp_launch(
+static pid_t fork_proc(
     const char* host,
     const strmap* params,
     const char* cwd,
@@ -499,16 +522,16 @@ static int temp_launch(
 
     pid_t cpid = fork();
 
-    if (-1 == cpid) {
+    if (cpid == -1) {
+        /* fork failed */
         SPAWN_ERR("create_process (fork() errno=%d %s)", errno, strerror(errno));
-        return -1;
+        return cpid;
     }
 
-    else if (!cpid) {
+    else if (cpid == 0) {
+        /* fork succeeded, I'm child */
+
 #if 0
-        /*
-         * Child
-         */
         dup2(pipe_stdin[0], STDIN_FILENO);
         dup2(pipe_stdout[1], STDOUT_FILENO);
         dup2(pipe_stderr[1], STDERR_FILENO);
@@ -539,16 +562,17 @@ static int temp_launch(
             exec_remote(host, params, cwd, exe, argmap, envmap);
         }
 
+        /* failed to exec, exit with failure code */
         SPAWN_ERR("create_child (execlp errno=%d %s)", errno, strerror(errno));
         _exit(EXIT_FAILURE);
     }
 
     else {
-        //struct pollfds_param stdin_param, stdout_param, stderr_param;
-
-//        t.child_pids[index] = cpid;
+        /* fork succeeded, I'm parent */
 
 #if 0
+        //struct pollfds_param stdin_param, stdout_param, stderr_param;
+        //
         stdin_param.fd = pipe_stdin[1];
         stdout_param.fd = pipe_stdout[0];
         stderr_param.fd = pipe_stderr[0];
@@ -569,7 +593,7 @@ static int temp_launch(
 #endif
     }
 
-    return 0;
+    return cpid;
 }
 
 /* given full path of executable, copy to tmp and return new name */
@@ -703,7 +727,7 @@ static pid_t copy_exe(const strmap* params, const char* host, const char* exepat
     return cpid;
 }
 
-int get_spawn_id(struct session_t* s)
+int get_spawn_id(session* s)
 {
     if (s->spawn_id == NULL) {
         /* I am the root of the tree */
@@ -712,7 +736,7 @@ int get_spawn_id(struct session_t* s)
     return atoi(s->spawn_id);
 }
 
-static void signal_to_root(const struct session_t* s)
+static void signal_to_root(const session* s)
 {
     spawn_tree* t = s->tree;
     int children = t->children;
@@ -735,7 +759,7 @@ static void signal_to_root(const struct session_t* s)
     return;
 }
 
-static void signal_from_root(const struct session_t* s)
+static void signal_from_root(const session* s)
 {
     spawn_tree* t = s->tree;
     int children = t->children;
@@ -758,7 +782,7 @@ static void signal_from_root(const struct session_t* s)
     return;
 }
 
-static void print_critical_path(const struct session_t* s, int count, uint64_t* vals, char** labels)
+static void print_critical_path(const session* s, int count, uint64_t* vals, char** labels)
 {
     spawn_tree* t = s->tree;
     int children = t->children;
@@ -965,7 +989,7 @@ static void ring_scan(strmap* input, strmap* output, const spawn_tree* t)
     return;
 }
 
-static void ring_exchange(struct session_t* s, const strmap* params, const spawn_net_endpoint* ep)
+static void ring_exchange(session* s, const strmap* params, const spawn_net_endpoint* ep)
 {
     int i, tid, tid_ring;
     spawn_tree* t = s->tree;
@@ -1098,7 +1122,7 @@ static void ring_exchange(struct session_t* s, const strmap* params, const spawn
     return;
 }
 
-static void pmi_exchange(struct session_t* s, const strmap* params, const spawn_net_endpoint* ep)
+static void pmi_exchange(session* s, const strmap* params, const spawn_net_endpoint* ep)
 {
     int i, tid, tid_pmi;
     int rank = s->tree->rank;
@@ -1240,13 +1264,49 @@ static void pmi_exchange(struct session_t* s, const strmap* params, const spawn_
     return;
 }
 
-static void app_start(struct session_t* s, const strmap* params)
+/* allocate and initialize new process group structure */
+static process_group* process_group_new()
+{
+    process_group* pg = (process_group*) SPAWN_MALLOC(sizeof(process_group));
+    pg->params = strmap_new();
+    pg->num    = 0;
+    pg->pids   = NULL;
+    return pg;
+}
+
+static void process_group_delete(process_group** ppg)
+{
+    if (ppg != NULL) {
+        /* get pointer to process group */
+        process_group* pg = *ppg;
+
+        /* delete paramters */
+        strmap_delete(&pg->params);
+
+        /* delete pids */
+        spawn_free(&pg->pids);
+    }
+
+    /* free process group structure */
+    spawn_free(ppg);
+
+    return;
+}
+
+static process_group* app_start(session* s, const strmap* params)
 {
     /* TODO: for each process group we start, we'll want to
      * create a data structure to record number, pids, comm
      * channels, and initial parameters, etc */
-
     int i, tid;
+
+    /* get a new process group structure */
+    process_group* pg = process_group_new();
+
+    /* copy application parameters */
+    strmap_merge(pg->params, params);
+    
+    /* get our rank within spawn tree */
     int rank = s->tree->rank;
 
     /* read executable name and number of procs */
@@ -1254,6 +1314,11 @@ static void app_start(struct session_t* s, const strmap* params)
     const char* app_dir = strmap_get(params, "CWD");
     const char* app_procs_str = strmap_get(params, "PPN");
     int numprocs = atoi(app_procs_str);
+
+    /* record number of procs we'll start locally,
+     * and allocate space to store pid of each process */
+    pg->num = numprocs;
+    pg->pids = (pid_t*) SPAWN_MALLOC(numprocs * sizeof(pid_t));
 
     /* TODO: bcast application executables */
 
@@ -1269,7 +1334,7 @@ static void app_start(struct session_t* s, const strmap* params)
     const char* use_fifo_str = strmap_get(params, "FIFO");
     int use_fifo = atoi(use_fifo_str);
 
-    /* create endpoint for PMI */
+    /* create endpoint for children to connect to */
     if (!rank) { tid = begin_delta("open init endpoint"); }
     signal_from_root(s);
     spawn_net_endpoint* ep = s->ep;
@@ -1287,17 +1352,21 @@ static void app_start(struct session_t* s, const strmap* params)
     if (!rank) { tid = begin_delta("launch app procs"); }
     signal_from_root(s);
     for (i = 0; i < numprocs; i++) {
+        /* create map for arguments */
         strmap* argmap = strmap_new();
         strmap_setf(argmap, "ARG0=%s", app_exe);
         strmap_setf(argmap, "ARGS=%d", 1);
 
+        /* create map for env vars */
         strmap* envmap = strmap_new();
         strmap_setf(envmap, "ENV0=MV2_PMI_ADDR=%s", ep_name);
         strmap_setf(envmap, "ENVS=%d", 1);
 
         /* launch child process */
-        temp_launch(NULL, s->params, app_dir, app_exe, argmap, envmap);
+        pid_t pid = fork_proc(NULL, s->params, app_dir, app_exe, argmap, envmap);
+        pg->pids[i] = pid;
 
+        /* free maps */
         strmap_delete(&envmap);
         strmap_delete(&argmap);
     }
@@ -1312,7 +1381,7 @@ static void app_start(struct session_t* s, const strmap* params)
         ring_exchange(s, params, ep);
     }
 
-    /* close PMI channels */
+    /* close listening channel for children */
     if (!rank) { tid = begin_delta("close init endpoint"); }
     signal_from_root(s);
     if (use_pmi || use_ring) {
@@ -1323,7 +1392,7 @@ static void app_start(struct session_t* s, const strmap* params)
     signal_to_root(s);
     if (!rank) { end_delta(tid); }
 
-    return;
+    return pg;
 }
 
 /* given the name of a command, search for it in path,
@@ -1340,10 +1409,9 @@ static void find_command(strmap* map, const char* cmd)
     return;
 }
 
-struct session_t *
-session_init (int argc, char * argv[])
+session* session_init (int argc, char * argv[])
 {
-    struct session_t * s = SPAWN_MALLOC(sizeof(struct session_t));
+    session * s = SPAWN_MALLOC(sizeof(session));
 
     /* intialize session fields */
     s->spawn_parent = NULL;
@@ -1500,8 +1568,7 @@ static uint64_t time_diff(struct timespec* end, struct timespec* start)
     return total;
 }
 
-int
-session_start (struct session_t * s)
+int session_start (session * s)
 { 
     int i, tid, tid_tree;
     int nodeid;
@@ -1537,9 +1604,17 @@ session_start (struct session_t * s)
         t->parent_ch = spawn_net_connect(s->spawn_parent);
         clock_gettime(CLOCK_MONOTONIC_RAW, &t_parent_connect_end);
 
-        /* send our id */
         clock_gettime(CLOCK_MONOTONIC_RAW, &t_parent_params_start);
-        spawn_net_write_str(t->parent_ch, s->spawn_id);
+
+        /* read our pid */
+        pid_t pid = getpid();
+
+        /* send our id */
+        strmap* idmap = strmap_new();
+        strmap_set(idmap, "ID", s->spawn_id);
+        strmap_setf(idmap, "PID=%ld", (long) pid);
+        spawn_net_write_strmap(t->parent_ch, idmap);
+        strmap_delete(&idmap);
 
         /* read parameters */
         spawn_net_read_strmap(t->parent_ch, s->params);
@@ -1658,7 +1733,9 @@ session_start (struct session_t * s)
         strmap_setf(envmap, "ENVS=%d", 2);
 
         /* launch child process */
-        temp_launch(host, s->params, spawn_cwd, spawn_exe, argmap, envmap);
+        pid_t pid = fork_proc(host, s->params, spawn_cwd, spawn_exe, argmap, envmap);
+        t->child_hosts[i] = SPAWN_STRDUP(host);
+        t->child_pids[i]  = pid;
 
         /* free the maps */
         strmap_delete(&envmap);
@@ -1694,8 +1771,14 @@ session_start (struct session_t * s)
         /* accept child connection */
         spawn_net_channel* ch = chs[i];
 
+        /* read strmap from child */
+        strmap* idmap = strmap_new();
+        spawn_net_read_strmap(ch, idmap);
+
         /* read global id from child */
-        char* str = spawn_net_read_str(ch);
+        char* str = strmap_get(idmap, "ID");
+        if (str == NULL) {
+        }
 
         /* lookup local id from global id */
         const char* value = strmap_get(childmap, str);
@@ -1703,7 +1786,13 @@ session_start (struct session_t * s)
         }
         int index = atoi(value);
 
-        spawn_free(&str);
+        /* read pid of child */
+        char* pid_str = strmap_get(idmap, "PID");
+        if (pid_str == NULL) {
+        }
+
+        /* free map holding child's data */
+        spawn_free(&idmap);
 
         /* record channel for child */
         t->child_chs[index] = ch;
@@ -1880,8 +1969,7 @@ session_start (struct session_t * s)
     return 0;
 }
 
-void
-session_destroy (struct session_t * s)
+void session_destroy (session * s)
 {
     spawn_free(&(s->spawn_id));
     spawn_free(&(s->spawn_parent));
