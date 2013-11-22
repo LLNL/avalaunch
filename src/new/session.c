@@ -851,7 +851,7 @@ static void bcast_strmap(strmap* map, const spawn_tree* t)
     return;
 }
 
-static void allgather_strmap(strmap* map, const spawn_tree* t)
+static void gather_strmap(strmap* map, const spawn_tree* t)
 {
     /* gather input from children */
     int i;
@@ -866,6 +866,14 @@ static void allgather_strmap(strmap* map, const spawn_tree* t)
     if (p != SPAWN_NET_CHANNEL_NULL) {
         spawn_net_write_strmap(p, map);
     }
+
+    return;
+}
+
+static void allgather_strmap(strmap* map, const spawn_tree* t)
+{
+    /* gather map to root */
+    gather_strmap(map, t);
 
     /* broadcast map from root */
     bcast_strmap(map, t);
@@ -1373,6 +1381,30 @@ static process_group* app_start(session* s, const strmap* params)
     signal_to_root(s);
     if (!rank) { end_delta(tid); }
 
+#if 0
+    /* gather host, pid, exe to root spawn process for debugging */
+    if (!rank) { tid = begin_delta("gather app proc info"); }
+    signal_from_root(s);
+    char* hostname = spawn_hostname();
+    strmap* procmap = strmap_new();
+    for (i = 0; i < numprocs; i++) {
+        int child_rank = rank * numprocs + i;
+        strmap_setf(procmap, "H%d=%s",  child_rank, hostname);
+        strmap_setf(procmap, "P%d=%ld", child_rank, pg->pids[i]);
+        strmap_setf(procmap, "E%d=%s",  child_rank, app_exe);
+    }
+    gather_strmap(procmap, s->tree);
+    if (!rank) {
+        printf("App proc host, pid, exe map:\n");
+        strmap_print(procmap);
+        printf("\n");
+    }
+    strmap_delete(&procmap);
+    spawn_free(&hostname);
+    signal_to_root(s);
+    if (!rank) { end_delta(tid); }
+#endif
+
     /* execute PMI exchange */
     if (use_pmi) {
         pmi_exchange(s, params, ep);
@@ -1813,18 +1845,48 @@ int session_start (session * s)
     if (!nodeid) { end_delta(tid_tree); }
 
     /**********************
-     * Gather endpoints of all spawns
+     * Gather pids for all spawn procs
+     * (unnecessary, but interesting to measure anyway)
+     **********************/
+
+    strmap* spawnproc_strmap = strmap_new();
+
+    /* wait for signal from root before we start to gather proc info */
+    if (!nodeid) { tid = begin_delta("gather spawn pids **"); }
+    signal_from_root(s);
+    pid_t pid = getpid();
+    strmap_setf(spawnproc_strmap, "%d=%ld", s->tree->rank, (long)pid);
+    gather_strmap(spawnproc_strmap, s->tree);
+    signal_to_root(s);
+    if (!nodeid) { end_delta(tid); }
+
+    if (nodeid == 0) {
+        printf("Spawn pid map:\n");
+        strmap_print(spawnproc_strmap);
+        printf("\n");
+    }
+
+    /* TODO: at this point we could fill in MPIR to attach to spawn tree */
+
+    strmap_delete(&spawnproc_strmap);
+
+    /**********************
+     * Gather endpoints of all spawns and measure some other costs
      * (unnecessary, but interesting to measure anyway)
      **********************/
 
     /* wait for signal from root before we start spawn ep exchange */
-    if (!nodeid) { tid = begin_delta("spawn endpoint exchange"); }
+    if (!nodeid) { tid = begin_delta("spawn endpoint exchange **"); }
     signal_from_root(s);
 
     /* add our endpoint into strmap and do an allgather */
     strmap* spawnep_strmap = strmap_new();
     strmap_setf(spawnep_strmap, "%d=%s", s->tree->rank, s->ep_name);
     allgather_strmap(spawnep_strmap, s->tree);
+
+    /* signal root to let it know spawn ep bcast has completed */
+    signal_to_root(s);
+    if (!nodeid) { end_delta(tid); }
 
     /* print map from rank 0 */
     if (nodeid == 0) {
@@ -1833,13 +1895,9 @@ int session_start (session * s)
         printf("\n");
     }
 
-    /* signal root to let it know spawn ep bcast has completed */
-    signal_to_root(s);
-    if (!nodeid) { end_delta(tid); }
-
     /* measure pack/unpack cost of strmap */
     if (nodeid == 0) {
-        if (!nodeid) { tid = begin_delta("pack/unpack strmap x1000"); }
+        if (!nodeid) { tid = begin_delta("pack/unpack strmap x1000 **"); }
         for (i = 0; i < 1000; i++) {
             size_t pack_size = strmap_pack_size(spawnep_strmap);
             void* pack_buf = SPAWN_MALLOC(pack_size);
@@ -1859,7 +1917,7 @@ int session_start (session * s)
 
     /* measure cost of signal propagation */
     signal_from_root(s);
-    if (!nodeid) { tid = begin_delta("signal costs x1000"); }
+    if (!nodeid) { tid = begin_delta("signal costs x1000 **"); }
     for (i = 0; i < 1000; i++) {
         signal_to_root(s);
         signal_from_root(s);
