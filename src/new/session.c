@@ -655,7 +655,7 @@ ssize_t get_file_size(const char* file)
 {
     struct stat statbuf;
     stat(file, &statbuf);
-    return (size_t) statbuf.st_size;
+    return (ssize_t) statbuf.st_size;
 }
 
 /* given full path of executable, copy it to memory */
@@ -698,8 +698,10 @@ static ssize_t write_to_ramdisk(const char* src, const char* buf, ssize_t size, 
     return nwrite;
 }
 /* given full path of executable, copy it to memory */
-static ssize_t read_to_mem(const char* src, const char* buf)
+static ssize_t read_to_mem(const char* src, ssize_t bufsize , const char* buf)
 {
+    ssize_t nread = 0, tmpread = 0;
+
     /* open source file for reading */
     int srcfd = open(src, O_RDONLY);
     if (srcfd < 0) {
@@ -707,12 +709,12 @@ static ssize_t read_to_mem(const char* src, const char* buf)
         return NULL;
     }
 
-    /* allocate buffer */
-    ssize_t bufsize = get_file_size(src);
-    buf = (const char*) SPAWN_MALLOC(bufsize);
-
-    /* read block from source file */
-    ssize_t nread = read(srcfd, buf, bufsize);
+    /* read from source file */
+    while (nread < bufsize) {
+        tmpread = read(srcfd, buf, bufsize);
+        nread += tmpread;
+        buf += tmpread;
+    }
 
     /* bail out if we hit EOF */
     if (nread == 0) {
@@ -1534,17 +1536,16 @@ static process_group* app_start(session* s, const strmap* params)
             ssize_t bin_size_n;
             
             if (s->spawn_parent == NULL) {
+    
                 /* read file to memory */
-                bin_size_n = read_to_mem(app_exe, &binary_buf);
-
+                ssize_t bufsize = get_file_size(app_exe);
+                binary_buf = (const char*) SPAWN_MALLOC(bufsize);
+                bin_size_n = read_to_mem(app_exe, bufsize, &binary_buf);
+                
                 /* set EXE_BIN key in binary_map */
                 sprintf(bin_size, "%d", bin_size_n);
-                printf("bin size = %s\n", bin_size);
                 strmap_set(binary_map, "EXE_SIZE", bin_size);
-                printf("set size strmap\n");
-                printf("setting binary to %p\n", binary_buf);
                 strmap_set(binary_map, "EXE_BIN", binary_buf);
-                printf("set bin strmap\n");
 
             }
 
