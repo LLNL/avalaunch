@@ -349,8 +349,13 @@ int post_ud_send(MPIDI_VC_t* vc, vbuf* v, int rail, mv2_ud_ctx_t *send_ud_ctx)
     return 0;
 }
 
-static inline void mv2_ud_ext_sendq_send(MPIDI_VC_t *vc, mv2_ud_ctx_t *ud_ctx)
+/* when a send work element completes, issue another */
+void mv2_ud_update_send_credits(int num)
 {
+    /* increment number of available send work queue elements */
+    mv2_ud_ctx_t* ud_ctx = proc.ud_ctx;
+    ud_ctx->send_wqes_avail += num;
+
     /* get pointer to UD context extended send queue */
     message_queue_t* q = &ud_ctx->ext_send_queue;
 
@@ -388,27 +393,6 @@ static inline void mv2_ud_ext_sendq_send(MPIDI_VC_t *vc, mv2_ud_ctx_t *ud_ctx)
 
         /* go on to next item in queue */
         cur = next;
-    }
-
-    return;
-}
-
-/* when a send work element completes, issue another */
-void mv2_ud_update_send_credits(vbuf *v)
-{
-    /* increment number of available send work queue elements */
-    mv2_ud_ctx_t* ud_ctx = proc.ud_ctx;
-    ud_ctx->send_wqes_avail++;
-
-    PRINT_DEBUG(DEBUG_UD_verbose>2,"available wqes: %d seqno: %d\n",
-        ud_ctx->send_wqes_avail, v->seqnum);
-
-    /* if we have items on UD context extended send queue and available
-     * slots in send queue, send some items from extended queue */
-    if (ud_ctx->ext_send_queue.head != NULL &&
-        ud_ctx->send_wqes_avail > 0)
-    {
-        mv2_ud_ext_sendq_send(v->vc, ud_ctx);   
     }
 
     return;

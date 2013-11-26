@@ -314,6 +314,9 @@ static int mv2_poll_cq()
         exit(-1);
     }
 
+    /* count number of completed sends */
+    int sendcnt = 0;
+
     /* process entries if we got any */
     int i;
     for (i = 0; i < ne; i++) {
@@ -338,9 +341,8 @@ static int mv2_poll_cq()
             case IBV_WC_SEND:
             case IBV_WC_RDMA_READ:
             case IBV_WC_RDMA_WRITE:
-                /* now that a send completed, issue pending sends if
-                 * we have any */
-                mv2_ud_update_send_credits(v);
+                /* remember that a send completed to issue more sends later */
+                sendcnt++;
 
                 /* if SEND_INPROGRESS and FREE_PENDING flags are set,
                  * release the vbuf */
@@ -425,6 +427,11 @@ static int mv2_poll_cq()
                 SPAWN_ERR("Invalid opcode from ibv_poll_cq: %d", wc->opcode);
                 break;
         }
+    }
+
+    /* if sends completed, issue pending sends if we have any */
+    if (sendcnt > 0) {
+        mv2_ud_update_send_credits(sendcnt);
     }
 
     return ne;

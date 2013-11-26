@@ -273,7 +273,7 @@ void mv2_ud_zcopy_poll_cq(mv2_ud_zcopy_info_t *zcopy_info, mv2_ud_ctx_t *ud_ctx,
 
 int post_ud_send(MPIDI_VC_t* vc, vbuf* v, int rail, mv2_ud_ctx_t *send_ud_ctx);
 void mv2_check_resend();
-void mv2_ud_update_send_credits(vbuf *v);
+void mv2_ud_update_send_credits(int num);
 void mv2_send_explicit_ack(MPIDI_VC_t *vc);
 int MRAILI_Process_send(void *vbuf_addr);
 void MRAILI_Process_recv(vbuf *v);
