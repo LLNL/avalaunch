@@ -2095,7 +2095,10 @@ int session_start (session * s)
         /* set executable path */
         char* value = getenv("MV2_SPAWN_EXE");
         if (value != NULL) {
-            strmap_set(appmap, "EXE", value);
+            /* do the path search once in root */
+            char* app_path = path_search(value);
+            strmap_set(appmap, "EXE", app_path);
+            spawn_free(&app_path);
         } else {
             strmap_set(appmap, "EXE", "/bin/hostname");
         }
