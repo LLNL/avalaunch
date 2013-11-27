@@ -31,8 +31,11 @@
 
 /*******************************
  * MPIR
+ * http://www.mpi-forum.org/docs/docs.html
  ******************************/
 
+/* since debugger process will set / read some of these variables
+ * externally, we need to mark them as volatile to compiler */
 #ifndef VOLATILE
 #if defined(__STDC__) || defined(__cplusplus)
 #define VOLATILE volatile
@@ -41,24 +44,38 @@
 #endif
 #endif
 
+/* single entry for process table */
 typedef struct {
-    char *host_name;
-    char *executable_name;
-    int pid;
+    char *host_name;       /* hostname where process is running */
+    char *executable_name; /* full path to executable (NUL-terminated) */
+    int pid;               /* process id */
 } MPIR_PROCDESC;
 
+/* debugger sets this to 1 if process is launched under debugger
+ * control */
 VOLATILE int MPIR_being_debugged = 0;
 
+/* pointer to process table, to be allocated and filled in by
+ * application started process for debugger, consists of
+ * MPIR_proctable_size entries of MPIR_PROCDESC structs */
 MPIR_PROCDESC *MPIR_proctable = NULL;
 
+/* number of entries in process table */
 int MPIR_proctable_size = 0;
 
+/* valid values to set MPIR_debug_state to */
 #define MPIR_NULL 0
 #define MPIR_DEBUG_SPAWNED 1
 #define MPIR_DEBUG_ABORTING 2
 
+/* application starter process sets this variable before calling
+ * MPIR_Breakpoint to communicate with debugger */
 VOLATILE int MPIR_debug_state = MPIR_NULL;
 
+/* this variable lives in pmi.c and ring.c, the starter process
+ * passes a key / environment variable to inform application
+ * processes whether they should check this value before continuing
+ * through "init", the debugger will set it to 1 when it attaches */
 //VOLATILE int MPIR_debug_gate = 0;
 
 /* root spawn will set this to 1 */
@@ -67,6 +84,7 @@ int MPIR_i_am_starter = 0;
 /* we don't have message queues */
 int MPIR_ignore_queues;
 
+/* started process calls this routines to signal attached debugger */
 void MPIR_Breakpoint()
 {
     return;
@@ -76,6 +94,7 @@ void MPIR_Breakpoint()
  * End MPIR
  ******************************/
 
+/* records info about the tree of spawn processes */
 typedef struct spawn_tree_struct {
     int rank;                      /* our global rank (0 to ranks-1) */
     int ranks;                     /* number of nodes in tree */
@@ -84,9 +103,11 @@ typedef struct spawn_tree_struct {
     int* child_ranks;              /* global ranks of our children */
     spawn_net_channel** child_chs; /* channels to children */
     char** child_hosts;            /* host names where children are running */
-    pid_t* child_pids;             /* local pids of children */
+    pid_t* child_pids;             /* pids of local processes that started children */
 } spawn_tree;
 
+/* records info for the session including a pointer to the tree of
+ * spawn processes and a strmap of session parameters */
 typedef struct session_struct {
     char const* spawn_parent; /* name of our parent's endpoint */
     char const* spawn_id;     /* id given to us by parent, we echo this back on connect */
@@ -96,6 +117,9 @@ typedef struct session_struct {
     strmap* params;           /* spawn parameters sent from parent after connect */
 } session;
 
+/* records info about an application process group including
+ * paramters used to start the processes, the number of processes
+ * started by the owning spawn process and their pids */
 typedef struct process_group_struct {
     strmap* params; /* parameters specified to start process group */
     uint64_t num;   /* number of processes */
@@ -790,6 +814,7 @@ int get_spawn_id(session* s)
     return atoi(s->spawn_id);
 }
 
+/* sends a synchronization signal up tree to root */
 static void signal_to_root(const session* s)
 {
     spawn_tree* t = s->tree;
@@ -813,6 +838,7 @@ static void signal_to_root(const session* s)
     return;
 }
 
+/* waits for synchronization signal to propagate down tree from root */
 static void signal_from_root(const session* s)
 {
     spawn_tree* t = s->tree;
@@ -836,6 +862,10 @@ static void signal_from_root(const session* s)
     return;
 }
 
+/* a type of reduction in which each spawn process adds its time to
+ * the max time of all of its children and sends the sum to its parent,
+ * an array of input values are provided along with labels to print
+ * the results */
 static void print_critical_path(const session* s, int count, uint64_t* vals, char** labels)
 {
     spawn_tree* t = s->tree;
@@ -845,7 +875,7 @@ static void print_critical_path(const session* s, int count, uint64_t* vals, cha
     uint64_t* recv = (uint64_t*) SPAWN_MALLOC(bytes);
     uint64_t* max  = (uint64_t*) SPAWN_MALLOC(bytes);
 
-    /* wait for signal from all children */
+    /* wait for data from all children */
     int i, j;
     for (i = 0; i < children; i++) {
         spawn_net_channel* ch = t->child_chs[i];
@@ -874,6 +904,7 @@ static void print_critical_path(const session* s, int count, uint64_t* vals, cha
     if (t->parent_ch != SPAWN_NET_CHANNEL_NULL) {
         spawn_net_write(t->parent_ch, max, bytes);
     } else {
+        /* print results if we're the root */
         for (j = 0; j < count; j++) {
             double time = (double)max[j] / 1000000000.0;
             printf("%s = %f\n", labels[j], time);
@@ -886,6 +917,8 @@ static void print_critical_path(const session* s, int count, uint64_t* vals, cha
     return;
 }
 
+/* TODO: pack strmap once, bcast bytes, unpack once at end */
+/* broadcast string map from root to all procs in tree */
 static void bcast_strmap(strmap* map, const spawn_tree* t)
 {
     /* read map from parent, if we have one */
@@ -905,6 +938,7 @@ static void bcast_strmap(strmap* map, const spawn_tree* t)
     return;
 }
 
+/* combine strmaps as they travel up tree to root */
 static void gather_strmap(strmap* map, const spawn_tree* t)
 {
     /* gather input from children */
@@ -924,6 +958,7 @@ static void gather_strmap(strmap* map, const spawn_tree* t)
     return;
 }
 
+/* implement an allgather of strmap across all procs in tree */
 static void allgather_strmap(strmap* map, const spawn_tree* t)
 {
     /* gather map to root */
@@ -935,9 +970,54 @@ static void allgather_strmap(strmap* map, const spawn_tree* t)
     return;
 }
 
+/* With the ring exchange, each application process provides an address
+ * as input via a string, and each gets back two strings, which are the
+ * addresses provided by its left and right neighbors.  To implement
+ * this we execute a double scan within the spawn net tree.  It's
+ * broken into two steps.  The ring_scan function executes the scan
+ * considering just the spawn processes, while the ring_exchange function
+ * gathers data from and sends data to the application processes. */
+
+/* As input we expect a strmap containing addresses of the leftmost
+ * and rightmost addresses of the application procs the local spawn proc
+ * launched.  The leftmost address is stored in "LEFT" and the rightmost
+ * address is stored in "RIGHT".  If the spawn process did not start
+ * any app procs, neither LEFT nor RIGHT should be set.
+ *
+ * As output, we provide a strmap that contains the addresses of procs
+ * to the left and right sides that the local spawn process should link
+ * to.
+ *
+ * A double scan operation is then executed across the spawn tree
+ * to create a ring.  Spawn procs are ordered in the following way:
+ *
+ *   local spawn process, child1, child2, child3, ...
+ *
+ * where child1/2/3 are the children spawn processes the local process
+ * is the parent to.
+ *
+ * To compute the leftmost and rightmost values to send to the parent
+ * the LEFT address is set to the first LEFT value found (if any) by
+ * scanning from left-to-right, and the RIGHT address is set to the
+ * first RIGHT value found (if any) scanning right-to-left.  These
+ * values represent the leftmost and rightmost addresses of the whole
+ * subtree covered by the local spawn process and its children.
+ *
+ * When this reaches the root of the tree, the root creates a ring by
+ * scanning the leftmost address to be the first RIGHT value found by
+ * scanning right-to-left and setting the rightmost address to be the
+ * first LEFT value scanning left-to-right.
+ *
+ * Then messages are sent back to each child in the tree.  For child i,
+ * the LEFT address is set to be the RIGHT value of child i-1 and its
+ * RIGHT address is set to be the LEFT value of child i+1.  For the
+ * LEFT value of child 0, we use the RIGHT value of the local spawn proc. */
+
 static void ring_scan(strmap* input, strmap* output, const spawn_tree* t)
 {
     int i;
+
+    /* get number of children and channel to our parent */
     int children = t->children;
     spawn_net_channel* parent_ch = t->parent_ch;
 
@@ -1051,7 +1131,15 @@ static void ring_scan(strmap* input, strmap* output, const spawn_tree* t)
     return;
 }
 
-static void ring_exchange(session* s, const strmap* params, const spawn_net_endpoint* ep)
+/* Protocol between spawn and app proc:
+ *   1) App proc connects to spawn proc
+ *   2) App proc sends strmap to spawn proc containing ADDR key
+ *   3) Spawn proc initializes LEFT/RIGHT strmap using ADDR values from children
+ *   4) Spawn proc invokes ring_scan across spawn tree
+ *   5) Spawn proc computes LEFT/RIGHT addresses for each child,
+ *      sends these values along with RANK/RANKS to each child
+ *   6) Spawn proc disconnects from each child */
+static void ring_exchange(session* s, const process_group* pg, const spawn_net_endpoint* ep)
 {
     int i, tid, tid_ring;
     spawn_tree* t = s->tree;
@@ -1062,25 +1150,26 @@ static void ring_exchange(session* s, const strmap* params, const spawn_net_endp
     signal_from_root(s);
 
     /* get number of procs we should here from */
-    const char* app_procs_str = strmap_get(params, "PPN");
-    int numprocs = atoi(app_procs_str);
+    int children = (int) pg->num;
+
+    /* TODO: read ranks from process group */
 
     /* get total number of procs in job */
-    int ranks = t->ranks * numprocs;
+    int ranks = t->ranks * children;
 
     /* allocate a strmap for each child */
-    strmap** maps = (strmap**) SPAWN_MALLOC(numprocs * sizeof(strmap*));
-    for (i = 0; i < numprocs; i++) {
+    strmap** maps = (strmap**) SPAWN_MALLOC(children * sizeof(strmap*));
+    for (i = 0; i < children; i++) {
         maps[i] = strmap_new();
     }
 
     /* allocate a channel for each child */
-    spawn_net_channel** chs = (spawn_net_channel**) SPAWN_MALLOC(numprocs * sizeof(spawn_net_channel*));
+    spawn_net_channel** chs = (spawn_net_channel**) SPAWN_MALLOC(children * sizeof(spawn_net_channel*));
 
     /* wait for children to connect */
     if (!rank) { tid = begin_delta("ring accept"); }
     signal_from_root(s);
-    for (i = 0; i < numprocs; i++) {
+    for (i = 0; i < children; i++) {
         chs[i] = spawn_net_accept(ep);
     }
     signal_to_root(s);
@@ -1089,7 +1178,7 @@ static void ring_exchange(session* s, const strmap* params, const spawn_net_endp
     /* wait for address from each child */
     if (!rank) { tid = begin_delta("ring read children"); }
     signal_from_root(s);
-    for (i = 0; i < numprocs; i++) {
+    for (i = 0; i < children; i++) {
         spawn_net_read_strmap(chs[i], maps[i]);
     }
     signal_to_root(s);
@@ -1104,9 +1193,9 @@ static void ring_exchange(session* s, const strmap* params, const spawn_net_endp
 
     /* get addresses of our left-most and right-most children */
     strmap* input = strmap_new();
-    if (numprocs > 0) {
+    if (children > 0) {
         const char* leftmost  = strmap_get(maps[0], "ADDR");
-        const char* rightmost = strmap_get(maps[numprocs-1], "ADDR");
+        const char* rightmost = strmap_get(maps[children-1], "ADDR");
         strmap_set(input, "LEFT",  leftmost);
         strmap_set(input, "RIGHT", rightmost);
     }
@@ -1123,10 +1212,10 @@ static void ring_exchange(session* s, const strmap* params, const spawn_net_endp
     /* compute left and right addresses for each of our children */
     if (!rank) { tid = begin_delta("ring write children"); }
     signal_from_root(s);
-    for (i = 0; i < numprocs; i++) {
+    for (i = 0; i < children; i++) {
         /* since each spawn proc is creating the same number of tasks,
          * we can hardcode a child rank relative to the spawn rank */
-        int child_rank = rank * numprocs + i;
+        int child_rank = rank * children + i;
 
         /* send init info */
         strmap* init = strmap_new();
@@ -1144,7 +1233,7 @@ static void ring_exchange(session* s, const strmap* params, const spawn_net_endp
         strmap_set(init, "LEFT", left);
 
         const char* right;
-        if (i < numprocs-1) {
+        if (i < children-1) {
             /* get leftmost address on right side */
             right = strmap_get(maps[i+1], "ADDR");
         } else {
@@ -1166,14 +1255,14 @@ static void ring_exchange(session* s, const strmap* params, const spawn_net_endp
     /* disconnect from each child */
     if (!rank) { tid = begin_delta("ring disconnect"); }
     signal_from_root(s);
-    for (i = 0; i < numprocs; i++) {
+    for (i = 0; i < children; i++) {
         spawn_net_disconnect(&chs[i]);
     }
     signal_to_root(s);
     if (!rank) { end_delta(tid); }
 
     /* delete each child strmap */
-    for (i = 0; i < numprocs; i++) {
+    for (i = 0; i < children; i++) {
         strmap_delete(&maps[i]);
     }
 
@@ -1184,9 +1273,39 @@ static void ring_exchange(session* s, const strmap* params, const spawn_net_endp
     return;
 }
 
-static void pmi_exchange(session* s, const strmap* params, const spawn_net_endpoint* ep)
+/* TODO: support more general PMI usage */
+/* TODO: support versioning info in case app procs use an older
+ * PMI protocol */
+
+/* This is hard-coded to expect that each process contributes zero or
+ * more key/value pairs with PMI_Put and PMI_Commit, calls PMI_Barrier,
+ * and then executes two PMI_Get calls each before calling PMI_Finalize.
+ *
+ * At the PMI_Barrier, a global allgather of key/value pairs is
+ * executed and the full map is stored at each spawn process.
+ *
+ * Protocol between spawn and application procs:
+ *   1) App proc connects to spawn_net_endpoint of spawn process
+ *   2) Spawn process accepts connection
+ *   3) Spawn process sends strmap of RANK/RANKS/JOBID info needed for
+ *      output in PMI_Init
+ *   4) App proc sends "BARRIER" string (spawn_net_read_str/write_str)
+ *   5) App proc sends strmap of its committed key/value pairs
+ *   6) Spawn procs execute allgather of strmaps
+ *   7) Spawn proc sends "BARRIER" string back to app proc
+ *   8) For each child:
+ *        Spawn proc waits on "GET" string
+ *        Spawn proc waits on key string
+ *        Spawn proc looks up key in strmap
+ *        Spawn proc sends value string back to app proc
+ *   9) Repeat above step again to handle 2nd "GET" from each proc
+ *  10) App proc sends "FINALIZE" string to spawn proc
+ *  11) Spawn proc disconnects from each child */
+static void pmi_exchange(session* s, const process_group* pg, const spawn_net_endpoint* ep)
 {
     int i, tid, tid_pmi;
+
+    /* get our rank within spawn tree */
     int rank = s->tree->rank;
 
     /* wait for signal from root before we start PMI exchange */
@@ -1197,8 +1316,9 @@ static void pmi_exchange(session* s, const strmap* params, const spawn_net_endpo
     strmap* pmi_strmap = strmap_new();
 
     /* get number of procs we should here from */
-    const char* app_procs_str = strmap_get(params, "PPN");
-    int numprocs = atoi(app_procs_str);
+    int numprocs = (int) pg->num;
+
+    /* TODO: extract ranks and jobid from process group */
 
     /* get total number of procs in job */
     int ranks = s->tree->ranks * numprocs;
@@ -1261,7 +1381,7 @@ static void pmi_exchange(session* s, const strmap* params, const spawn_net_endpo
     if (!rank) { tid = begin_delta("pmi write children"); }
     signal_from_root(s);
 
-    /* send BARRIER message */
+    /* send BARRIER message back to child app procs */
     char cmd_barrier[] = "BARRIER";
     for (i = 0; i < numprocs; i++) {
         spawn_net_channel* ch = chs[i];
@@ -1336,6 +1456,7 @@ static process_group* process_group_new()
     return pg;
 }
 
+/* free resources associated with process group */
 static void process_group_delete(process_group** ppg)
 {
     if (ppg != NULL) {
@@ -1355,11 +1476,9 @@ static void process_group_delete(process_group** ppg)
     return;
 }
 
-static process_group* app_start(session* s, const strmap* params)
+/* launch app process group witih the session according to params */
+static process_group* process_group_start(session* s, const strmap* params)
 {
-    /* TODO: for each process group we start, we'll want to
-     * create a data structure to record number, pids, comm
-     * channels, and initial parameters, etc */
     int i, tid;
 
     /* get a new process group structure */
@@ -1389,7 +1508,7 @@ static process_group* app_start(session* s, const strmap* params)
     pg->num = numprocs;
     pg->pids = (pid_t*) SPAWN_MALLOC(numprocs * sizeof(pid_t));
 
-    /* TODO: bcast application executables */
+    /* TODO: bcast application executables/libraries here */
 
     /* check flag for whether we should initiate PMI exchange */
     const char* use_pmi_str = strmap_get(params, "PMI");
@@ -1464,7 +1583,7 @@ static process_group* app_start(session* s, const strmap* params)
 
         gather_strmap(procmap, s->tree);
 
-        if (!rank) {
+        if (rank == 0) {
             printf("App proc host, pid, exe map:\n");
             strmap_print(procmap);
             printf("\n");
@@ -1480,21 +1599,37 @@ static process_group* app_start(session* s, const strmap* params)
             MPIR_proctable_size = s->tree->ranks * numprocs;
             MPIR_proctable = (MPIR_PROCDESC*) SPAWN_MALLOC(MPIR_proctable_size * sizeof(MPIR_PROCDESC));
 
+            /* create a strmap so we can use the same character pointer
+             * since we expect common hostnames and executable paths,
+             * an optimization discussed in MPIR spec for debuggers */
+            strmap* strcache = strmap_new();
+
             /* fill in proc table */
             for (i = 0; i < MPIR_proctable_size; i++) {
                 /* get pointer to proc descriptor */
                 MPIR_PROCDESC* desc = &MPIR_proctable[i];
 
                 /* fill in host name */
-                char* host_str = strmap_getf(procmap, "H%d", i);
-                desc->host_name = host_str;
+                const char* host_str = strmap_getf(procmap, "H%d", i);
+                const char* host_str2 = strmap_get(strcache, host_str);
+                if (host_str2 == NULL) {
+                    strmap_set(strcache, host_str, host_str);
+                    host_str2 = strmap_get(strcache, host_str);
+                }
+                desc->host_name = (char*) host_str2;
 
                 /* fill in exe name */
-                char* exe_str = strmap_getf(procmap, "E%d", i);
-                desc->executable_name = exe_str;
+                const char* exe_str = strmap_getf(procmap, "E%d", i);
+                const char* exe_str2 = strmap_get(strcache, exe_str);
+                if (exe_str2 == NULL) {
+                    strmap_set(strcache, exe_str, exe_str);
+                    exe_str2 = strmap_get(strcache, exe_str);
+                }
+                desc->executable_name = (char*) exe_str2;
 
+                /* TODO: careful with converting pid/integer here */
                 /* fill in pid */
-                char* pid_str = strmap_getf(procmap, "P%d", i);
+                const char* pid_str = strmap_getf(procmap, "P%d", i);
                 int pid = atoi(pid_str);
                 desc->pid = pid;
             }
@@ -1502,6 +1637,9 @@ static process_group* app_start(session* s, const strmap* params)
             /* tell debugger we're ready for it to attach */
             MPIR_debug_state = MPIR_DEBUG_SPAWNED;
             MPIR_Breakpoint();
+
+            /* free the cache of strings */
+            strmap_delete(&strcache);
         }
 
         strmap_delete(&procmap);
@@ -1511,10 +1649,10 @@ static process_group* app_start(session* s, const strmap* params)
 
     /* execute PMI exchange */
     if (use_pmi) {
-        pmi_exchange(s, params, ep);
+        pmi_exchange(s, pg, ep);
     }
     if (use_ring) {
-        ring_exchange(s, params, ep);
+        ring_exchange(s, pg, ep);
     }
 
     /* close listening channel for children */
@@ -1545,7 +1683,7 @@ static void find_command(strmap* map, const char* cmd)
     return;
 }
 
-session* session_init (int argc, char * argv[])
+session* session_init(int argc, char * argv[])
 {
     session * s = SPAWN_MALLOC(sizeof(session));
 
@@ -1563,7 +1701,7 @@ session* session_init (int argc, char * argv[])
     /* create empty params strmap */
     s->params = strmap_new();
 
-    char* value;
+    const char* value;
 
     /* check whether we have a parent */
     if ((value = getenv("MV2_SPAWN_PARENT")) != NULL) {
@@ -1593,11 +1731,12 @@ session* session_init (int argc, char * argv[])
                 }
                 strmap_set(s->params, "MPIR", value);
             } else {
+                /* default to debug spawn tree if not specified */
                 strmap_set(s->params, "MPIR", KEY_MPIR_SPAWN);
             }
         }
 
-        /* check whether user wants us to rcp launcher executable */
+        /* check whether we should remote copy the launcher exe */
         if ((value = getenv("MV2_SPAWN_COPY")) != NULL) {
             copy_launcher = atoi(value);
         }
@@ -1613,7 +1752,7 @@ session* session_init (int argc, char * argv[])
             strmap_set(s->params, "EXE", spawn_path_tmp);
             spawn_free(&spawn_path_tmp);
         } else {
-            /* run launcher from its current location */
+            /* run launcher directly from its current location */
             strmap_set(s->params, "EXE", spawn_path);
         }
 
@@ -1664,7 +1803,7 @@ session* session_init (int argc, char * argv[])
         }
         /* TODO: check that degree is >= 2 */
 
-        /* record the shell command (rsh or ssh) to start remote procs */
+        /* record the remote shell command (rsh or ssh) to start procs */
         if ((value = getenv("MV2_SPAWN_SH")) != NULL) {
             strmap_setf(s->params, "SH=%s", value);
         } else {
@@ -1678,7 +1817,7 @@ session* session_init (int argc, char * argv[])
             _exit(EXIT_FAILURE);
         }
 
-        /* detect whether we should use direct exec vs sh wrapper to
+        /* detect whether we should use direct exec vs shell wrapper to
          * start local procs */
         value = getenv("MV2_SPAWN_LOCAL");
         if (value != NULL) {
@@ -1726,7 +1865,7 @@ static uint64_t time_diff(struct timespec* end, struct timespec* start)
     return total;
 }
 
-int session_start (session * s)
+int session_start(session * s)
 { 
     int i, tid, tid_tree;
     int nodeid;
@@ -1816,11 +1955,11 @@ int session_start (session * s)
     }
 
     /* determine whether we should copy launcher process to /tmp */
-    char* copy_str = strmap_get(s->params, "COPY");
+    const char* copy_str = strmap_get(s->params, "COPY");
     copy_launcher = atoi(copy_str);
 
     /* lookup spawn executable name */
-    char* spawn_exe = strmap_get(s->params, "EXE");
+    const char* spawn_exe = strmap_get(s->params, "EXE");
 
     /* get the current working directory */
     char* spawn_cwd = spawn_getcwd();
@@ -1934,7 +2073,7 @@ int session_start (session * s)
         spawn_net_read_strmap(ch, idmap);
 
         /* read global id from child */
-        char* str = strmap_get(idmap, "ID");
+        const char* str = strmap_get(idmap, "ID");
         if (str == NULL) {
         }
 
@@ -1945,7 +2084,7 @@ int session_start (session * s)
         int index = atoi(value);
 
         /* read pid of child */
-        char* pid_str = strmap_get(idmap, "PID");
+        const char* pid_str = strmap_get(idmap, "PID");
         if (pid_str == NULL) {
         }
 
@@ -1993,7 +2132,7 @@ int session_start (session * s)
     }
 
     /* at this point we can fill in MPIR proc table for spawn procs */
-    char* mpir_str = strmap_get(s->params, "MPIR");
+    const char* mpir_str = strmap_get(s->params, "MPIR");
     if (mpir_str != NULL && strcmp(mpir_str, KEY_MPIR_SPAWN) == 0) {
         if (nodeid == 0) {
             /* allocate space for proc table */
@@ -2006,14 +2145,14 @@ int session_start (session * s)
                 MPIR_PROCDESC* desc = &MPIR_proctable[i];
 
                 /* fill in host name */
-                char* host = strmap_getf(s->params, "%d", i);
-                desc->host_name = host;
+                const char* host = strmap_getf(s->params, "%d", i);
+                desc->host_name = (char*) host;
 
                 /* fill in exe name */
-                desc->executable_name = spawn_exe;
+                desc->executable_name = (char*) spawn_exe;
 
                 /* fill in pid */
-                char* pid_str = strmap_getf(spawnproc_strmap, "%d", i);
+                const char* pid_str = strmap_getf(spawnproc_strmap, "%d", i);
                 int pid = atoi(pid_str);
                 desc->pid = pid;
             }
@@ -2152,7 +2291,7 @@ int session_start (session * s)
     signal_to_root(s);
     if (!nodeid) { end_delta(tid); }
 
-    app_start(s, appmap);
+    process_group_start(s, appmap);
 
     strmap_delete(&appmap);
 
@@ -2189,7 +2328,7 @@ int session_start (session * s)
     return 0;
 }
 
-void session_destroy (session * s)
+void session_destroy(session * s)
 {
     spawn_free(&(s->spawn_id));
     spawn_free(&(s->spawn_parent));
