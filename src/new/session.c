@@ -91,7 +91,7 @@ void MPIR_Breakpoint()
 }
 
 /*******************************
- * End MPIR
+ * Structs and globals
  ******************************/
 
 /* records info about the tree of spawn processes */
@@ -135,6 +135,10 @@ static int copy_launcher = 0; /* set to 1 to copy launcher to /tmp while unfurli
 
 void session_destroy(session*);
 
+/*******************************
+ * Utility routines
+ ******************************/
+
 /* allocates a string and returns current working dir,
  * caller should later free string with spawn_free */
 static char* spawn_getcwd()
@@ -176,6 +180,77 @@ static char* spawn_hostname()
     char* name = SPAWN_STRDUP(buf.nodename);
     return name;
 }
+
+/* searches user's path for command executable, returns full path
+ * in newly allocated string, returns NULL if not found */
+static char* spawn_path_search(const char* command)
+{
+    char* path = NULL;
+
+    /* check that we got a real string for the command */
+    if (command == NULL) {
+        return path;
+    }
+
+    /* if we can resolve command as it is, return that */
+    char pathbuf[PATH_MAX];
+    char* newcmd = realpath(command, pathbuf);
+    if (newcmd != NULL) {
+        path = SPAWN_STRDUP(pathbuf);
+        return path;
+    }
+
+    /* if command starts with '/', it's already absolute */
+    if (command[0] == '/') {
+        path = SPAWN_STRDUP(command);
+        return path;
+    }
+
+    /* get user's path */
+    const char* path_env = getenv("PATH");
+    if (path_env == NULL) {
+        /* $PATH is not set, bail out */
+        return path;
+    }
+
+    /* make a copy of path to run strtok */
+    char* path_env_copy = SPAWN_STRDUP(path_env);
+
+    /* search entries in path, breaking on ':' */
+    const char* prefix = strtok(path_env_copy, ":");
+    while (prefix != NULL) {
+        /* create path to candidate item */
+        path = SPAWN_STRDUPF("%s/%s", prefix, command);
+
+        /* break if we find an executable */
+        if (access(path, X_OK) == 0) {
+            /* TODO: should we run realpath here? */
+            break;
+        }
+
+        /* otherwise, free the item and try the next
+         * path entry */
+        spawn_free(&path);
+        prefix = strtok(NULL, ":");
+    }
+
+    /* get absolute path name */
+    if (path != NULL) {
+        char pathbuf[PATH_MAX];
+        realpath(path, pathbuf);
+        spawn_free(&path);
+        path = SPAWN_STRDUP(pathbuf);
+    }
+
+    /* free copy of path */
+    spawn_free(&path_env_copy);
+
+    return path;
+}
+
+/*******************************
+ * Routines that operate on spawn_trees
+ ******************************/
 
 static spawn_tree* tree_new()
 {
@@ -289,64 +364,9 @@ static void tree_create_kary(int rank, int ranks, int k, spawn_tree* t)
     }
 }
 
-/* searches user's path for command executable, returns full path
- * in newly allocated string, returns NULL if not found */
-char* path_search(const char* command)
-{
-    char* path = NULL;
-
-    /* check that we got a real string for the command */
-    if (command == NULL) {
-        return path;
-    }
-
-    /* if command starts with '/', it's already absolute */
-    if (command[0] == '/') {
-        path = SPAWN_STRDUP(command);
-        return path;
-    }
-
-    /* get user's path */
-    const char* path_env = getenv("PATH");
-    if (path_env == NULL) {
-        /* $PATH is not set, bail out */
-        return path;
-    }
-
-    /* make a copy of path to run strtok */
-    char* path_env_copy = SPAWN_STRDUP(path_env);
-
-    /* search entries in path, breaking on ':' */
-    const char* prefix = strtok(path_env_copy, ":");
-    while (prefix != NULL) {
-        /* create path to candidate item */
-        path = SPAWN_STRDUPF("%s/%s", prefix, command);
-
-        /* break if we find an executable */
-        if (access(path, X_OK) == 0) {
-            /* TODO: should we run realpath here? */
-            break;
-        }
-
-        /* otherwise, free the item and try the next
-         * path entry */
-        spawn_free(&path);
-        prefix = strtok(NULL, ":");
-    }
-
-    /* get absolute path name */
-    if (path != NULL) {
-        char pathbuf[PATH_MAX];
-        realpath(path, pathbuf);
-        spawn_free(&path);
-        path = SPAWN_STRDUP(pathbuf);
-    }
-
-    /* free copy of path */
-    spawn_free(&path_env_copy);
-
-    return path;
-}
+/*******************************
+ * Routines to fork/exec procs
+ ******************************/
 
 /* serialize an array of values into a newly allocated string */
 static char* serialize_to_str(const strmap* map, const char* key_count, const char* key_prefix)
@@ -674,6 +694,10 @@ static pid_t fork_proc(
     return cpid;
 }
 
+/*******************************
+ * Routines to remote copy launcher executable
+ ******************************/
+
 /* given full path of executable, copy to tmp and return new name */
 static char* copy_to_tmp(const char* src)
 {
@@ -804,6 +828,10 @@ static pid_t copy_exe(const strmap* params, const char* host, const char* exepat
      * copy is complete */
     return cpid;
 }
+
+/*******************************
+ * Communication over spawn tree
+ ******************************/
 
 int get_spawn_id(session* s)
 {
@@ -1446,6 +1474,10 @@ static void pmi_exchange(session* s, const process_group* pg, const spawn_net_en
     return;
 }
 
+/*******************************
+ * Process groups
+ ******************************/
+
 /* allocate and initialize new process group structure */
 static process_group* process_group_new()
 {
@@ -1669,11 +1701,15 @@ static process_group* process_group_start(session* s, const strmap* params)
     return pg;
 }
 
+/*******************************
+ * Manage sessions
+ ******************************/
+
 /* given the name of a command, search for it in path,
  * and insert full path in strmap */
 static void find_command(strmap* map, const char* cmd)
 {
-    char* path = path_search(cmd);
+    char* path = spawn_path_search(cmd);
     if (path != NULL) {
         strmap_set(map, cmd, path);
     } else {
@@ -1744,7 +1780,7 @@ session* session_init(int argc, char * argv[])
 
         /* first, compute and record launch executable name */
         char* spawn_orig = argv[0];
-        char* spawn_path = path_search(spawn_orig);
+        char* spawn_path = spawn_path_search(spawn_orig);
 
         if (copy_launcher) {
             /* copy launcher executable to /tmp */
@@ -2235,7 +2271,7 @@ int session_start(session * s)
         char* value = getenv("MV2_SPAWN_EXE");
         if (value != NULL) {
             /* do the path search once in root */
-            char* app_path = path_search(value);
+            char* app_path = spawn_path_search(value);
             strmap_set(appmap, "EXE", app_path);
             spawn_free(&app_path);
         } else {
