@@ -240,6 +240,11 @@ static int mv2_post_ud_recv_buffers(int num_bufs, mv2_ud_ctx_t *ud_ctx)
 {
     /* TODO: post buffers as a linked list to be more efficient? */
 
+//    long start = mv2_get_time_us();
+
+#if 0
+    /* post receives one at a time */
+
     /* post our vbufs */
     int count = 0;
     while (count < num_bufs) {
@@ -254,23 +259,85 @@ static int mv2_post_ud_recv_buffers(int num_bufs, mv2_ud_ctx_t *ud_ctx)
         v->transport = IB_TRANSPORT_UD;
 
         /* post vbuf to receive queue */
-        int ret;
         struct ibv_recv_wr* bad_wr;
         if (ud_ctx->qp->srq) {
-            ret = ibv_post_srq_recv(ud_ctx->qp->srq, &v->desc.u.rr, &bad_wr);
+            int ret = ibv_post_srq_recv(ud_ctx->qp->srq, &v->desc.u.rr, &bad_wr);
+            if (ret != 0) {
+                MRAILI_Release_vbuf(v);
+                SPAWN_ERR("Failed to post receive work requests (ibv_post_srq_recv rc=%d %s)", ret, strerror(ret));
+                _exit(EXIT_FAILURE);
+            }
         } else {
-            ret = ibv_post_recv(ud_ctx->qp, &v->desc.u.rr, &bad_wr);
-        }
-
-        /* check that our post was successful */
-        if (ret) {
-            MRAILI_Release_vbuf(v);
-            break;
+            int ret = ibv_post_recv(ud_ctx->qp, &v->desc.u.rr, &bad_wr);
+            if (ret != 0) {
+                MRAILI_Release_vbuf(v);
+                SPAWN_ERR("Failed to post receive work requests (ibv_post_recv rc=%d %s)", ret, strerror(ret));
+                _exit(EXIT_FAILURE);
+            }
         }
 
         /* prepare next recv */
         count++;
     }
+
+#else
+    /* post receives in batch as linked list */
+
+    /* we submit the work requests as a linked list */
+    struct ibv_recv_wr* head = NULL;
+    struct ibv_recv_wr* tail = NULL;
+
+    /* post our vbufs */
+    int count = 0;
+    while (count < num_bufs) {
+        /* get a new vbuf */
+        vbuf* v = get_ud_vbuf();
+        if (v == NULL) {
+            break;
+        }
+
+        /* initialize vubf for UD */
+        vbuf_init_ud_recv(v, rdma_default_ud_mtu, 0);
+        v->transport = IB_TRANSPORT_UD;
+
+        /* get pointer to receive work request */
+        struct ibv_recv_wr* cur =  &v->desc.u.rr;
+        cur->next = NULL;
+
+        /* link request into chain */
+        if (head == NULL) {
+            head = cur;
+        }
+        if (tail != NULL) {
+            tail->next = cur;
+        }
+        tail = cur;
+
+        /* prepare next recv */
+        count++;
+    }
+
+    /* post vbuf to receive queue */
+    if (head != NULL) {
+        struct ibv_recv_wr* bad_wr;
+        if (ud_ctx->qp->srq) {
+            int ret = ibv_post_srq_recv(ud_ctx->qp->srq, head, &bad_wr);
+            if (ret != 0) {
+                SPAWN_ERR("Failed to post receive work requests (ibv_post_srq_recv rc=%d %s)", ret, strerror(ret));
+                _exit(EXIT_FAILURE);
+            }
+        } else {
+            int ret = ibv_post_recv(ud_ctx->qp, head, &bad_wr);
+            if (ret != 0) {
+                SPAWN_ERR("Failed to post receive work requests (ibv_post_recv rc=%d %s)", ret, strerror(ret));
+                _exit(EXIT_FAILURE);
+            }
+        }
+    }
+#endif
+
+//    long end = mv2_get_time_us();
+//    printf("Posted %d bufs in %lu usecs\n", num_bufs, (end - start));
 
     PRINT_DEBUG(DEBUG_UD_verbose>0 ,"Posted %d buffers of size:%d to UD QP\n",
         num_bufs, rdma_default_ud_mtu);
