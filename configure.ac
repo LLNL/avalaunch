@@ -25,6 +25,8 @@ AM_SILENT_RULES
 LT_INIT([dlopen])
 
 # Checks for libraries.
+AC_SEARCH_LIBS([ibv_create_qp], [ibverbs], [],
+               [AC_MSG_ERROR([missing required library])])
 
 # Checks for header files.
 AC_CHECK_HEADERS([arpa/inet.h limits.h netdb.h stdlib.h string.h sys/socket.h unistd.h])
