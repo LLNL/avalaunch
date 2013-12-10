@@ -28,6 +28,10 @@ LT_INIT([dlopen])
 
 # Checks for header files.
 AC_CHECK_HEADERS([arpa/inet.h limits.h netdb.h stdlib.h string.h sys/socket.h unistd.h])
+AC_CHECK_HEADER([infiniband/verbs.h], [],
+                [AC_MSG_ERROR([cannot find required header file])])
+AC_CHECK_HEADER([infiniband/umad.h], [],
+                [AC_MSG_ERROR([cannot find required header file])])
 
 # Checks for typedefs, structures, and compiler characteristics.
 AC_TYPE_PID_T
