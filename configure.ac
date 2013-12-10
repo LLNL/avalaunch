@@ -8,7 +8,6 @@ AC_CONFIG_HEADERS([config.h])
 AC_CONFIG_MACRO_DIR([m4])
 
 AM_INIT_AUTOMAKE([-Wall -Werror foreign])
-LT_INIT([dlopen])
 
 # Checks for programs.
 AC_PROG_CXX
@@ -21,6 +20,8 @@ AC_PROG_MAKE_SET
 
 AM_PROG_CC_C_O
 AM_PROG_AR
+
+LT_INIT([dlopen])
 
 # Checks for libraries.
 
