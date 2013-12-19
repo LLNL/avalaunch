@@ -115,12 +115,15 @@ typedef struct session_struct {
     spawn_net_endpoint* ep;   /* our endpoint */
     spawn_tree* tree;         /* data structure that tracks tree info */
     strmap* params;           /* spawn parameters sent from parent after connect */
+    strmap* name2group;       /* maps a group name to a process group pointer */
+    strmap* pid2name;         /* maps a pid to a process group name */
 } session;
 
 /* records info about an application process group including
  * paramters used to start the processes, the number of processes
  * started by the owning spawn process and their pids */
 typedef struct process_group_struct {
+    char* name;     /* name of process group */
     strmap* params; /* parameters specified to start process group */
     uint64_t num;   /* number of processes */
     pid_t* pids;    /* list of pids */
@@ -1482,6 +1485,7 @@ static void pmi_exchange(session* s, const process_group* pg, const spawn_net_en
 static process_group* process_group_new()
 {
     process_group* pg = (process_group*) SPAWN_MALLOC(sizeof(process_group));
+    pg->name   = NULL;
     pg->params = strmap_new();
     pg->num    = 0;
     pg->pids   = NULL;
@@ -1494,6 +1498,9 @@ static void process_group_delete(process_group** ppg)
     if (ppg != NULL) {
         /* get pointer to process group */
         process_group* pg = *ppg;
+
+        /* free the name of the group */
+        spawn_free(&pg->name);
 
         /* delete paramters */
         strmap_delete(&pg->params);
@@ -1508,6 +1515,79 @@ static void process_group_delete(process_group** ppg)
     return;
 }
 
+/* record mapping of group name to a pointer to its data structure */
+static void process_group_map_name(session* s, const char* name, process_group* pg)
+{
+    strmap* map = s->name2group;
+    if (map == NULL) {
+        return;
+    }
+
+    /* record mapping of pid to process group pointer,
+     * store pid as unsigned long long %llu and group as pointer %p */
+    void* ptr = (void*) pg;
+    strmap_setf(map, "%s=%p", name, ptr);
+    return;
+}
+
+/* return process group pointer from its name, returns NULL if not found */
+static process_group* process_group_by_name(session* s, const char* name)
+{
+    process_group* pg = NULL;
+
+    strmap* map = s->name2group;
+    if (map == NULL) {
+        return pg;
+    }
+
+    /* look up process group by its name */
+    const char* pg_str = strmap_get(map, name);
+
+    /* if we found something, decode value as void* and convert
+     * to process group pointer */
+    if (pg_str != NULL) {
+        void* ptr;
+        sscanf(pg_str, "%p", &ptr);
+        pg = (process_group*) ptr;
+    }
+
+    return pg;
+}
+
+/* record mapping of pid to process group name */
+static void process_group_map_pid(session* s, process_group* pg, pid_t pid)
+{
+    strmap* map = s->pid2name;
+    if (map == NULL) {
+        return;
+    }
+
+    /* record mapping of pid to process group pointer,
+     * store pid as unsigned long long %llu and group as pointer %p */
+    const char* name = pg->name;
+    unsigned long long id = (unsigned long long) pid;
+    strmap_setf(map, "%llu=%s", id, name);
+    return;
+}
+
+/* return process group name given a pid (member of group),
+ * returns NULL if not found */
+static char* process_group_by_pid(session* s, pid_t pid)
+{
+    process_group* pg = NULL;
+
+    strmap* map = s->pid2name;
+    if (map == NULL) {
+        return pg;
+    }
+
+    /* we look up the process group by pid,
+     * which we convert to unsigned long long */
+    unsigned long long id  = (unsigned long long) pid;
+    const char* group_name = strmap_getf(map, "%llu", id);
+    return group_name;
+}
+
 /* launch app process group witih the session according to params */
 static process_group* process_group_start(session* s, const strmap* params)
 {
@@ -1515,6 +1595,12 @@ static process_group* process_group_start(session* s, const strmap* params)
 
     /* get a new process group structure */
     process_group* pg = process_group_new();
+
+    /* extract name from params and record in process group struct and
+     * name-to-group map in session */
+    const char* pg_name = strmap_get(params, "NAME");
+    pg->name = SPAWN_STRDUP(pg_name);
+    process_group_map_name(s, pg_name, pg);
 
     /* copy application parameters */
     strmap_merge(pg->params, params);
@@ -1590,6 +1676,11 @@ static process_group* process_group_start(session* s, const strmap* params)
         /* launch child process */
         pid_t pid = fork_proc(NULL, s->params, app_dir, app_exe, argmap, envmap);
         pg->pids[i] = pid;
+
+        /* record mapping from pid to its process group,
+         * we use this to determine which group to tear down when a
+         * given pid fails */
+        process_group_map_pid(s, pg, pid);
 
         /* free maps */
         strmap_delete(&envmap);
@@ -1730,12 +1821,20 @@ session* session_init(int argc, char * argv[])
     s->ep           = SPAWN_NET_ENDPOINT_NULL;
     s->tree         = NULL;
     s->params       = NULL;
+    s->name2group   = NULL;
+    s->pid2name     = NULL;
 
     /* initialize tree */
     s->tree = tree_new();
 
     /* create empty params strmap */
     s->params = strmap_new();
+
+    /* create empty name-to-process group pointer map */
+    s->name2group = strmap_new();
+
+    /* create empty pid-to-process group name map */
+    s->pid2name   = strmap_new();
 
     const char* value;
 
@@ -2267,6 +2366,9 @@ int session_start(session * s)
 
     /* for now, have the root fill in the parameters */
     if (s->spawn_parent == NULL) {
+        /* create a name for this process group (unique to session) */
+        strmap_set(appmap, "NAME", "GROUP_0");
+
         /* set executable path */
         char* value = getenv("MV2_SPAWN_EXE");
         if (value != NULL) {
@@ -2371,6 +2473,8 @@ void session_destroy(session * s)
     spawn_net_close(&(s->ep));
     strmap_delete(&(s->params));
     tree_delete(&(s->tree));
+    strmap_delete(&(s->name2group));
+    strmap_delete(&(s->pid2name));
 
     spawn_free(&s);
 
