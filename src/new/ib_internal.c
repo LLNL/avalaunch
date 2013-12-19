@@ -18,6 +18,9 @@
 /* need to block SIGCHLD in comm_thread */
 #include <signal.h>
 
+/* need to increase MEMLOCK limit */
+#include <sys/resource.h>
+
 int num_rdma_buffer;
 int rdma_num_rails = 1;
 int rdma_num_hcas = 1;
@@ -805,6 +808,20 @@ spawn_net_endpoint* mv2_init_ud()
     }   
 
     rdma_ud_max_ack_pending = rdma_default_ud_sendwin_size / 4;
+
+    /* increase memory locked limit */
+    struct rlimit limit;
+    ret = getrlimit(RLIMIT_MEMLOCK, &limit);
+    if (ret != 0) {
+        SPAWN_ERR("Failed to read MEMLOCK limit (getrlimit errno=%d %s)", errno, strerror(errno));
+        return SPAWN_NET_ENDPOINT_NULL;
+    }
+    limit.rlim_cur = limit.rlim_max;
+    ret = setrlimit(RLIMIT_MEMLOCK, &limit);
+    if (ret != 0) {
+        SPAWN_ERR("Failed to increase MEMLOCK limit (setrlimit errno=%d %s)", errno, strerror(errno));
+        return SPAWN_NET_ENDPOINT_NULL;
+    }
 
     /* allocate vbufs */
     allocate_ud_vbufs(RDMA_DEFAULT_NUM_VBUFS);
