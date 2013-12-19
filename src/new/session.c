@@ -700,6 +700,88 @@ static pid_t fork_proc(
 /*******************************
  * Routines to remote copy launcher executable
  ******************************/
+/* given full path, return file size */
+ssize_t get_file_size(const char* file)
+{
+    struct stat statbuf;
+    stat(file, &statbuf);
+    return (ssize_t) statbuf.st_size;
+}
+
+/* given full path of executable, copy it to memory */
+static ssize_t write_to_ramdisk(const char* src, const char* buf, ssize_t size, const char* dst)
+{
+    /* create name for destination */
+    char* src_copy = SPAWN_STRDUP(src);
+    char* base = basename(src_copy);
+    dst = SPAWN_STRDUPF("/tmp/%s", base);
+    spawn_free(&src_copy);
+
+    /* open destination file for writing */
+    int dstfd = open(dst, O_WRONLY | O_CREAT | O_TRUNC, S_IRWXU | S_IRWXG | S_IRWXO);
+    if (dstfd < 0) {
+        SPAWN_ERR("Failed to open source file `%s' (open() errno=%d %s)", dst, errno, strerror(errno));
+        spawn_free(&dst);
+        return NULL;
+    }
+
+    /* write block to destination */
+    size_t towrite = (size_t) size;
+    ssize_t nwrite = write(dstfd, buf, towrite);
+
+    /* check for write error */
+    if (nwrite != size) {
+        SPAWN_ERR("Failed to write dest file `%s' (read() errno=%d %s)", dst, errno, strerror(errno));
+        spawn_free(&dst);
+        return -1;
+    }
+
+    /* free the buffer */
+    spawn_free(&buf);
+
+    /* ensure bytes are written to disk */
+    /* fsync(dstfd); */
+
+    /* close both files */
+    close(dstfd);
+
+    return nwrite;
+}
+
+/* given full path of executable, copy it to memory */
+static ssize_t read_to_mem(const char* src, ssize_t bufsize , const char* buf)
+{
+    ssize_t nread = 0, tmpread = 0;
+
+    /* open source file for reading */
+    int srcfd = open(src, O_RDONLY);
+    if (srcfd < 0) {
+        SPAWN_ERR("Failed to open binary file `%s' (open() errno=%d %s)", src, errno, strerror(errno));
+        return NULL;
+    }
+
+    /* read from source file */
+    while (nread < bufsize) {
+        tmpread = read(srcfd, buf, bufsize);
+        nread += tmpread;
+        buf += tmpread;
+    }
+
+    /* bail out if we hit EOF */
+    if (nread == 0) {
+        return 0;
+    }
+
+    /* report any error */
+    if (nread < 0) {
+        SPAWN_ERR("Failed to read source file `%s' (read() errno=%d %s)", src, errno, strerror(errno));
+        return -1;
+    }
+
+    close(srcfd);
+
+    return nread;
+}
 
 /* given full path of executable, copy to tmp and return new name */
 static char* copy_to_tmp(const char* src)
@@ -721,7 +803,7 @@ static char* copy_to_tmp(const char* src)
     /* open destination file for writing */
     int dstfd = open(dst, O_WRONLY | O_CREAT | O_TRUNC, S_IRWXU | S_IRWXG | S_IRWXO);
     if (dstfd < 0) {
-        SPAWN_ERR("Failed to open source file `%s' (open() errno=%d %s)", src, errno, strerror(errno));
+        SPAWN_ERR("Failed to open source file `%s' (open() errno=%d %s)", dst, errno, strerror(errno));
         close(srcfd);
         spawn_free(&dst);
         return NULL;
@@ -1593,6 +1675,8 @@ static process_group* process_group_start(session* s, const strmap* params)
 {
     int i, tid;
 
+    pid_t pid;
+
     /* get a new process group structure */
     process_group* pg = process_group_new();
 
@@ -1640,6 +1724,10 @@ static process_group* process_group_start(session* s, const strmap* params)
     const char* use_fifo_str = strmap_get(params, "FIFO");
     int use_fifo = atoi(use_fifo_str);
 
+    /* check for flag on whether we should use BIN_BCAST */
+    const char* use_bin_bcast_str = strmap_get(params, "BIN_BCAST");
+    int use_bin_bcast = atoi(use_bin_bcast_str);
+
     /* create endpoint for children to connect to */
     if (!rank) { tid = begin_delta("open init endpoint"); }
     signal_from_root(s);
@@ -1657,6 +1745,7 @@ static process_group* process_group_start(session* s, const strmap* params)
     /* launch app procs */
     if (!rank) { tid = begin_delta("launch app procs"); }
     signal_from_root(s);
+
     for (i = 0; i < numprocs; i++) {
         /* create map for arguments */
         strmap* argmap = strmap_new();
@@ -1673,8 +1762,50 @@ static process_group* process_group_start(session* s, const strmap* params)
             strmap_setf(envmap, "ENVS=%d", 1);
         }
 
-        /* launch child process */
-        pid_t pid = fork_proc(NULL, s->params, app_dir, app_exe, argmap, envmap);
+        /* create map to broadcast the binary itself */
+        strmap* binary_map = strmap_new();
+
+        /* broadcast binary from root to others*/
+        if (use_bin_bcast) {
+            const char* binary_buf = NULL;
+            const char* bin_ramdisk = NULL;
+            const char* bin_size = malloc(sizeof(ssize_t));
+            ssize_t bin_size_n;
+            
+            if (s->spawn_parent == NULL) {
+    
+                /* read file to memory */
+                ssize_t bufsize = get_file_size(app_exe);
+                binary_buf = (const char*) SPAWN_MALLOC(bufsize);
+                bin_size_n = read_to_mem(app_exe, bufsize, &binary_buf);
+                
+                /* set EXE_BIN key in binary_map */
+                sprintf(bin_size, "%d", bin_size_n);
+                strmap_set(binary_map, "EXE_SIZE", bin_size);
+                strmap_set(binary_map, "EXE_BIN", binary_buf);
+
+            }
+
+            /* broadcast binary file to tree */
+            bcast_strmap(binary_map, s->tree); 
+
+            if (s->spawn_parent != NULL) {
+                /* write file to ramdisk */
+                bin_size = strmap_get(binary_map, "EXE_SIZE");
+                binary_buf = strmap_get(binary_map, "EXE_BIN");
+                bin_size_n = atoi(bin_size);
+                printf("bin size = %d\n", bin_size_n);
+;
+                write_to_ramdisk(app_exe, binary_buf, bin_size_n, &bin_ramdisk);
+
+                /* fork-exec using binary from ramdisk*/
+                pid = fork_proc(NULL, s->params, app_dir, bin_ramdisk, argmap, envmap);
+            }
+            
+        } else {
+            /* launch child process */
+            pid = fork_proc(NULL, s->params, app_dir, app_exe, argmap, envmap);
+        }
         pg->pids[i] = pid;
 
         /* record mapping from pid to its process group,
@@ -2415,6 +2546,14 @@ int session_start(session * s)
             strmap_set(appmap, "FIFO", value);
         } else {
             strmap_set(appmap, "FIFO", "0");
+        }
+        
+        /* detect whether we should binary bcasting */
+        value = getenv("MV2_SPAWN_BCAST_BIN");
+        if (value != NULL) {
+            strmap_set(appmap, "BIN_BCAST", value);
+        } else {
+            strmap_set(appmap, "BIN_BCAST", "0");
         }
 
         /* print map for debugging */
