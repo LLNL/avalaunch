@@ -30,7 +30,7 @@ all: clean
 	gcc -g -O0 -o strmap.o -c ../strmap.c
 	gcc -g -O0 -o strmap_test strmap_test.c $(OBJS) -I../. $(LIBS)
 	gcc -g -O0 -o pmi_test pmi_test.c $(OBJS) -I../../../install/include ../../../install/lib/libpmi.a $(LIBS)
-	gcc -g -O0 -o ring_test ring_test.c $(OBJS) -I../../../install/include ../../../install/lib/libpmi.a $(LIBS)
+	gcc -g -O0 -o ring_test ring_test.c $(OBJS) -I../. -I../../../install/include ../../../install/lib/libpmi.a $(LIBS)
 	mpicc -g -O0 -o connect_test connect_test.c $(OBJS) -I../. $(LIBS)
 	mpicc -g -O0 -o connect_test2 connect_test2.c $(OBJS) -I../. $(LIBS)
 	mpicc -g -O0 -o fifo_test fifo_test.c $(OBJS) -I../. $(LIBS)
