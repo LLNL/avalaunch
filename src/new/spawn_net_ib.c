@@ -14,17 +14,28 @@
 
 #include "mv2_spawn_net_ud.h"
 
+static int64_t open_count = 0;
+static spawn_net_endpoint* ep = SPAWN_NET_ENDPOINT_NULL;
+
 spawn_net_endpoint* spawn_net_open_ib()
 {
-    mv2_hca_open();
-    spawn_net_endpoint* ep = mv2_init_ud();
+    /* open endpoint if we need to */
+    if (open_count == 0) {
+        mv2_hca_open();
+        ep = mv2_init_ud();
+    }
+
+    open_count++;
 
     return ep;
 }
 
 int spawn_net_close_ib(spawn_net_endpoint** pep)
 {
-    /* TODO: close down UD endpoint */
+    open_count--;
+    if (open_count == 0) {
+        /* TODO: close down UD endpoint */
+    }
 }
 
 spawn_net_channel* spawn_net_connect_ib(const char* name)

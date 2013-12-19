@@ -373,7 +373,7 @@ static int lwgrp_chain_allgather_strmap(strmap* map, lwgrp_chain* group)
 int main(int argc, char* argv[])
 {
   /* create address (e.g., open socket and encode as string) */
-  spawn_net_endpoint* ep = spawn_net_open(SPAWN_NET_TYPE_TCP);
+  spawn_net_endpoint* ep = spawn_net_open(SPAWN_NET_TYPE_IBUD);
   const char* ep_name = spawn_net_name(ep);
 
   /* get addresses of left and right procs */
@@ -381,11 +381,13 @@ int main(int argc, char* argv[])
   char *left, *right;
   int rc = ring_create(ep_name, &rank, &ranks, &left, &right);
 
+#if 0
   /* print what we got */
   printf("Rank %d, Size %d, Left %s, Me %s, Right %s\n",
     rank, ranks, left, ep_name, right
   );
   fflush(stdout);
+#endif
 
   /* create to log(N) tasks on left and right sides */
   lwgrp_chain* group = lwgrp_chain_create(ranks, rank, ep_name, left, right, ep);
@@ -399,6 +401,8 @@ int main(int argc, char* argv[])
   strmap_setf(map, "%d=%s", rank, ep_name);
 
   lwgrp_chain_allgather_strmap(map, group);
+
+#if 0
   if (rank == 0) {
     int64_t i;
     for (i = 0 ; i < ranks; i++) {
@@ -407,6 +411,7 @@ int main(int argc, char* argv[])
     }
     fflush(stdout);
   }
+#endif
 
   strmap_delete(&map);
 
