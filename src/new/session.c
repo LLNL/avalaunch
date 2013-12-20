@@ -22,6 +22,8 @@
 #include <fcntl.h>
 #include <sys/wait.h>
 
+#include <libgen.h>
+
 #define KEY_NET_TCP  "tcp"
 #define KEY_NET_IBUD "ibud"
 #define KEY_LOCAL_SHELL  "sh"
@@ -709,12 +711,12 @@ ssize_t get_file_size(const char* file)
 }
 
 /* given full path of executable, copy it to memory */
-static ssize_t write_to_ramdisk(const char* src, const char* buf, ssize_t size, const char* dst)
+static char* write_to_ramdisk(const char* src, const char* buf, ssize_t size)
 {
     /* create name for destination */
     char* src_copy = SPAWN_STRDUP(src);
     char* base = basename(src_copy);
-    dst = SPAWN_STRDUPF("/tmp/%s", base);
+    char* dst = SPAWN_STRDUPF("/tmp/%s", base);
     spawn_free(&src_copy);
 
     /* open destination file for writing */
@@ -733,23 +735,20 @@ static ssize_t write_to_ramdisk(const char* src, const char* buf, ssize_t size, 
     if (nwrite != size) {
         SPAWN_ERR("Failed to write dest file `%s' (read() errno=%d %s)", dst, errno, strerror(errno));
         spawn_free(&dst);
-        return -1;
+        return NULL;
     }
 
-    /* free the buffer */
-    spawn_free(&buf);
-
     /* ensure bytes are written to disk */
-    /* fsync(dstfd); */
+    fsync(dstfd);
 
     /* close both files */
     close(dstfd);
 
-    return nwrite;
+    return dst;
 }
 
 /* given full path of executable, copy it to memory */
-static ssize_t read_to_mem(const char* src, ssize_t bufsize , const char* buf)
+static ssize_t read_to_mem(const char* src, ssize_t bufsize , char* buf)
 {
     ssize_t nread = 0, tmpread = 0;
 
@@ -757,7 +756,7 @@ static ssize_t read_to_mem(const char* src, ssize_t bufsize , const char* buf)
     int srcfd = open(src, O_RDONLY);
     if (srcfd < 0) {
         SPAWN_ERR("Failed to open binary file `%s' (open() errno=%d %s)", src, errno, strerror(errno));
-        return NULL;
+        return -1;
     }
 
     /* read from source file */
@@ -1030,6 +1029,25 @@ static void print_critical_path(const session* s, int count, uint64_t* vals, cha
     return;
 }
 
+static void bcast(void* buf, size_t size, const spawn_tree* t)
+{
+    /* read bytes from parent, if we have one */
+    spawn_net_channel* p = t->parent_ch;
+    if (p != SPAWN_NET_CHANNEL_NULL) {
+        spawn_net_read(p, buf, size);
+    }
+
+    /* send bytes to children */
+    int i;
+    int children = t->children;
+    for (i = 0; i < children; i++) {
+        spawn_net_channel* ch = t->child_chs[i];
+        spawn_net_write(ch, buf, size);
+    }
+
+    return;
+}
+
 /* TODO: pack strmap once, bcast bytes, unpack once at end */
 /* broadcast string map from root to all procs in tree */
 static void bcast_strmap(strmap* map, const spawn_tree* t)
@@ -1081,6 +1099,41 @@ static void allgather_strmap(strmap* map, const spawn_tree* t)
     bcast_strmap(map, t);
 
     return;
+}
+
+/* broadcast file from file system to /tmp using spawn tree,
+ * returns name of file in /tmp (caller should free name) */
+static char* bcast_file(const char* file, const spawn_tree* t)
+{
+    /* root spawn process reads file size */
+    ssize_t bufsize;
+    if (t->rank == 0) {
+        /* read file to memory */
+        bufsize = get_file_size(file);
+    }
+    bcast(&bufsize, sizeof(ssize_t), t);
+
+    /* TODO: read/bcast file in chunks */
+
+    /* allocate buffer to hold file */
+    void* buf = SPAWN_MALLOC(bufsize);
+
+    /* root reads file from disk */
+    if (t->rank == 0) {
+        ssize_t bin_size_n = read_to_mem(file, bufsize, (char*)buf);
+        /* TODO: check for errors */
+    }
+
+    /* bcast bytes from root */
+    bcast(buf, bufsize, t);
+                
+    /* write file to ramdisk */
+    char* newfile = write_to_ramdisk(file, (char*)buf, bufsize);
+
+    /* free buffer */
+    spawn_free(&buf);
+
+    return newfile;
 }
 
 /* With the ring exchange, each application process provides an address
@@ -1654,13 +1707,11 @@ static void process_group_map_pid(session* s, process_group* pg, pid_t pid)
 
 /* return process group name given a pid (member of group),
  * returns NULL if not found */
-static char* process_group_by_pid(session* s, pid_t pid)
+static const char* process_group_by_pid(session* s, pid_t pid)
 {
-    process_group* pg = NULL;
-
     strmap* map = s->pid2name;
     if (map == NULL) {
-        return pg;
+        return NULL;
     }
 
     /* we look up the process group by pid,
@@ -1674,8 +1725,6 @@ static char* process_group_by_pid(session* s, pid_t pid)
 static process_group* process_group_start(session* s, const strmap* params)
 {
     int i, tid;
-
-    pid_t pid;
 
     /* get a new process group structure */
     process_group* pg = process_group_new();
@@ -1742,6 +1791,19 @@ static process_group* process_group_start(session* s, const strmap* params)
     signal_to_root(s);
     if (!rank) { end_delta(tid); }
 
+    /* bcast application binary */
+    char* bcastname = NULL;
+    if (use_bin_bcast) {
+        if (!rank) { tid = begin_delta("bcast app binary"); }
+        signal_from_root(s);
+        bcastname = bcast_file(app_exe, s->tree);
+        signal_to_root(s);
+        if (!rank) { end_delta(tid); }
+
+        /* exec binary from /tmp */
+        app_exe = bcastname;
+    }
+
     /* launch app procs */
     if (!rank) { tid = begin_delta("launch app procs"); }
     signal_from_root(s);
@@ -1762,50 +1824,8 @@ static process_group* process_group_start(session* s, const strmap* params)
             strmap_setf(envmap, "ENVS=%d", 1);
         }
 
-        /* create map to broadcast the binary itself */
-        strmap* binary_map = strmap_new();
-
-        /* broadcast binary from root to others*/
-        if (use_bin_bcast) {
-            const char* binary_buf = NULL;
-            const char* bin_ramdisk = NULL;
-            const char* bin_size = malloc(sizeof(ssize_t));
-            ssize_t bin_size_n;
-            
-            if (s->spawn_parent == NULL) {
-    
-                /* read file to memory */
-                ssize_t bufsize = get_file_size(app_exe);
-                binary_buf = (const char*) SPAWN_MALLOC(bufsize);
-                bin_size_n = read_to_mem(app_exe, bufsize, &binary_buf);
-                
-                /* set EXE_BIN key in binary_map */
-                sprintf(bin_size, "%d", bin_size_n);
-                strmap_set(binary_map, "EXE_SIZE", bin_size);
-                strmap_set(binary_map, "EXE_BIN", binary_buf);
-
-            }
-
-            /* broadcast binary file to tree */
-            bcast_strmap(binary_map, s->tree); 
-
-            if (s->spawn_parent != NULL) {
-                /* write file to ramdisk */
-                bin_size = strmap_get(binary_map, "EXE_SIZE");
-                binary_buf = strmap_get(binary_map, "EXE_BIN");
-                bin_size_n = atoi(bin_size);
-                printf("bin size = %d\n", bin_size_n);
-;
-                write_to_ramdisk(app_exe, binary_buf, bin_size_n, &bin_ramdisk);
-
-                /* fork-exec using binary from ramdisk*/
-                pid = fork_proc(NULL, s->params, app_dir, bin_ramdisk, argmap, envmap);
-            }
-            
-        } else {
-            /* launch child process */
-            pid = fork_proc(NULL, s->params, app_dir, app_exe, argmap, envmap);
-        }
+        /* launch child process */
+        pid_t pid = fork_proc(NULL, s->params, app_dir, app_exe, argmap, envmap);
         pg->pids[i] = pid;
 
         /* record mapping from pid to its process group,
@@ -1919,6 +1939,11 @@ static process_group* process_group_start(session* s, const strmap* params)
     }
     signal_to_root(s);
     if (!rank) { end_delta(tid); }
+
+    /* TODO: move this to process group or session cleanup step */
+
+    /* free temporary binary name */
+    spawn_free(&bcastname);
 
     return pg;
 }

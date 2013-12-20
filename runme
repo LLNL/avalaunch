@@ -3,7 +3,7 @@
 set -x
 
 num=9
-hosts=`glob-hosts -s $num -e -a -h 'rzmerl[2-3,7,10-15]'`
+hosts=`glob-hosts -s $num -e -a -h 'rzmerl[2-10]'`
 
 #export MV2_SPAWN_SH=ssh # rsh/ssh - remote shell command (rsh is default)
 
@@ -16,10 +16,12 @@ export MV2_SPAWN_PPN=32     # number of app procs per node
 export MV2_SPAWN_EXE=src/new/examples/ring_test
 export MV2_SPAWN_RING=1  # whether to enable ring
 
+#export MV2_SPAWN_FIFO=1   # whether to use FIFO vs TCP for PMI (off by default)
+
 #export MV2_SPAWN_LOCAL=sh # sh/direct - how to exec local procs (direct is default)
 #export MV2_SPAWN_COPY=1   # whether to rcp launcher proc to /tmp during unfurl
+#export MV2_SPAWN_BCAST_BIN=1 # whether to broadcast app binary to /tmp via spawn tree
 export MV2_SPAWN_NET=ibud  # tcp/ibud - network transport (tcp is default)
-#export MV2_SPAWN_FIFO=1   # whether to use FIFO vs TCP for PMI (off by default)
 
 # app/spawn - select whether to debug app or spawn tree when running under
 # totalview (defaults to spawn tree)
