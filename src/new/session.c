@@ -1048,22 +1048,42 @@ static void bcast(void* buf, size_t size, const spawn_tree* t)
     return;
 }
 
-/* TODO: pack strmap once, bcast bytes, unpack once at end */
 /* broadcast string map from root to all procs in tree */
 static void bcast_strmap(strmap* map, const spawn_tree* t)
 {
-    /* read map from parent, if we have one */
+    /* root gets size of strmap */
+    uint64_t len;
     spawn_net_channel* p = t->parent_ch;
-    if (p != SPAWN_NET_CHANNEL_NULL) {
-        spawn_net_read_strmap(p, map);
+    if (p == SPAWN_NET_CHANNEL_NULL) {
+        size_t bytes = strmap_pack_size(map);
+        len = (uint64_t) bytes;
     }
 
-    /* send map to children */
-    int i;
-    int children = t->children;
-    for (i = 0; i < children; i++) {
-        spawn_net_channel* ch = t->child_chs[i];
-        spawn_net_write_strmap(ch, map);
+    /* TODO: convert to network order */
+    /* broadcast size of map */
+    bcast(&len, sizeof(uint64_t), t);
+
+    /* now pack and broadcast the map */
+    if (len > 0) {
+        /* allocate buffer */
+        size_t bufsize = (size_t) len;
+        void* buf = SPAWN_MALLOC(bufsize);
+
+        /* root packs strmap */
+        if (p == SPAWN_NET_CHANNEL_NULL) {
+            strmap_pack(buf, map);
+        }
+
+        /* broadcast the map */
+        bcast(buf, bufsize, t);
+
+        /* if we're not the root, unpack map into output map */
+        if (p != SPAWN_NET_CHANNEL_NULL) {
+            strmap_unpack(buf, map);
+        }
+
+        /* free buffer */
+        spawn_free(&buf);
     }
 
     return;
