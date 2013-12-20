@@ -881,7 +881,7 @@ static pid_t copy_exe(const strmap* params, const char* host, const char* exepat
 
         const char scp_key[] = "scp";
         const char rcp_key[] = "rcp";
-        char* key;
+        const char* key;
         if (strcmp(shname, "rsh") == 0) {
             key = rcp_key;
         } else if (strcmp(shname, "ssh") == 0) {
@@ -1092,19 +1092,67 @@ static void bcast_strmap(strmap* map, const spawn_tree* t)
 /* combine strmaps as they travel up tree to root */
 static void gather_strmap(strmap* map, const spawn_tree* t)
 {
-    /* gather input from children */
-    int i;
+    /* get number of children */
     int children = t->children;
+
+    /* create an array to record sizes from children */
+    size_t* sizes = (size_t*) SPAWN_MALLOC(children * sizeof(size_t));
+
+    /* get size of our packed map */
+    size_t bufsize = strmap_pack_size(map);
+
+    /* add in sizes from children */
+    int64_t i;
     for (i = 0; i < children; i++) {
+        /* TODO: convert to network order */
+        uint64_t size;
         spawn_net_channel* ch = t->child_chs[i];
-        spawn_net_read_strmap(ch, map);
+        spawn_net_read(ch, &size, sizeof(uint64_t));
+        sizes[i] = (size_t) size;
+        bufsize += sizes[i];
     }
 
-    /* forward map to parent */
+    /* send total size to parent */
     spawn_net_channel* p = t->parent_ch;
     if (p != SPAWN_NET_CHANNEL_NULL) {
-        spawn_net_write_strmap(p, map);
+        /* TODO: convert to network order */
+        uint64_t size = (uint64_t) bufsize;
+        spawn_net_write(p, &size, sizeof(uint64_t));
     }
+
+    /* allocate buffer to hold incoming data */
+    void* buf = SPAWN_MALLOC(bufsize);
+
+    /* pack our map */
+    char* ptr = (char*) buf;
+    ptr += strmap_pack(buf, map);
+
+    /* pack in map from each child */
+    for (i = 0; i < children; i++) {
+        /* read size from child and read map */
+        spawn_net_channel* ch = t->child_chs[i];
+        spawn_net_read(ch, ptr, sizes[i]);
+        ptr += sizes[i];
+    }
+
+    /* forward map to parent, or unpack each map if we're the root */
+    if (p != SPAWN_NET_CHANNEL_NULL) {
+        spawn_net_write(p, buf, bufsize);
+    } else {
+        /* we're the root, unpack each map into output map */
+        ptr = (char*)buf;
+        char* end = ptr + bufsize;
+        while (ptr < end) {
+            size_t bytes = strmap_unpack(ptr, map);
+            ptr += bytes;
+        }
+    }
+
+    /* free buffer */
+    spawn_free(&buf);
+
+    /* free size array */
+    spawn_free(&sizes);
 
     return;
 }
@@ -1140,7 +1188,7 @@ static char* bcast_file(const char* file, const spawn_tree* t)
 
     /* root reads file from disk */
     if (t->rank == 0) {
-        ssize_t bin_size_n = read_to_mem(file, bufsize, (char*)buf);
+        read_to_mem(file, bufsize, (char*)buf);
         /* TODO: check for errors */
     }
 
