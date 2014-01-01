@@ -1,0 +1,24 @@
+
+- Tree-based allgather
+    - Useful for MVAPICH as well
+    - PMI to discover parent and children and use UD QPs
+    - Use shared-memory segments to store table of UD addresses, to gather once per node
+
+- PMI implementation needs to be made general - Jan 12
+
+- Efficient use of PMI on the MPI side
+
+- Large scale runs on systems
+    - Adam has run till 400 nodes, need larger
+    - Hari will run large-scale runs on stampede
+    - Lets try to have this by Jan 7th
+    - Caching effects, first run taking longer than other runs within the allocation
+        - Some sort of OS caching
+        - RSH used in LLNL (an in-house munge version) that execs shell which runs the command
+        - Should try to replicate this behavior on a non-LLNL machine
+        - Using SSH to avoid this caching
+        - Using Bash or any of the *sh shells
+        - Hari/Jonathan will try on stampede
+    - IB/TCP experiments
+    - PMI numbers
+
