@@ -714,9 +714,12 @@ ssize_t get_file_size(const char* file)
 /* TODO: move this code under a top-level process cleanup function*/
 static void clear_from_ramdisk()
 {
-    /* using system call for now, TODO with nftw() and remove()/unlink() */
-    if (system("rm /tmp/mpilaunch/*")) {
-        perror("cleanup system() call");
+    char* value = getenv("MV2_SPAWN_EXE");
+    if (value != NULL) {
+        char* file = SPAWN_STRDUPF("/tmp/mpilaunch/%s", basename(value));
+        if (unlink(file)) {
+            perror("Unable to cleanup tmp files");
+        }
     }
 }
 
@@ -733,7 +736,6 @@ static char* write_to_ramdisk(const char* src, const char* buf, ssize_t size)
             perror("mkdir");
             exit(EXIT_FAILURE);
         }
-        fprintf(stdout,"mpilauch tmpdir exists");
     }
 
     char* dst = SPAWN_STRDUPF("/tmp/mpilaunch/%s", base);
