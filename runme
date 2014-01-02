@@ -3,7 +3,8 @@
 set -x
 
 num=9
-hosts=`glob-hosts -s $num -e -a -h 'rzmerl[2-10]'`
+#hosts=`glob-hosts -s $num -e -a -h 'rzmerl[2-10]'`
+hosts=`scontrol show hostnames`
 
 #export MV2_SPAWN_SH=ssh # rsh/ssh - remote shell command (rsh is default)
 
@@ -11,7 +12,7 @@ export MV2_SPAWN_DEGREE=64  # degree of k-ary tree
 export MV2_SPAWN_PPN=32     # number of app procs per node
 
 #export MV2_SPAWN_EXE=src/new/examples/pmi_test
-#export MV2_SPAWN_PMI=1   # whether to enable PMI
+export MV2_SPAWN_PMI=1   # whether to enable PMI
 
 export MV2_SPAWN_EXE=src/new/examples/ring_test
 export MV2_SPAWN_RING=1  # whether to enable ring
@@ -27,4 +28,4 @@ export MV2_SPAWN_NET=ibud  # tcp/ibud - network transport (tcp is default)
 # totalview (defaults to spawn tree)
 #export MV2_SPAWN_DBG=app
 
-src/new/launcher $hosts
+install/bin/launcher $hosts
