@@ -710,13 +710,33 @@ ssize_t get_file_size(const char* file)
     return (ssize_t) statbuf.st_size;
 }
 
+/* given path of the ramdisk file, delete it */
+/* TODO: move this code under a top-level process cleanup function*/
+static void clear_from_ramdisk()
+{
+    /* using system call for now, TODO with nftw() and remove()/unlink() */
+    if (system("rm /tmp/mpilaunch/*")) {
+        perror("cleanup system() call");
+    }
+}
+
+
 /* given full path of executable, copy it to memory */
 static char* write_to_ramdisk(const char* src, const char* buf, ssize_t size)
 {
     /* create name for destination */
     char* src_copy = SPAWN_STRDUP(src);
     char* base = basename(src_copy);
-    char* dst = SPAWN_STRDUPF("/tmp/%s", base);
+
+    if (mkdir("/tmp/mpilaunch", S_IRWXU|S_IRGRP|S_IXGRP )) {
+        if (errno != EEXIST) {
+            perror("mkdir");
+            exit(EXIT_FAILURE);
+        }
+        fprintf(stdout,"mpilauch tmpdir exists");
+    }
+
+    char* dst = SPAWN_STRDUPF("/tmp/mpilaunch/%s", base);
     spawn_free(&src_copy);
 
     /* open destination file for writing */
@@ -725,6 +745,12 @@ static char* write_to_ramdisk(const char* src, const char* buf, ssize_t size)
         SPAWN_ERR("Failed to open source file `%s' (open() errno=%d %s)", dst, errno, strerror(errno));
         spawn_free(&dst);
         return NULL;
+    }
+
+    /* setup a hook to clear the ramdisk copies during at exit */
+    if (atexit(clear_from_ramdisk)) {
+        perror("atexit");
+        exit(EXIT_FAILURE);
     }
 
     /* write block to destination */
