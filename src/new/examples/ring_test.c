@@ -13,31 +13,12 @@
 #define LWGRP_SUCCESS (0)
 #define LWGRP_FAILURE (1)
 
-/* We represent groups of processes using a doubly-linked list called
- * a "chain".  This is a very simple struct that records the number
- * of processes in the group, the rank of the local process within the
- * group, and the address of the local process and of the processes
- * having ranks one less (left) and one more (right) than the local
- * process. */
-
-/* A logchain is a data structure that records the number and addresses
- * of processes that are 2^d ranks away from the local process to the
- * left and right sides, for d = 0 to d = ceiling(log N)-1.
- *
- * When multiple collectives are to be issued on a given chain, one
- * can construct and cache the logchain as an optimization.
- *
- * A logchain can be constructed by executing a collective operation on
- * a chain, or it can be filled in locally given a communicator as the
- * initial group.  It must often be used in conjunction with a chain
- * in communication operations. */
-
 typedef struct lwgrp_chain {
   int64_t size;      /* number of processes in our group */
-  int64_t rank;      /* our rank within the group [0,group_size) */
-  char* name;        /* strdup of address (rank) of current process */
-  char* left;        /* strdup of address (rank) of process one less than current */
-  char* right;       /* strdup of address (rank) of process one more than current */
+  int64_t rank;      /* our rank within the group [0,size) */
+  char* name;        /* strdup of address of current process */
+  char* left;        /* strdup of address of process one less than current */
+  char* right;       /* strdup of address of process one more than current */
   int64_t list_size; /* number of elements in channel lists */
   spawn_net_channel** list_left;  /* process addresses for 2^d hops to the left */
   spawn_net_channel** list_right; /* process addresses for 2^d hops to the right */
@@ -373,6 +354,7 @@ static int lwgrp_chain_allgather_strmap(strmap* map, lwgrp_chain* group)
 int main(int argc, char* argv[])
 {
   /* create address (e.g., open socket and encode as string) */
+  //spawn_net_endpoint* ep = spawn_net_open(SPAWN_NET_TYPE_TCP);
   spawn_net_endpoint* ep = spawn_net_open(SPAWN_NET_TYPE_IBUD);
   const char* ep_name = spawn_net_name(ep);
 
