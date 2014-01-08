@@ -1199,12 +1199,18 @@ static void allgather_strmap(strmap* map, const spawn_tree* t)
 
 /* broadcast file from file system to /tmp using spawn tree,
  * returns name of file in /tmp (caller should free name) */
-static char* bcast_file(const char* file, const spawn_tree* t)
+static char* bcast_file(const char* file, const spawn_tree* t,  const strmap* params)
 {
     /* root spawn process reads file size */
     ssize_t bufsize;
+    ssize_t bcast_size = 0;
+
+    /* check for the chunk size to be used for BIN_BCAST */
+    const char* use_bin_bcast_chunk_sz_str = strmap_get(params, "BIN_BCAST_CHUNK_SZ");
+    size_t use_bin_bcast_chunk_sz = atoi(use_bin_bcast_chunk_sz_str) * 1024 * 1024;
+
     if (t->rank == 0) {
-        /* read file to memory */
+        /* get file size */
         bufsize = get_file_size(file);
     }
     bcast(&bufsize, sizeof(ssize_t), t);
@@ -1220,8 +1226,18 @@ static char* bcast_file(const char* file, const spawn_tree* t)
         /* TODO: check for errors */
     }
 
-    /* bcast bytes from root */
-    bcast(buf, bufsize, t);
+    /* bcast entire file at one go by default */
+    if (!use_bin_bcast_chunk_sz) {
+        use_bin_bcast_chunk_sz = bufsize;
+    }
+
+    /* bcast bytes from root with appropriate chunking */
+    while (bcast_size < bufsize) {
+        fprintf(stdout,"Bcasted %ldMB\n", ((bcast_size) / (1024 * 1024 )));
+        bcast((buf+bcast_size), use_bin_bcast_chunk_sz, t);
+        bcast_size += use_bin_bcast_chunk_sz;
+    }
+
                 
     /* write file to ramdisk */
     char* newfile = write_to_ramdisk(file, (char*)buf, bufsize);
@@ -1892,7 +1908,7 @@ static process_group* process_group_start(session* s, const strmap* params)
     if (use_bin_bcast) {
         if (!rank) { tid = begin_delta("bcast app binary"); }
         signal_from_root(s);
-        bcastname = bcast_file(app_exe, s->tree);
+        bcastname = bcast_file(app_exe, s->tree, params);
         signal_to_root(s);
         if (!rank) { end_delta(tid); }
 
@@ -2669,6 +2685,14 @@ int session_start(session * s)
             strmap_set(appmap, "FIFO", "0");
         }
         
+        /* detect whether we should binary bcasting */
+        value = getenv("MV2_SPAWN_BIN_CHUNK_SIZE");
+        if (value != NULL) {
+            strmap_set(appmap, "BIN_BCAST_CHUNK_SZ", value);
+        } else {
+            strmap_set(appmap, "BIN_BCAST_CHUNK_SZ", "0");
+        }
+
         /* detect whether we should binary bcasting */
         value = getenv("MV2_SPAWN_BCAST_BIN");
         if (value != NULL) {
