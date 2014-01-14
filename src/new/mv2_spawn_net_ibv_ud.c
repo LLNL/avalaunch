@@ -317,8 +317,10 @@ int post_ud_send(MPIDI_VC_t* vc, vbuf* v, int rail, mv2_ud_ctx_t *send_ud_ctx)
     /* mark vbuf as send-in-progress */
     v->flags |= UD_VBUF_SEND_INPROGRESS;
 
+#if 0
     PRINT_DEBUG(DEBUG_UD_verbose>1,"UD Send : to:%d seqnum:%d acknum:%d len:%d\n", 
                 vc->pg_rank, p->seqnum, p->acknum, v->desc.sg_entry.length);
+#endif
 
     /* get pointer to UD context */
     mv2_ud_ctx_t* ud_ctx = send_ud_ctx; 
@@ -442,8 +444,10 @@ void mv2_send_explicit_ack(MPIDI_VC_t *vc)
     /* keep track of total number of control messages sent */
     vc->cntl_acks++;
 
+#if 0
     PRINT_DEBUG(DEBUG_UD_verbose>1,"Sent explicit ACK to :%d acknum:%d\n",
         vc->pg_rank, p->acknum);
+#endif
 
     return;
 }
