@@ -1,10 +1,12 @@
 /*
  * Local headers
  */
+#include <session.h>
 #include <unistd.h>
 #include <spawn_internal.h>
 #include <node.h>
 #include <print_errmsg.h>
+#include <hostfile/parser.h>
 
 /*
  * System headers
@@ -87,7 +89,8 @@ int MPIR_i_am_starter = 0;
 int MPIR_ignore_queues;
 
 /* started process calls this routines to signal attached debugger */
-void MPIR_Breakpoint()
+void
+MPIR_Breakpoint (void)
 {
     return;
 }
@@ -108,9 +111,15 @@ typedef struct spawn_tree_struct {
     pid_t* child_pids;             /* pids of local processes that started children */
 } spawn_tree;
 
+typedef struct session_options_t {
+    char const * hostfile;
+    int error;
+    int error_option;
+} session_options;
+
 /* records info for the session including a pointer to the tree of
  * spawn processes and a strmap of session parameters */
-typedef struct session_struct {
+typedef struct session_t {
     char const* spawn_parent; /* name of our parent's endpoint */
     char const* spawn_id;     /* id given to us by parent, we echo this back on connect */
     char const* ep_name;      /* name of our endpoint */
@@ -119,6 +128,7 @@ typedef struct session_struct {
     strmap* params;           /* spawn parameters sent from parent after connect */
     strmap* name2group;       /* maps a group name to a process group pointer */
     strmap* pid2name;         /* maps a pid to a process group name */
+    session_options options;
 } session;
 
 /* records info about an application process group including
@@ -138,15 +148,14 @@ static int call_node_finalize = 0;
 
 static int copy_launcher = 0; /* set to 1 to copy launcher to /tmp while unfurling tree */
 
-void session_destroy(session*);
-
 /*******************************
  * Utility routines
  ******************************/
 
 /* allocates a string and returns current working dir,
  * caller should later free string with spawn_free */
-static char* spawn_getcwd()
+static char *
+spawn_getcwd (void)
 {
     /* TODO: exit on error */
     size_t len = 128;
@@ -174,7 +183,8 @@ static char* spawn_getcwd()
 
 /* returns hostname in a string, caller responsible
  * for freeing with spawn_free */
-static char* spawn_hostname()
+static char *
+spawn_hostname (void)
 {
     struct utsname buf;
     int rc = uname(&buf);
@@ -188,7 +198,8 @@ static char* spawn_hostname()
 
 /* searches user's path for command executable, returns full path
  * in newly allocated string, returns NULL if not found */
-static char* spawn_path_search(const char* command)
+static char *
+spawn_path_search (const char * command)
 {
     char* path = NULL;
 
@@ -257,7 +268,8 @@ static char* spawn_path_search(const char* command)
  * Routines that operate on spawn_trees
  ******************************/
 
-static spawn_tree* tree_new()
+static spawn_tree *
+tree_new (void)
 {
     spawn_tree* t = (spawn_tree*) SPAWN_MALLOC(sizeof(spawn_tree));
 
@@ -273,7 +285,8 @@ static spawn_tree* tree_new()
     return t;
 }
 
-static void tree_delete(spawn_tree** pt)
+static void
+tree_delete (spawn_tree ** pt)
 {
     if (pt == NULL) {
         return;
@@ -301,7 +314,8 @@ static void tree_delete(spawn_tree** pt)
     spawn_free(pt);
 }
 
-static void tree_create_kary(int rank, int ranks, int k, spawn_tree* t)
+static void
+tree_create_kary (int rank, int ranks, int k, spawn_tree* t)
 {
     int i;
 
@@ -374,7 +388,9 @@ static void tree_create_kary(int rank, int ranks, int k, spawn_tree* t)
  ******************************/
 
 /* serialize an array of values into a newly allocated string */
-static char* serialize_to_str(const strmap* map, const char* key_count, const char* key_prefix)
+static char *
+serialize_to_str (const strmap * map, const char * key_count,
+        const char * key_prefix)
 {
     int i;
 
@@ -431,13 +447,9 @@ static char* serialize_to_str(const strmap* map, const char* key_count, const ch
  * current working directory, using provided arguments and env
  * variables.  The shell type is selected by the SH key, which
  * in turn is set via the MV2_SPAWN_SH variable. */
-static int exec_remote(
-    const char* host,
-    const strmap* params,
-    const char* cwd,
-    const char* exe,
-    const strmap* argmap,
-    const strmap* envmap)
+static int
+exec_remote (const char * host, const strmap * params, const char * cwd,
+        const char * exe, const strmap * argmap, const strmap * envmap)
 {
     /* get name of remote shell */
     const char* shname = strmap_get(params, "SH");
@@ -488,12 +500,9 @@ static int exec_remote(
 
 /* exec sh shell to run specified exe in named current working
  * directory, using provided arguments and env variables */
-static int exec_shell(
-    const strmap* params,
-    const char* cwd,
-    const char* exe,
-    const strmap* argmap,
-    const strmap* envmap)
+static int
+exec_shell (const strmap * params, const char * cwd, const char * exe,
+        const strmap * argmap, const strmap * envmap)
 {
     /* lookup paths to env and sh commands from params */
     const char* envpath = strmap_get(params, "env");
@@ -529,12 +538,9 @@ static int exec_shell(
 
 /* directly exec specified exe in named current working
  * directory, using provided arguments and env variables */
-static int exec_direct(
-    const strmap* params,
-    const char* cwd,
-    const char* exe,
-    const strmap* argmap,
-    const strmap* envmap)
+static int
+exec_direct (const strmap * params, const char * cwd, const char * exe,
+    const strmap * argmap, const strmap * envmap)
 {
     int i;
 
@@ -596,13 +602,9 @@ static int exec_direct(
 }
 
 /* fork process, child execs specified command */
-static pid_t fork_proc(
-    const char* host,
-    const strmap* params,
-    const char* cwd,
-    const char* exe,
-    const strmap* argmap,
-    const strmap* envmap)
+static pid_t
+fork_proc (const char * host, const strmap * params, const char * cwd,
+    const char * exe, const strmap * argmap, const strmap * envmap)
 {
 #if 0
     int pipe_stdin[2], pipe_stdout[2], pipe_stderr[2];
@@ -703,7 +705,8 @@ static pid_t fork_proc(
  * Routines to remote copy launcher executable
  ******************************/
 /* given full path, return file size */
-ssize_t get_file_size(const char* file)
+ssize_t
+get_file_size (const char * file)
 {
     struct stat statbuf;
     stat(file, &statbuf);
@@ -712,7 +715,8 @@ ssize_t get_file_size(const char* file)
 
 /* given path of the ramdisk file, delete it */
 /* TODO: move this code under a top-level process cleanup function*/
-static void clear_from_ramdisk()
+static void
+clear_from_ramdisk (void)
 {
     char* value = getenv("MV2_SPAWN_EXE");
     if (value != NULL) {
@@ -725,7 +729,8 @@ static void clear_from_ramdisk()
 
 
 /* given full path of executable, copy it to memory */
-static char* write_to_ramdisk(const char* src, const char* buf, ssize_t size)
+static char *
+write_to_ramdisk (const char * src, const char * buf, ssize_t size)
 {
     /* create name for destination */
     char* src_copy = SPAWN_STRDUP(src);
@@ -776,7 +781,8 @@ static char* write_to_ramdisk(const char* src, const char* buf, ssize_t size)
 }
 
 /* given full path of executable, copy it to memory */
-static ssize_t read_to_mem(const char* src, ssize_t bufsize , char* buf)
+static ssize_t
+read_to_mem (const char * src, ssize_t bufsize , char * buf)
 {
     ssize_t nread = 0, tmpread = 0;
 
@@ -811,7 +817,8 @@ static ssize_t read_to_mem(const char* src, ssize_t bufsize , char* buf)
 }
 
 /* given full path of executable, copy to tmp and return new name */
-static char* copy_to_tmp(const char* src)
+static char *
+copy_to_tmp (const char * src)
 {
     /* create name for destination */
     char* src_copy = SPAWN_STRDUP(src);
@@ -883,7 +890,8 @@ static char* copy_to_tmp(const char* src)
 }
 
 /* fork process, child executes remote copy of file from local host to remote host */
-static pid_t copy_exe(const strmap* params, const char* host, const char* exepath)
+static pid_t
+copy_exe (const strmap * params, const char * host, const char * exepath)
 {
     pid_t cpid = fork();
 
@@ -945,7 +953,8 @@ static pid_t copy_exe(const strmap* params, const char* host, const char* exepat
  * Communication over spawn tree
  ******************************/
 
-int get_spawn_id(session* s)
+int
+get_spawn_id (session * s)
 {
     if (s->spawn_id == NULL) {
         /* I am the root of the tree */
@@ -955,7 +964,8 @@ int get_spawn_id(session* s)
 }
 
 /* sends a synchronization signal up tree to root */
-static void signal_to_root(const session* s)
+static void
+signal_to_root (const session * s)
 {
     spawn_tree* t = s->tree;
     int children = t->children;
@@ -979,7 +989,8 @@ static void signal_to_root(const session* s)
 }
 
 /* waits for synchronization signal to propagate down tree from root */
-static void signal_from_root(const session* s)
+static void
+signal_from_root (const session * s)
 {
     spawn_tree* t = s->tree;
     int children = t->children;
@@ -1006,7 +1017,9 @@ static void signal_from_root(const session* s)
  * the max time of all of its children and sends the sum to its parent,
  * an array of input values are provided along with labels to print
  * the results */
-static void print_critical_path(const session* s, int count, uint64_t* vals, char** labels)
+static void
+print_critical_path (const session * s, int count, uint64_t * vals,
+        char ** labels)
 {
     spawn_tree* t = s->tree;
     int children = t->children;
@@ -1057,7 +1070,8 @@ static void print_critical_path(const session* s, int count, uint64_t* vals, cha
     return;
 }
 
-static void bcast(void* buf, size_t size, const spawn_tree* t)
+static void
+bcast (void * buf, size_t size, const spawn_tree * t)
 {
     /* read bytes from parent, if we have one */
     spawn_net_channel* p = t->parent_ch;
@@ -1077,7 +1091,8 @@ static void bcast(void* buf, size_t size, const spawn_tree* t)
 }
 
 /* broadcast string map from root to all procs in tree */
-static void bcast_strmap(strmap* map, const spawn_tree* t)
+static void
+bcast_strmap (strmap * map, const spawn_tree * t)
 {
     /* root gets size of strmap */
     uint64_t len;
@@ -1118,7 +1133,8 @@ static void bcast_strmap(strmap* map, const spawn_tree* t)
 }
 
 /* combine strmaps as they travel up tree to root */
-static void gather_strmap(strmap* map, const spawn_tree* t)
+static void
+gather_strmap (strmap * map, const spawn_tree * t)
 {
     /* get number of children */
     int children = t->children;
@@ -1186,7 +1202,8 @@ static void gather_strmap(strmap* map, const spawn_tree* t)
 }
 
 /* implement an allgather of strmap across all procs in tree */
-static void allgather_strmap(strmap* map, const spawn_tree* t)
+static void
+allgather_strmap (strmap * map, const spawn_tree * t)
 {
     /* gather map to root */
     gather_strmap(map, t);
@@ -1199,7 +1216,8 @@ static void allgather_strmap(strmap* map, const spawn_tree* t)
 
 /* broadcast file from file system to /tmp using spawn tree,
  * returns name of file in /tmp (caller should free name) */
-static char* bcast_file(const char* file, const spawn_tree* t,  const strmap* params)
+static char *
+bcast_file (const char * file, const spawn_tree * t)
 {
     /* root spawn process reads file size */
     ssize_t bufsize;
@@ -1291,7 +1309,8 @@ static char* bcast_file(const char* file, const spawn_tree* t,  const strmap* pa
  * RIGHT address is set to be the LEFT value of child i+1.  For the
  * LEFT value of child 0, we use the RIGHT value of the local spawn proc. */
 
-static void ring_scan(strmap* input, strmap* output, const spawn_tree* t)
+static void
+ring_scan (strmap * input, strmap * output, const spawn_tree * t)
 {
     int i;
 
@@ -1417,7 +1436,9 @@ static void ring_scan(strmap* input, strmap* output, const spawn_tree* t)
  *   5) Spawn proc computes LEFT/RIGHT addresses for each child,
  *      sends these values along with RANK/RANKS to each child
  *   6) Spawn proc disconnects from each child */
-static void ring_exchange(session* s, const process_group* pg, const spawn_net_endpoint* ep)
+static void
+ring_exchange (session * s, const process_group * pg,
+        const spawn_net_endpoint * ep)
 {
     int i, tid, tid_ring;
     spawn_tree* t = s->tree;
@@ -1579,7 +1600,9 @@ static void ring_exchange(session* s, const process_group* pg, const spawn_net_e
  *   9) Repeat above step again to handle 2nd "GET" from each proc
  *  10) App proc sends "FINALIZE" string to spawn proc
  *  11) Spawn proc disconnects from each child */
-static void pmi_exchange(session* s, const process_group* pg, const spawn_net_endpoint* ep)
+static void
+pmi_exchange(session * s, const process_group * pg,
+        const spawn_net_endpoint * ep)
 {
     int i, tid, tid_pmi;
 
@@ -1729,7 +1752,8 @@ static void pmi_exchange(session* s, const process_group* pg, const spawn_net_en
  ******************************/
 
 /* allocate and initialize new process group structure */
-static process_group* process_group_new()
+static process_group *
+process_group_new()
 {
     process_group* pg = (process_group*) SPAWN_MALLOC(sizeof(process_group));
     pg->name   = NULL;
@@ -1740,7 +1764,8 @@ static process_group* process_group_new()
 }
 
 /* free resources associated with process group */
-static void process_group_delete(process_group** ppg)
+static void
+process_group_delete (process_group ** ppg)
 {
     if (ppg != NULL) {
         /* get pointer to process group */
@@ -1763,7 +1788,8 @@ static void process_group_delete(process_group** ppg)
 }
 
 /* record mapping of group name to a pointer to its data structure */
-static void process_group_map_name(session* s, const char* name, process_group* pg)
+static void
+process_group_map_name (session * s, const char * name, process_group * pg)
 {
     strmap* map = s->name2group;
     if (map == NULL) {
@@ -1778,7 +1804,8 @@ static void process_group_map_name(session* s, const char* name, process_group* 
 }
 
 /* return process group pointer from its name, returns NULL if not found */
-static process_group* process_group_by_name(session* s, const char* name)
+static process_group *
+process_group_by_name (session * s, const char * name)
 {
     process_group* pg = NULL;
 
@@ -1802,7 +1829,8 @@ static process_group* process_group_by_name(session* s, const char* name)
 }
 
 /* record mapping of pid to process group name */
-static void process_group_map_pid(session* s, process_group* pg, pid_t pid)
+static void
+process_group_map_pid (session * s, process_group * pg, pid_t pid)
 {
     strmap* map = s->pid2name;
     if (map == NULL) {
@@ -1819,7 +1847,8 @@ static void process_group_map_pid(session* s, process_group* pg, pid_t pid)
 
 /* return process group name given a pid (member of group),
  * returns NULL if not found */
-static const char* process_group_by_pid(session* s, pid_t pid)
+static const char *
+process_group_by_pid (session * s, pid_t pid)
 {
     strmap* map = s->pid2name;
     if (map == NULL) {
@@ -1834,7 +1863,8 @@ static const char* process_group_by_pid(session* s, pid_t pid)
 }
 
 /* launch app process group witih the session according to params */
-static process_group* process_group_start(session* s, const strmap* params)
+static process_group *
+process_group_start (session * s, const strmap * params)
 {
     int i, tid;
 
@@ -2066,7 +2096,8 @@ static process_group* process_group_start(session* s, const strmap* params)
 
 /* given the name of a command, search for it in path,
  * and insert full path in strmap */
-static void find_command(strmap* map, const char* cmd)
+static void
+find_command (strmap * map, const char * cmd)
 {
     char* path = spawn_path_search(cmd);
     if (path != NULL) {
@@ -2078,7 +2109,41 @@ static void find_command(strmap* map, const char* cmd)
     return;
 }
 
-session* session_init(int argc, char * argv[])
+static session_options
+process_options (int argc, char * argv[])
+{
+    extern char * optarg;
+    extern int optind, opterr, optopt;
+    session_options so = { .hostfile = NULL, .error = 0 };
+    int code;
+
+    optind = 1;
+    opterr = 0;
+
+    do {
+        code = getopt(argc, argv, ":h:");
+        switch (code) {
+            case '?': /* Unrecognized option */
+                so.error = -1;
+                so.error_option = optopt;
+                return so;
+
+            case ':': /* Missing option argument */
+                so.error = -2;
+                so.error_option = optopt;
+                return so;
+
+            case 'h': /* hostfile */
+                so.hostfile = strdup(optarg);
+                break;
+        }
+    } while (-1 != code);
+
+    return so;
+}
+
+session *
+session_init (int argc, char * argv[])
 {
     session * s = SPAWN_MALLOC(sizeof(session));
 
@@ -2116,6 +2181,27 @@ session* session_init(int argc, char * argv[])
         s->ep = spawn_net_open(type);
         s->ep_name = spawn_net_name(s->ep);
     } else {
+        strmap * hostmap = strmap_new();
+        s->options = process_options(argc, argv);
+
+        switch (s->options.error) {
+            case -1:
+                SPAWN_ERR("process_options detected an unrecognized option "
+                        "[-%c]", s->options.error_option);
+                _exit(EXIT_FAILURE);
+            case -2:
+                SPAWN_ERR("process_options detected an option with missing "
+                        "argument [-%c]", s->options.error_option);
+                _exit(EXIT_FAILURE);
+            default:
+                SPAWN_DBG("process_options exited successfully "
+                        "[hostfile = %s]\n", s->options.hostfile);
+        }
+
+        if (s->options.hostfile) {
+            read_hostfile(s->options.hostfile, hostmap);
+        }
+
         /* no parent, we are the root, create parameters strmap */
 
         /* we set the MPIR key if we are launched by debugger */
@@ -2180,21 +2266,37 @@ session* session_init(int argc, char * argv[])
         s->ep = spawn_net_open(type);
         s->ep_name = spawn_net_name(s->ep);
 
+        /* then copy in each host from the command line */
+        char * ptr_string = NULL;
+        strmap * entrymap = NULL;
+        size_t i, n = 1;
+
+        for (i = 0; NULL != (ptr_string = strmap_getf(hostmap, "%d", i)); i++) {
+            char * hostname = NULL;
+            int multiplier = 1;
+
+            sscanf(ptr_string, "%p", &entrymap);
+            hostname = strmap_get(entrymap, "hostname");
+
+            ptr_string = strmap_get(entrymap, "multiplier");
+            if (ptr_string) {
+                sscanf(ptr_string, "%d", &multiplier);
+            }
+
+            while (multiplier--) {
+                strmap_setf(s->params, "%d=%s", n++, hostname);
+            }
+        }
+
         /* we include ourself as a host,
          * plus all hosts listed on command line */
-        int hosts = argc;
+        int hosts = n;
         strmap_setf(s->params, "N=%d", hosts);
         
         /* list our own hostname as the first host */
         char* hostname = spawn_hostname();
         strmap_setf(s->params, "%d=%s", 0, hostname);
         spawn_free(&hostname);
-
-        /* then copy in each host from the command line */
-        int i;
-        for (i = 1; i < argc; i++) {
-            strmap_setf(s->params, "%d=%s", i, argv[i]);
-        }
 
         /* TODO: read this in from command line or via some other method */
         /* specify degree of tree */
@@ -2260,7 +2362,8 @@ session* session_init(int argc, char * argv[])
     return s;
 }
 
-static uint64_t time_diff(struct timespec* end, struct timespec* start)
+static uint64_t
+time_diff (struct timespec * end, struct timespec * start)
 {
     uint64_t sec  = (uint64_t) (end->tv_sec  - start->tv_sec);
     uint64_t nsec = (uint64_t) (end->tv_nsec - start->tv_nsec);
@@ -2268,7 +2371,8 @@ static uint64_t time_diff(struct timespec* end, struct timespec* start)
     return total;
 }
 
-int session_start(session * s)
+int
+session_start (session * s)
 { 
     int i, tid, tid_tree;
     int nodeid;
@@ -2750,7 +2854,8 @@ int session_start(session * s)
     return 0;
 }
 
-void session_destroy(session * s)
+void
+session_destroy (session * s)
 {
     spawn_free(&(s->spawn_id));
     spawn_free(&(s->spawn_parent));

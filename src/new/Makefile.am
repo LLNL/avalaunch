@@ -1,5 +1,6 @@
 ACLOCAL_AMFLAGS = -I m4
 
+SUBDIRS = hostfile .
 include_HEADERS = pmi.h ring.h
 bin_PROGRAMS = launcher
 lib_LTLIBRARIES = libpmi.la
@@ -26,6 +27,7 @@ launcher_SOURCES = \
   mv2_spawn_net_vbuf.c mv2_spawn_net_vbuf.h
 launcher_CFLAGS = -pthread -Wall -g
 launcher_LDFLAGS = -lpthread -lrt
+launcher_LDADD = hostfile/libhostfile.a
 
 libpmi_la_SOURCES = \
   spawn_net.c spawn_net.h \

@@ -17,10 +17,12 @@ AC_PROG_CPP
 AC_PROG_INSTALL
 AC_PROG_LN_S
 AC_PROG_MAKE_SET
+AC_PROG_YACC
 
 AM_PROG_CC_C_O
 AM_PROG_AR
 AM_SILENT_RULES
+AM_PROG_LEX
 
 LT_INIT([dlopen])
 
@@ -44,5 +46,6 @@ AC_CHECK_FUNCS([dup2 memset strdup strerror])
 
 AC_CONFIG_FILES([Makefile
                  src/Makefile
-                 src/new/Makefile])
+                 src/new/Makefile
+                 src/new/hostfile/Makefile])
 AC_OUTPUT
