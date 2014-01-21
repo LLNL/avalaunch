@@ -124,17 +124,15 @@ typedef struct _mv2_hca_info_t {
 } mv2_hca_info_t;
 
 extern mv2_hca_info_t g_hca_info;
-extern int rdma_num_hcas;
+
 extern int rdma_num_rails;
+extern int rdma_num_hcas;
 extern int rdma_vbuf_max;
 extern int rdma_enable_hugepage;
 extern int rdma_vbuf_total_size;
+extern int rdma_vbuf_secondary_pool_size;
 extern int rdma_max_inline_size;
-extern uint8_t rdma_enable_hybrid;
-extern uint8_t rdma_enable_only_ud;
-extern uint8_t rdma_use_ud_zcopy;
 extern uint16_t rdma_default_ud_mtu;
-extern uint32_t rdma_hybrid_enable_threshold;
 extern uint32_t rdma_default_ud_sendwin_size;
 extern uint32_t rdma_default_ud_recvwin_size;
 extern long rdma_ud_progress_timeout;
@@ -142,16 +140,7 @@ extern long rdma_ud_retry_timeout;
 extern long rdma_ud_max_retry_timeout;
 extern long rdma_ud_last_check;
 extern uint16_t rdma_ud_max_retry_count;
-extern uint16_t rdma_ud_progress_spin;
 extern uint16_t rdma_ud_max_ack_pending;
-extern uint16_t rdma_ud_num_rndv_qps;
-extern uint32_t rdma_ud_num_msg_limit;
-extern uint32_t rdma_ud_vbuf_pool_size;
-extern uint32_t rdma_ud_zcopy_threshold;
-extern uint32_t rdma_ud_zcopy_rq_size;
-extern uint16_t rdma_hybrid_max_rc_conn;
-extern uint16_t rdma_hybrid_pending_rc_conn;
-extern int rdma_vbuf_secondary_pool_size;
 
 int mv2_hca_open();
 void comm_lock(void);

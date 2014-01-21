@@ -21,22 +21,20 @@
 /* need to increase MEMLOCK limit */
 #include <sys/resource.h>
 
-int num_rdma_buffer;
+mv2_proc_info_t proc;
+mv2_hca_info_t g_hca_info;
+mv2_ud_exch_info_t local_ep_info;
+
 int rdma_num_rails = 1;
 int rdma_num_hcas = 1;
 int rdma_vbuf_max = -1;
 int rdma_enable_hugepage = 1;
 int rdma_vbuf_total_size;
-uint16_t rdma_default_ud_mtu = 2048;
-uint8_t rdma_enable_hybrid = 1;
-uint8_t rdma_enable_only_ud = 0;
-uint8_t rdma_use_ud_zcopy = 1;
 int rdma_vbuf_secondary_pool_size = RDMA_VBUF_SECONDARY_POOL_SIZE;
 int rdma_max_inline_size = RDMA_DEFAULT_MAX_INLINE_SIZE;
+uint16_t rdma_default_ud_mtu = 2048;
 uint32_t rdma_default_max_ud_send_wqe = RDMA_DEFAULT_MAX_UD_SEND_WQE;
 uint32_t rdma_default_max_ud_recv_wqe = RDMA_DEFAULT_MAX_UD_RECV_WQE;
-uint32_t rdma_ud_num_msg_limit = RDMA_UD_NUM_MSG_LIMIT;
-uint32_t rdma_ud_vbuf_pool_size = RDMA_UD_VBUF_POOL_SIZE;
 /* Maximum number of outstanding buffers (waiting for ACK)*/
 uint32_t rdma_default_ud_sendwin_size = 400;
 /* Maximum number of out-of-order messages that will be buffered */
@@ -47,22 +45,12 @@ long rdma_ud_progress_timeout = 25000;
 long rdma_ud_retry_timeout = 50000;
 long rdma_ud_max_retry_timeout = 20000000;
 long rdma_ud_last_check;
-long rdma_ud_retransmissions=0;
-uint32_t rdma_ud_zcopy_threshold;
-uint32_t rdma_ud_zcopy_rq_size = 4096;
-uint32_t rdma_hybrid_enable_threshold = 1024;
-uint16_t rdma_ud_progress_spin = 1200;
+static uint16_t rdma_ud_progress_spin = 1200;
 uint16_t rdma_ud_max_retry_count = 1000;
 uint16_t rdma_ud_max_ack_pending;
-uint16_t rdma_ud_num_rndv_qps = 64;
-uint16_t rdma_hybrid_max_rc_conn = 64;
-uint16_t rdma_hybrid_pending_rc_conn = 0;
 
-struct timespec remain;
-struct timespec cm_timeout;
-mv2_proc_info_t proc;
-mv2_hca_info_t g_hca_info;
-mv2_ud_exch_info_t local_ep_info;
+static struct timespec remain;
+static struct timespec cm_timeout;
 
 /* Tracks an array of virtual channels.  With each new channel created,
  * the id is incremented.  Grows channel array as needed. */
