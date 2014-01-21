@@ -129,7 +129,6 @@ typedef struct vbuf
 {
     struct ibv_wr_descriptor desc;
     void* pheader;
-    void* sreq;
     struct vbuf_region* region;
     void* vc;
     int rail;
@@ -138,19 +137,7 @@ typedef struct vbuf
     unsigned char* buffer;
 
     int content_size;
-    int content_consumed;
 
-    /* used to keep track of eager sends */
-//    uint8_t eager;
-//    uint8_t coalesce;
-  
-    /* used to keep one sided put get list */
-    void * list;
-
-    /* NULL shandle means not send or not complete. Non-null
-     * means pointer to send handle that is now complete. Used
-     * by MRAILI_Process_send
-     */
     ib_transport transport;
     uint16_t seqnum;
     uint16_t retry_count;

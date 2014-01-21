@@ -291,7 +291,6 @@ vbuf* vbuf_get(struct ibv_pd* pd)
      * Do it here for now because it will make sure it is always initialized.
      * Otherwise we would need to very carefully add the initialization in
      * a dozen other places, and probably miss one. */
-    v->sreq         = NULL;
     v->content_size = 0;
     /* TODO: Decide which transport need to assign here */
 
@@ -363,7 +362,6 @@ void vbuf_release(vbuf* v)
     *v->head_flag   = 0;
     v->pheader      = NULL;
     v->content_size = 0;
-    v->sreq         = NULL;
     v->vc           = NULL;
 
     /* note this correctly handles appending to empty free list */

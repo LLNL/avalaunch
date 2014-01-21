@@ -31,7 +31,7 @@
 #include <netinet/tcp.h>
 #include <spawn_net_ib_debug_utils.h>
 #include <infiniband/verbs.h>
-#include <infiniband/umad.h>
+//#include <infiniband/umad.h>
 
 #ifdef __ia64__
 /* Only ia64 requires this */
@@ -121,14 +121,6 @@ extern int rdma_vbuf_total_size;
 extern int rdma_vbuf_secondary_pool_size;
 extern int rdma_max_inline_size;
 extern uint16_t rdma_default_ud_mtu;
-extern uint32_t rdma_default_ud_sendwin_size;
-extern uint32_t rdma_default_ud_recvwin_size;
-extern long rdma_ud_progress_timeout;
-extern long rdma_ud_retry_timeout;
-extern long rdma_ud_max_retry_timeout;
-extern long rdma_ud_last_check;
-extern uint16_t rdma_ud_max_retry_count;
-extern uint16_t rdma_ud_max_ack_pending;
 
 /* Big Picture:
  *
