@@ -142,13 +142,7 @@ extern long rdma_ud_last_check;
 extern uint16_t rdma_ud_max_retry_count;
 extern uint16_t rdma_ud_max_ack_pending;
 
-int mv2_hca_open();
 void comm_lock(void);
 void comm_unlock(void);
-spawn_net_endpoint* mv2_init_ud();
-spawn_net_channel* mv2_ep_connect(const char *name);
-spawn_net_channel* mv2_ep_accept();
-//int mv2_ud_send(MPIDI_VC_t* vc, const void* buf, size_t size);
-//int mv2_ud_recv(MPIDI_VC_t* vc, void* buf, size_t size);
 
 #endif /* _SPAWN_NET_IB_INTERNAL_H */

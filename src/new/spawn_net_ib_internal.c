@@ -21,9 +21,11 @@
 /* need to increase MEMLOCK limit */
 #include <sys/resource.h>
 
+#if 0
 mv2_proc_info_t proc;
 mv2_hca_info_t g_hca_info;
 mv2_ud_exch_info_t local_ep_info;
+MPIDI_VC_t** ud_vc_info = NULL; /* VC array */
 
 int rdma_num_rails = 1;
 int rdma_num_hcas = 1;
@@ -48,6 +50,7 @@ long rdma_ud_last_check;
 static uint16_t rdma_ud_progress_spin = 1200;
 uint16_t rdma_ud_max_retry_count = 1000;
 uint16_t rdma_ud_max_ack_pending;
+#endif
 
 static struct timespec remain;
 static struct timespec cm_timeout;
@@ -56,7 +59,6 @@ static struct timespec cm_timeout;
  * the id is incremented.  Grows channel array as needed. */
 static uint64_t ud_vc_info_id  = 0;    /* next id to be assigned */
 static uint64_t ud_vc_infos    = 0;    /* capacity of VC array */
-MPIDI_VC_t** ud_vc_info = NULL; /* VC array */
 
 static pthread_mutex_t comm_lock_object;
 static pthread_t comm_thread;

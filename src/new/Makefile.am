@@ -20,7 +20,7 @@ launcher_SOURCES = \
   timer_util.c timer_util.h\
   strmap.c strmap.h \
   spawn_net_ib.c spawn_net_ib.h \
-  spawn_net_ib_internal.c spawn_net_ib_internal.h \
+  spawn_net_ib_internal.h \
   spawn_net_ib_debug_utils.c spawn_net_ib_debug_utils.h \
   spawn_net_ib_ud.c spawn_net_ib_ud.h \
   spawn_net_ib_ud_inline.h \
