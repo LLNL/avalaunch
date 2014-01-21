@@ -12,8 +12,6 @@
 #include <spawn_net_ib_internal.h>
 #include <spawn_net_ib_vbuf.h>
 
-extern MPIDI_VC_t** ud_vc_info;
-
 enum {
     MSG_QUEUED_RECVWIN,
     MSG_IN_RECVWIN
