@@ -171,61 +171,20 @@ typedef struct _mv2_ud_ctx_t {
 } mv2_ud_ctx_t;
 
 /* structure to pass to mv2_ud_create_qp to create an ibv_qp */
-typedef struct mv2_ud_qp_info {
+typedef struct ud_qp_info {
     struct ibv_cq      *send_cq;
     struct ibv_cq      *recv_cq;
     struct ibv_srq     *srq;
     struct ibv_pd      *pd;
     struct ibv_qp_cap  cap;
     uint32_t           sq_psn;
-} mv2_ud_qp_info_t;
+} ud_qp_info_t;
 
 /* IB address info for ud exhange */
 typedef struct _mv2_ud_exch_info_t {
     uint16_t lid; /* lid of process */
     uint32_t qpn; /* queue pair of process */
 } mv2_ud_exch_info_t;
-
-typedef struct _mv2_rndv_qp_t {
-    uint32_t seqnum;
-    uint16_t index;
-    uint16_t hca_num;
-    
-    struct ibv_qp *ud_qp;
-    struct ibv_cq *ud_cq;
-
-    void *next;
-    void *prev;
-} mv2_rndv_qp_t;
-
-typedef struct _mv2_ud_zcopy_info_t {
-    /* Rndv QP pool */
-    mv2_rndv_qp_t *rndv_qp_pool;
-    mv2_rndv_qp_t *rndv_qp_pool_free_head;
-    int no_free_rndv_qp;
-    char *grh_buf;
-    void *grh_mr;
-    
-    struct ibv_cq **rndv_ud_cqs;
-    mv2_ud_ctx_t **rndv_ud_qps;
-} mv2_ud_zcopy_info_t;
-
-typedef struct MPIDI_CH3_Pkt_zcopy_finish_t {
-    uint8_t  type;   /* packet type (see ib_internal.h) */
-    uint64_t srcid;  /* source context id to identify sender */
-    uint16_t seqnum; /* sequence number from source */
-    uint16_t acknum; /* most recent seq number source has received from us */
-    uint8_t  rail;   /* rail id to send packet on */
-    int hca_index;
-} MPIDI_CH3_Pkt_zcopy_finish_t;
-        
-typedef struct MPIDI_CH3_Pkt_zcopy_ack_t {       
-    uint8_t  type;   /* packet type (see ib_internal.h) */
-    uint64_t srcid;  /* source context id to identify sender */
-    uint16_t seqnum; /* sequence number from source */
-    uint16_t acknum; /* most recent seq number source has received from us */
-    uint8_t  rail;   /* rail id to send packet on */
-} MPIDI_CH3_Pkt_zcopy_ack_t;
 
 /* ud vc info - tracks connection info between process pair */
 typedef struct MPIDI_VC
@@ -264,12 +223,8 @@ typedef struct MPIDI_VC
 typedef struct _mv2_proc_info_t {
     mv2_ud_ctx_t*       ud_ctx;      /* pointer to UD context */
     message_queue_t     unack_queue; /* queue of sent packets yet to be ACK'd */
-    mv2_ud_zcopy_info_t zcopy_info;
     int (*post_send)(MPIDI_VC_t* vc, vbuf* v, int rail, mv2_ud_ctx_t* send_ud_ctx);
 } mv2_proc_info_t;
-
-void mv2_ud_zcopy_poll_cq(mv2_ud_zcopy_info_t *zcopy_info, mv2_ud_ctx_t *ud_ctx,
-                                vbuf *resend_buf, int hca_index, int *found);
 
 int post_ud_send(MPIDI_VC_t* vc, vbuf* v, int rail, mv2_ud_ctx_t *send_ud_ctx);
 void mv2_check_resend();

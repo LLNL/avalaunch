@@ -25,12 +25,12 @@
 
 /* TODO: bury all of these globals in allocated memory */
 static int64_t open_count = 0;
-static spawn_net_endpoint* ep = SPAWN_NET_ENDPOINT_NULL;
+static spawn_net_endpoint* g_ep = SPAWN_NET_ENDPOINT_NULL;
 
 mv2_proc_info_t proc;
 mv2_hca_info_t g_hca_info;
-mv2_ud_exch_info_t local_ep_info;
-MPIDI_VC_t** ud_vc_info = NULL; /* VC array */
+static mv2_ud_exch_info_t local_ep_info;
+static MPIDI_VC_t** ud_vc_info = NULL; /* VC array */
 
 int rdma_num_rails = 1;
 int rdma_num_hcas = 1;
@@ -52,7 +52,7 @@ static uint16_t rdma_ud_progress_spin = 1200;
 uint16_t rdma_ud_max_retry_count = 1000;
 uint16_t rdma_ud_max_ack_pending;
 
-static struct timespec remain;
+static struct timespec cm_remain;
 static struct timespec cm_timeout;
 
 /* Tracks an array of virtual channels.  With each new channel created,
@@ -61,8 +61,6 @@ static uint64_t ud_vc_info_id  = 0;    /* next id to be assigned */
 static uint64_t ud_vc_infos    = 0;    /* capacity of VC array */
 
 static pthread_t comm_thread;
-
-void* cm_timeout_handler(void *arg);
 
 /*******************************************
  * interface to lock/unlock connection manager
@@ -252,7 +250,7 @@ typedef struct connected_list_t {
 static connected_list* connected_head = NULL;
 static connected_list* connected_tail = NULL;
 
-static int mv2_post_ud_recv_buffers(int num_bufs, mv2_ud_ctx_t *ud_ctx)
+static int ud_post_recv_buffers(int num_bufs, mv2_ud_ctx_t *ud_ctx)
 {
     /* TODO: post buffers as a linked list to be more efficient? */
 
@@ -362,7 +360,7 @@ static int mv2_post_ud_recv_buffers(int num_bufs, mv2_ud_ctx_t *ud_ctx)
 }
 
 /* iterate over all active vc's and send ACK messages if necessary */
-static inline void mv2_ud_send_acks()
+static inline void ud_send_acks()
 {
     /* walk list of connected virtual channels */
     connected_list* elem = connected_head;
@@ -502,7 +500,7 @@ static int cq_poll()
                 proc.ud_ctx->num_recvs_posted--;
                 if(proc.ud_ctx->num_recvs_posted < proc.ud_ctx->credit_preserve) {
                     int remaining = rdma_default_max_ud_recv_wqe - proc.ud_ctx->num_recvs_posted;
-                    int posted = mv2_post_ud_recv_buffers(remaining, proc.ud_ctx);
+                    int posted = ud_post_recv_buffers(remaining, proc.ud_ctx);
                     proc.ud_ctx->num_recvs_posted += posted;
                 }
                 break;
@@ -520,45 +518,8 @@ static int cq_poll()
     return ne;
 }
 
-static int mv2_wait_on_channel()
-{
-    /* resend messages and send acks if we're due */
-    long time = mv2_get_time_us();
-    long delay = time - rdma_ud_last_check;
-    if (delay > rdma_ud_progress_timeout) {
-        mv2_check_resend();
-        mv2_ud_send_acks();
-        rdma_ud_last_check = mv2_get_time_us();
-    }
-
-    /* Unlock before going to sleep */
-    comm_unlock();
-
-    /* Wait for the completion event */
-    void *ev_ctx = NULL;
-    struct ibv_cq *ev_cq = NULL;
-    if (ibv_get_cq_event(g_hca_info.comp_channel, &ev_cq, &ev_ctx)) {
-        ibv_error_abort(-1, "Failed to get cq_event\n");
-    }
-
-    /* Get lock before processing */
-    comm_lock();
-
-    /* Ack the event */
-    ibv_ack_cq_events(ev_cq, 1);
-
-    /* Request notification upon the next completion event */
-    if (ibv_req_notify_cq(ev_cq, 0)) {
-        ibv_error_abort(-1, "Couldn't request CQ notification\n");
-    }
-
-    cq_poll();
-
-    return 0;
-}
-
 /* empty all events from completion queue queue */
-static void drain_cq_events()
+static inline void cq_drain()
 {
     int rc = cq_poll();
     while (rc > 0) {
@@ -568,7 +529,7 @@ static void drain_cq_events()
 }
 
 /* Get HCA parameters */
-static int hca_get_info(int devnum, mv2_hca_info_t *hca_info)
+static int hca_open(int devnum, mv2_hca_info_t *hca_info)
 {
     int i;
 
@@ -737,7 +698,7 @@ static int qp_transition(struct ibv_qp *qp)
 }
 
 /* Create UD QP */
-static struct ibv_qp* qp_create(mv2_ud_qp_info_t *qp_info)
+static struct ibv_qp* qp_create(ud_qp_info_t *qp_info)
 {
     /* zero out all fields of queue pair attribute structure */
     struct ibv_qp_init_attr init_attr;
@@ -777,28 +738,63 @@ static struct ibv_qp* qp_create(mv2_ud_qp_info_t *qp_info)
     return qp;
 }
 
-/* Destroy UD Context */
-static void mv2_ud_destroy_ctx(mv2_ud_ctx_t *ctx)
+/* this is the function executed by the communication progress thread */
+static void* cm_timeout_handler(void *arg)
 {
-    /* destroy UD QP if we have one */
-    if (ctx->qp) {
-        ibv_destroy_qp(ctx->qp);
+    int nspin = 0;
+
+    /* define sleep time between waking and checking for events */
+    cm_timeout.tv_sec = rdma_ud_progress_timeout / 1000000;
+    cm_timeout.tv_nsec = (rdma_ud_progress_timeout - cm_timeout.tv_sec * 1000000) * 1000;
+
+    while(1) {
+        /* sleep for some time before we look, release lock while
+         * sleeping */
+        //comm_unlock();
+        nanosleep(&cm_timeout, &cm_remain);
+        //comm_lock();
+
+#if 0
+        /* spin poll for some time to look for new events */
+        for (nspin = 0; nspin < rdma_ud_progress_spin; nspin++) {
+            cq_poll();
+        }
+#endif
+
+        /* resend messages and send acks if we're due */
+//        long time = mv2_get_time_us();
+//        long delay = time - rdma_ud_last_check;
+//        if (delay > rdma_ud_progress_timeout) {
+            /* time is up, grab lock and process acks */
+            comm_lock();
+
+            /* send explicit acks out on all vc's if we need to,
+             * this ensures acks flow out even if main thread is
+             * busy doing other work */
+            ud_send_acks();
+
+            /* process any messages that may have come in, we may
+             * clear messages we'd otherwise try to resend below */
+            cq_drain();
+
+            /* resend any unack'd packets whose timeout has expired */
+            mv2_check_resend();
+
+            /* done sending messages, release lock */
+            comm_unlock();
+
+            /* record the last time we checked acks */
+//            rdma_ud_last_check = mv2_get_time_us();
+//        }
     }
 
-    /* now free context data structure */
-    spawn_free(&ctx);
-
-    spawn_free(&ud_vc_info);
-
-    pthread_cancel(comm_thread);
-
-    return;
+    return NULL;
 }
 
 /* Initialize UD Context */
-static spawn_net_endpoint* init_ud()
+static spawn_net_endpoint* ud_ctx_create()
 {
-    /* Init lock for vbuf */
+    /* init lock for vbuf */
     init_vbuf_lock();
 
     /* initialize lock for communication */
@@ -841,7 +837,7 @@ static spawn_net_endpoint* init_ud()
     ctx->ext_sendq_count  = 0;
 
     /* set parameters for UD queue pair */
-    mv2_ud_qp_info_t qp_info;
+    ud_qp_info_t qp_info;
     qp_info.pd                  = g_hca_info.pd;
     qp_info.srq                 = NULL;
     qp_info.sq_psn              = RDMA_DEFAULT_PSN;
@@ -855,14 +851,14 @@ static spawn_net_endpoint* init_ud()
 
     /* create UD queue pair and attach to context */
     ctx->qp = qp_create(&qp_info);
-    if(ctx->qp == NULL) {
+    if (ctx->qp == NULL) {
         SPAWN_ERR("Error in creating UD QP");
         return SPAWN_NET_ENDPOINT_NULL;
     }
 
     /* post initial UD recv requests */
     int remaining = rdma_default_max_ud_recv_wqe - ctx->num_recvs_posted;
-    int posted = mv2_post_ud_recv_buffers(remaining, ctx);
+    int posted = ud_post_recv_buffers(remaining, ctx);
     ctx->num_recvs_posted = posted;
 
     /* save context in global proc structure */
@@ -919,57 +915,31 @@ static spawn_net_endpoint* init_ud()
     return ep;
 }
 
-/* this is the function executed by the communication progress thread */
-void* cm_timeout_handler(void *arg)
+/* Destroy UD Context */
+static void ud_ctx_destroy(spawn_net_endpoint** pep)
 {
-    int nspin = 0;
+    /* get pointer to end point */
+    spawn_net_endpoint* ep = *pep;
 
-    /* define sleep time between waking and checking for events */
-    cm_timeout.tv_sec = rdma_ud_progress_timeout / 1000000;
-    cm_timeout.tv_nsec = (rdma_ud_progress_timeout - cm_timeout.tv_sec * 1000000) * 1000;
+    /* extract context from endpoint */
+    mv2_ud_ctx_t* ctx = proc.ud_ctx;
 
-    while(1) {
-        /* sleep for some time before we look, release lock while
-         * sleeping */
-        //comm_unlock();
-        nanosleep(&cm_timeout, &remain);
-        //comm_lock();
-
-#if 0
-        /* spin poll for some time to look for new events */
-        for (nspin = 0; nspin < rdma_ud_progress_spin; nspin++) {
-            cq_poll();
-        }
-#endif
-
-        /* resend messages and send acks if we're due */
-//        long time = mv2_get_time_us();
-//        long delay = time - rdma_ud_last_check;
-//        if (delay > rdma_ud_progress_timeout) {
-            /* time is up, grab lock and process acks */
-            comm_lock();
-
-            /* send explicit acks out on all vc's if we need to,
-             * this ensures acks flow out even if main thread is
-             * busy doing other work */
-            mv2_ud_send_acks();
-
-            /* process any messages that may have come in, we may
-             * clear messages we'd otherwise try to resend below */
-            drain_cq_events();
-
-            /* resend any unack'd packets whose timeout has expired */
-            mv2_check_resend();
-
-            /* done sending messages, release lock */
-            comm_unlock();
-
-            /* record the last time we checked acks */
-//            rdma_ud_last_check = mv2_get_time_us();
-//        }
+    /* destroy UD QP if we have one */
+    if (ctx->qp) {
+        ibv_destroy_qp(ctx->qp);
     }
 
-    return NULL;
+    /* now free context data structure */
+    spawn_free(&ctx);
+
+    /* free endpoint */
+    spawn_free(pep);
+
+    spawn_free(&ud_vc_info);
+
+    pthread_cancel(comm_thread);
+
+    return;
 }
 
 /* given a vbuf used for a send, release vbuf back to pool if we can */
@@ -1002,7 +972,7 @@ void MPIDI_CH3I_MRAIL_Release_vbuf(vbuf * v)
 static vbuf* packet_read(MPIDI_VC_t* vc)
 {
     /* eagerly pull all events from completion queue */
-    drain_cq_events();
+    cq_drain();
 
     /* look for entry in apprecv queue */
     vbuf* v = mv2_ud_apprecv_window_retrieve_and_remove(&vc->app_recv_window);
@@ -1012,11 +982,11 @@ static vbuf* packet_read(MPIDI_VC_t* vc)
         /* release the lock for some time to let other threads make
          * progress */
         comm_unlock();
-//        nanosleep(&cm_timeout, &remain);
+//        nanosleep(&cm_timeout, &cm_remain);
         comm_lock();
 
         /* eagerly pull all events from completion queue */
-        drain_cq_events();
+        cq_drain();
 
         /* look for entry in apprecv queue */
         v = mv2_ud_apprecv_window_retrieve_and_remove(&vc->app_recv_window);
@@ -1074,18 +1044,18 @@ static inline int packet_send(
 static vbuf* recv_connect_message()
 {
     /* eagerly pull all events from completion queue */
-    drain_cq_events();
+    cq_drain();
 
     /* wait until we see at item at head of connect queue */
     while (connect_head == NULL) {
         /* TODO: at this point, we should block for incoming event */
 
         comm_unlock();
-//        nanosleep(&cm_timeout, &remain);
+//        nanosleep(&cm_timeout, &cm_remain);
         comm_lock();
 
         /* eagerly pull all events from completion queue */
-        drain_cq_events();
+        cq_drain();
     }
 
     /* get pointer to element */
@@ -1146,25 +1116,26 @@ spawn_net_endpoint* spawn_net_open_ib()
     if (open_count == 0) {
         /* Open HCA for communication */
         memset(&g_hca_info, 0, sizeof(mv2_hca_info_t));
-        if (hca_get_info(0, &g_hca_info) != 0){
+        if (hca_open(0, &g_hca_info) != 0){
             SPAWN_ERR("Failed to initialize HCA");
             return -1;
         }
         return 0;
 
-        ep = init_ud();
+        g_ep = ud_ctx_create();
     }
 
     open_count++;
 
-    return ep;
+    return g_ep;
 }
 
 int spawn_net_close_ib(spawn_net_endpoint** pep)
 {
     open_count--;
     if (open_count == 0) {
-        /* TODO: close down UD endpoint */
+        /* close down UD endpoint */
+        ud_ctx_destroy(pep);
     }
 }
 
@@ -1352,6 +1323,7 @@ spawn_net_channel* spawn_net_accept_ib(const spawn_net_endpoint* ep)
 int spawn_net_disconnect_ib(spawn_net_channel** pch)
 {
     comm_lock();
+    // send disconnect msg
     comm_unlock();
 
     return SPAWN_SUCCESS;
