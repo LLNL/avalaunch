@@ -45,8 +45,8 @@
  *
  */
 
-#ifndef MV2_CLOCK_H
-#define MV2_CLOCK_H
+#ifndef SPAWN_NET_IB_CLOCK_H
+#define SPAWN_NET_IB_CLOCK_H
 
 #if defined (__x86_64__) || defined(__i386__)
 /* Note: only x86 CPUs which have rdtsc instruction are supported. */
@@ -92,4 +92,4 @@ extern double get_cpu_mhz(void);
 void mv2_init_timers(void);
 double mv2_get_time_us(void);
 
-#endif
+#endif /* SPAWN_NET_IB_CLOCK_H */

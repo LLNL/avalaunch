@@ -10,12 +10,11 @@
  *
  */
 
-#include "mv2_spawn_net_vbuf.h"
-#include <ib_internal.h>
-
-#include "mv2_spawn_net_ud.h"
-#include "mv2_spawn_net_ud_inline.h"
-#include <mv2_spawn_net_debug_utils.h>
+#include "spawn_net_ib_vbuf.h"
+#include "spawn_net_ib_internal.h"
+#include "spawn_net_ib_ud.h"
+#include "spawn_net_ib_ud_inline.h"
+#include "spawn_net_ib_debug_utils.h"
 
 long rdma_ud_last_check;
 

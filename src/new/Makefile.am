@@ -20,11 +20,12 @@ launcher_SOURCES = \
   timer_util.c timer_util.h\
   strmap.c strmap.h \
   spawn_net_ib.c spawn_net_ib.h \
-  ib_internal.c ib_internal.h \
-  mv2_spawn_net_debug_utils.c mv2_spawn_net_debug_utils.h \
-  mv2_spawn_net_ibv_ud.c mv2_spawn_net_ud.h mv2_spawn_net_ud_inline.h \
-  mv2_spawn_net_clock.c mv2_spawn_net_clock.h \
-  mv2_spawn_net_vbuf.c mv2_spawn_net_vbuf.h
+  spawn_net_ib_internal.c spawn_net_ib_internal.h \
+  spawn_net_ib_debug_utils.c spawn_net_ib_debug_utils.h \
+  spawn_net_ib_ud.c spawn_net_ib_ud.h \
+  spawn_net_ib_ud_inline.h \
+  spawn_net_ib_clock.c spawn_net_ib_clock.h \
+  spawn_net_ib_vbuf.c spawn_net_ib_vbuf.h
 launcher_CFLAGS = -pthread -Wall -g
 launcher_LDFLAGS = -lpthread -lrt
 launcher_LDADD = hostfile/libhostfile.a

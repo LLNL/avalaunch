@@ -24,9 +24,9 @@
  *
  */
 
-#include <mv2_spawn_net_vbuf.h>
-#include <mv2_spawn_net_ud.h>
-#include <ib_internal.h>
+#include "spawn_net_ib_vbuf.h"
+#include "spawn_net_ib_ud.h"
+#include "spawn_net_ib_internal.h"
 
 /* vbuf pool info */
 vbuf_pool_t *rdma_vbuf_pools;
@@ -86,7 +86,7 @@ void mv2_print_vbuf_usage_usage()
     size_t tot_mem = (vbuf_n_allocated * (rdma_vbuf_total_size + sizeof(struct vbuf)));
     tot_mem += (ud_vbuf_n_allocated * (rdma_default_ud_mtu + sizeof(struct vbuf))); 
     PRINT_INFO(DEBUG_MEM_verbose, "RC VBUFs:%ld  UD VBUFs:%ld TOT MEM:%ld kB\n",
-                    vbuf_n_allocated, ud_vbuf_n_allocated, (tot_mem / 1024));
+                    (long) vbuf_n_allocated, (long) ud_vbuf_n_allocated, (tot_mem / 1024));
 }
 
 int init_vbuf_lock(void)

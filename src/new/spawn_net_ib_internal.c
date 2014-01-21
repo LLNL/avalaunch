@@ -10,10 +10,10 @@
  *
  */
 #include <spawn_internal.h>
-#include <ib_internal.h>
-#include <mv2_spawn_net_ud.h>
-#include <mv2_spawn_net_ud_inline.h>
-#include <mv2_spawn_net_debug_utils.h>
+#include <spawn_net_ib_internal.h>
+#include <spawn_net_ib_ud.h>
+#include <spawn_net_ib_ud_inline.h>
+#include <spawn_net_ib_debug_utils.h>
 
 /* need to block SIGCHLD in comm_thread */
 #include <signal.h>

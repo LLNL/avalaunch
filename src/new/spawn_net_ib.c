@@ -12,7 +12,7 @@
 
 #include "spawn_internal.h"
 
-#include "mv2_spawn_net_ud.h"
+#include "spawn_net_ib_ud.h"
 
 static int64_t open_count = 0;
 static spawn_net_endpoint* ep = SPAWN_NET_ENDPOINT_NULL;

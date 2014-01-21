@@ -10,8 +10,8 @@
  *
  */
 
-#ifndef DEBUG_UTILS_H
-#define DEBUG_UTILS_H
+#ifndef SPAWN_NET_IB_DEBUG_UTILS_H
+#define SPAWN_NET_IB_DEBUG_UTILS_H
 
 #include <stdio.h>
 #include <errno.h>
@@ -146,4 +146,4 @@ extern int initialize_debug_variables();
 
 extern void mv2_print_mem_usage();
 
-#endif
+#endif /* SPAWN_NET_IB_DEBUG_UTILS_H */

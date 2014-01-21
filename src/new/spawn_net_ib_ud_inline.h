@@ -9,8 +9,8 @@
  * copyright file COPYRIGHT in the top level MVAPICH2 directory.
  *
  */
-#include <ib_internal.h>
-#include <mv2_spawn_net_vbuf.h>
+#include <spawn_net_ib_internal.h>
+#include <spawn_net_ib_vbuf.h>
 
 extern MPIDI_VC_t** ud_vc_info;
 

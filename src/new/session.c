@@ -1217,7 +1217,7 @@ allgather_strmap (strmap * map, const spawn_tree * t)
 /* broadcast file from file system to /tmp using spawn tree,
  * returns name of file in /tmp (caller should free name) */
 static char *
-bcast_file (const char * file, const spawn_tree * t)
+bcast_file (const char * file, const spawn_tree * t, const strmap* params)
 {
     /* root spawn process reads file size */
     ssize_t bufsize;

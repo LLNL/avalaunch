@@ -9,8 +9,8 @@
  * copyright file COPYRIGHT in the top level MVAPICH2 directory.
  *
  */
-#ifndef _IB_INTERNAL_H
-#define _IB_INTERNAL_H
+#ifndef _SPAWN_NET_IB_INTERNAL_H
+#define _SPAWN_NET_IB_INTERNAL_H
 
 #include <netdb.h>
 #include <errno.h>
@@ -24,12 +24,12 @@
 #include <sys/mman.h>
 #include <sys/types.h>
 #include <arpa/inet.h>
-#include <mv2_spawn_net_clock.h>
+#include <spawn_net_ib_clock.h>
 #include <spawn_net.h>
 #include <spawn_util.h>
 #include <sys/socket.h>
 #include <netinet/tcp.h>
-#include <mv2_spawn_net_debug_utils.h>
+#include <spawn_net_ib_debug_utils.h>
 #include <infiniband/verbs.h>
 #include <infiniband/umad.h>
 
@@ -162,4 +162,4 @@ spawn_net_channel* mv2_ep_accept();
 //int mv2_ud_send(MPIDI_VC_t* vc, const void* buf, size_t size);
 //int mv2_ud_recv(MPIDI_VC_t* vc, void* buf, size_t size);
 
-#endif /* _IB_INTERNAL_H */
+#endif /* _SPAWN_NET_IB_INTERNAL_H */

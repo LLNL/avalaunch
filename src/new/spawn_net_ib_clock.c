@@ -51,7 +51,7 @@
 
 /* For gettimeofday */
 #define _BSD_SOURCE
-#include <ib_internal.h>
+#include <spawn_net_ib_internal.h>
 
 /* clock_gettime */
 #include <time.h>

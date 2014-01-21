@@ -13,7 +13,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include "mv2_spawn_net_debug_utils.h"
+#include "spawn_net_ib_debug_utils.h"
 
 // Prefix to distinguish output from different processes
 #define OUTPUT_PREFIX_LENGTH 256

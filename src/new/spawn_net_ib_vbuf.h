@@ -24,10 +24,10 @@
  *
  */
 
-#ifndef _VBUF_H_
-#define _VBUF_H_
+#ifndef _SPAWN_NET_IB_VBUF_H_
+#define _SPAWN_NET_IB_VBUF_H_
 
-#include "ib_internal.h"
+#include "spawn_net_ib_internal.h"
 
 #define CREDIT_VBUF_FLAG (111)
 #define NORMAL_VBUF_FLAG (222)
@@ -349,4 +349,4 @@ void vbuf_init_rma_fetch_and_add(
 extern vbuf_pool_t *rdma_vbuf_pools;
 extern int rdma_num_vbuf_pools;
 
-#endif /* _VBUF_H_ */
+#endif /* _SPAWN_NET_IB_VBUF_H_ */
