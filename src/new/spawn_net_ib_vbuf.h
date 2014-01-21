@@ -29,12 +29,7 @@
 
 #include "spawn_net_ib_internal.h"
 
-#define CREDIT_VBUF_FLAG (111)
 #define NORMAL_VBUF_FLAG (222)
-#define RPUT_VBUF_FLAG (333)
-#define RGET_VBUF_FLAG (444)
-#define RDMA_ONE_SIDED (555)
-#define COLL_VBUF_FLAG (666)
 /*
 ** FIXME: Change the size of VBUF_FLAG_TYPE to 4 bytes when size of
 ** MPIDI_CH3_Pkt_send is changed to mutliple of 4. This will fix the 
@@ -42,18 +37,11 @@
 */
 #define VBUF_FLAG_TYPE uint64_t
 
-#define FREE_FLAG (0)
-#define BUSY_FLAG (1)
-#define PKT_NO_SEQ_NUM -2
-#define PKT_IS_NULL -1
-
 #define MRAILI_ALIGN_LEN(len, align_unit)           \
 {                                                   \
     len = ((int)(((len)+align_unit-1) /             \
                 align_unit)) * align_unit;          \
 }
-
-#define ROUNDUP(len, unit) ((len + unit - 1) / unit) 
 
 #include <sys/ipc.h>
 #include <sys/shm.h>
@@ -97,9 +85,6 @@ struct ibv_wr_descriptor
     void* next;
 };
 
-#define VBUF_BUFFER_SIZE (rdma_vbuf_total_size)
-
-#define MRAIL_MAX_EAGER_SIZE VBUF_BUFFER_SIZE
 typedef enum {
     IB_TRANSPORT_UD = 1,
     IB_TRANSPORT_RC = 2,
@@ -156,8 +141,8 @@ typedef struct vbuf
     int content_consumed;
 
     /* used to keep track of eager sends */
-    uint8_t eager;
-    uint8_t coalesce;
+//    uint8_t eager;
+//    uint8_t coalesce;
   
     /* used to keep one sided put get list */
     void * list;
@@ -178,175 +163,16 @@ typedef struct vbuf
     LINK recvwin_msg;    /* tracks received packets, either control msgs or out-of-order app msgs */
     LINK extwin_msg;     /* tracks messages to be sent when credits are availble */
     LINK unack_msg;
-#if defined(_MCST_SUPPORT_)
-    LINK mcast_sendwin_msg;
-    LINK mcast_recvwin_msg;
-#endif
 } vbuf;
 
-/* one for head and one for tail */
-#define VBUF_FAST_RDMA_EXTRA_BYTES (2 * sizeof(VBUF_FLAG_TYPE))
+int vbuf_init();
 
-#define FAST_RDMA_ALT_TAG 0x8000
-#define FAST_RDMA_SIZE_MASK 0x7fff
+vbuf* vbuf_get(struct ibv_pd* pd);
 
-#if defined(DEBUG)
-void dump_vbuf(char* msg, vbuf* v);
-#else /* defined(DEBUG) */
-#define dump_vbuf(msg, v)
-#endif /* defined(DEBUG) */
+void vbuf_release(vbuf* v);
 
-void mv2_print_vbuf_usage_usage();
-int init_vbuf_lock(void);
+void vbuf_prepare_recv(vbuf* v, unsigned long len, int rail);
 
-/*
- * Vbufs are allocated in blocks and threaded on a single free list.
- *
- * These data structures record information on all the vbuf
- * regions that have been allocated.  They can be used for
- * error checking and to un-register and deallocate the regions
- * at program termination.
- *
- */
-typedef struct vbuf_region
-{
-    struct ibv_mr* mem_handle[MAX_NUM_HCAS]; /* mem hndl for entire region */
-    void* malloc_start;         /* used to free region later  */
-    void* malloc_end;           /* to bracket mem region      */
-    void* malloc_buf_start;     /* used to free DMA region later */
-    void* malloc_buf_end;       /* bracket DMA region */
-    int count;                  /* number of vbufs in region  */
-    struct vbuf* vbuf_head;     /* first vbuf in region       */
-    struct vbuf_region* next;   /* thread vbuf regions        */
-    int shmid;
-} vbuf_region;
-
-/* The data structure to hold vbuf pool info */
-typedef struct vbuf_pool
-{
-    uint8_t index;
-    uint16_t initial_count;
-    uint16_t incr_count;
-    uint32_t buf_size;
-    uint32_t num_allocated;
-    uint32_t num_free;
-    uint32_t max_num_buf;
-    long num_get;
-    long num_freed;
-    vbuf *free_head;
-    vbuf_region *region_head;
-}vbuf_pool_t;
-
-#define RDMA_VBUF_POOL_INIT(rdma_vbuf_pool)     \
-do{                                             \
-    rdma_vbuf_pool.free_head = NULL;            \
-    rdma_vbuf_pool.region_head = NULL;          \
-    rdma_vbuf_pool.buf_size = 0;                \
-    rdma_vbuf_pool.num_allocated = 0;           \
-    rdma_vbuf_pool.num_free = 0;                \
-    rdma_vbuf_pool.max_num_buf = -1;            \
-    rdma_vbuf_pool.num_get = 0;                 \
-    rdma_vbuf_pool.num_freed = 0;               \
-} while(0)
-    
-static inline void VBUF_SET_RDMA_ADDR_KEY(
-    vbuf* v, 
-    int len,
-    void* local_addr,
-    uint32_t lkey,
-    void* remote_addr,
-    uint32_t rkey)
-{
-    v->desc.u.sr.next = NULL;
-    v->desc.u.sr.opcode = IBV_WR_RDMA_WRITE;
-    v->desc.u.sr.send_flags = IBV_SEND_SIGNALED;
-    v->desc.u.sr.wr_id = (uintptr_t) v;
-
-    v->desc.u.sr.num_sge = 1;
-    v->desc.u.sr.sg_list = &(v->desc.sg_entry);
-
-    (v)->desc.u.sr.wr.rdma.remote_addr = (uintptr_t) (remote_addr);
-    (v)->desc.u.sr.wr.rdma.rkey = (rkey);
-    (v)->desc.sg_entry.length = (len);
-    (v)->desc.sg_entry.lkey = (lkey);
-    (v)->desc.sg_entry.addr = (uintptr_t)(local_addr);
-}
-
-int allocate_vbufs(struct ibv_pd* ptag[], int nvbufs);
-
-void deallocate_vbufs(int);
-void deallocate_vbuf_region(void);
-
-vbuf* get_vbuf(void);
-
-vbuf* get_ud_vbuf(void);
-int allocate_ud_vbufs(int nvbufs);
-void vbuf_init_ud_recv(vbuf* v, unsigned long len, int rail);
-
-void MRAILI_Release_vbuf(vbuf* v);
-
-void vbuf_init_rdma_write(vbuf* v);
-
-void vbuf_init_send(vbuf* v, unsigned long len, int rail);
-
-void vbuf_init_recv(vbuf* v, unsigned long len, int rail);
-
-void vbuf_init_rput(
-    vbuf* v,
-    void* local_address,
-    uint32_t lkey,
-    void* remote_address,
-    uint32_t rkey,
-    int nbytes,
-    int rail);
-
-void vbuf_init_rget(
-    vbuf* v,
-    void* local_address,
-    uint32_t lkey,
-    void* remote_address,
-    uint32_t rkey,
-    int nbytes,
-    int rail);
-
-void vbuf_init_rma_get(
-    vbuf* v,
-    void* local_address,
-    uint32_t lkey,
-    void* remote_address,
-    uint32_t rkey,
-    int nbytes,
-    int rail);
-
-void vbuf_init_rma_put(
-    vbuf* v,
-    void* local_address,
-    uint32_t lkey,
-    void* remote_address,
-    uint32_t rkey,
-    int nbytes,
-    int rail);
-
-void vbuf_init_rma_compare_and_swap(
-    vbuf *v, 
-    void *local_address,
-    uint32_t lkey,
-    void *remote_address, 
-    uint32_t rkey, 
-    uint64_t compare,
-    uint64_t swap, 
-    int rail);
-
-void vbuf_init_rma_fetch_and_add(
-    vbuf *v, 
-    void *local_address, 
-    uint32_t lkey,
-    void *remote_address, 
-    uint32_t rkey, 
-    uint64_t add,
-    int rail);
-
-extern vbuf_pool_t *rdma_vbuf_pools;
-extern int rdma_num_vbuf_pools;
+void vbuf_prepare_send(vbuf* v, unsigned long len, int rail);
 
 #endif /* _SPAWN_NET_IB_VBUF_H_ */

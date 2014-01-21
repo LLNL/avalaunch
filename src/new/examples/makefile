@@ -6,7 +6,6 @@ OBJS= \
   spawn_net_ib.o \
   spawn_net.o \
   spawn_net_ib_debug_utils.o \
-  spawn_net_ib_ud.o \
   spawn_net_ib_clock.o \
   spawn_net_ib_vbuf.o
 
@@ -22,7 +21,6 @@ all: clean
 	gcc -g -O0 -o spawn_net_fifo.o -c ../spawn_net_fifo.c
 	gcc -g -O0 -o spawn_net_ib.o -c ../spawn_net_ib.c -I../.
 	gcc -g -O0 -o spawn_net_ib_debug_utils.o -c ../spawn_net_ib_debug_utils.c -I ../.
-	gcc -g -O0 -o spawn_net_ib_ud.o -c ../spawn_net_ib_ud.c -I ../.
 	gcc -g -O0 -o spawn_net_ib_clock.o -c ../spawn_net_ib_clock.c -I ../.
 	gcc -g -O0 -o spawn_net_ib_vbuf.o -c ../spawn_net_ib_vbuf.c -I ../.
 	gcc -g -O0 -o strmap.o -c ../strmap.c

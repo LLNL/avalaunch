@@ -22,7 +22,6 @@ launcher_SOURCES = \
   spawn_net_ib.c spawn_net_ib.h \
   spawn_net_ib_internal.h \
   spawn_net_ib_debug_utils.c spawn_net_ib_debug_utils.h \
-  spawn_net_ib_ud.c spawn_net_ib_ud.h \
   spawn_net_ib_ud_inline.h \
   spawn_net_ib_clock.c spawn_net_ib_clock.h \
   spawn_net_ib_vbuf.c spawn_net_ib_vbuf.h
