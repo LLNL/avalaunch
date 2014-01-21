@@ -142,7 +142,4 @@ extern long rdma_ud_last_check;
 extern uint16_t rdma_ud_max_retry_count;
 extern uint16_t rdma_ud_max_ack_pending;
 
-void comm_lock(void);
-void comm_unlock(void);
-
 #endif /* _SPAWN_NET_IB_INTERNAL_H */

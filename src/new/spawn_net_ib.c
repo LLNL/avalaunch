@@ -60,10 +60,33 @@ static struct timespec cm_timeout;
 static uint64_t ud_vc_info_id  = 0;    /* next id to be assigned */
 static uint64_t ud_vc_infos    = 0;    /* capacity of VC array */
 
-static pthread_mutex_t comm_lock_object;
 static pthread_t comm_thread;
 
 void* cm_timeout_handler(void *arg);
+
+/*******************************************
+ * interface to lock/unlock connection manager
+ ******************************************/
+
+static pthread_mutex_t comm_lock_object;
+
+static void comm_lock(void)
+{           
+    int rc = pthread_mutex_lock(&comm_lock_object);
+    if (rc != 0) {
+        SPAWN_ERR("Failed to lock comm mutex (pthread_mutex_lock rc=%d %s)", rc, strerror(rc));
+    }
+    return;
+}
+            
+static void comm_unlock(void)
+{           
+    int rc = pthread_mutex_unlock(&comm_lock_object);
+    if (rc != 0) {
+        SPAWN_ERR("Failed to unlock comm mutex (pthread_mutex_unlock rc=%d %s)", rc, strerror(rc));
+    }
+    return;
+}
 
 /*******************************************
  * Manage VC objects
@@ -894,25 +917,6 @@ static spawn_net_endpoint* init_ud()
     }
 
     return ep;
-}
-
-/* interface to lock/unlock connection manager */
-void comm_lock(void)
-{           
-    int rc = pthread_mutex_lock(&comm_lock_object);
-    if (rc != 0) {
-        SPAWN_ERR("Failed to lock comm mutex (pthread_mutex_lock rc=%d %s)", rc, strerror(rc));
-    }
-    return;
-}
-            
-void comm_unlock(void)
-{           
-    int rc = pthread_mutex_unlock(&comm_lock_object);
-    if (rc != 0) {
-        SPAWN_ERR("Failed to unlock comm mutex (pthread_mutex_unlock rc=%d %s)", rc, strerror(rc));
-    }
-    return;
 }
 
 /* this is the function executed by the communication progress thread */
