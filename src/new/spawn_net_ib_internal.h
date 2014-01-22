@@ -296,12 +296,12 @@ typedef struct _mv2_hca_info_t {
 
 #define MAX_SEQ_NUM (UINT16_MAX)
 
-typedef struct MPIDI_CH3I_MRAILI_Pkt_comm_header_t {
+typedef struct packet_header_struct {
     uint8_t  type;   /* packet type (see ib_internal.h) */
     uint64_t srcid;  /* source context id to identify sender */
     uint16_t seqnum; /* sequence number from source */
     uint16_t acknum; /* most recent seq number source has received from us */
-} MPIDI_CH3I_MRAILI_Pkt_comm_header;
+} packet_header;
 
 /* VC state values */
 #define VC_STATE_INIT       (0x0040)
@@ -345,10 +345,10 @@ typedef struct ud_qp_info {
 } ud_qp_info_t;
 
 /* IB address info for ud exhange */
-typedef struct _mv2_ud_exch_info_t {
+typedef struct ud_addr_struct {
     uint16_t lid; /* lid of process */
     uint32_t qpn; /* queue pair of process */
-} mv2_ud_exch_info_t;
+} ud_addr;
 
 /* ud vc info - tracks connection info between process pair */
 typedef struct vc_struct

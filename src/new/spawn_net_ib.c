@@ -40,7 +40,7 @@ static spawn_net_endpoint* g_ep = SPAWN_NET_ENDPOINT_NULL;
 
 static mv2_proc_info_t proc;
 static mv2_hca_info_t g_hca_info;
-static mv2_ud_exch_info_t local_ep_info;
+static ud_addr local_ep_info;
 
 /* Tracks an array of virtual channels.  With each new channel created,
  * the id is incremented.  Grows channel array as needed. */
@@ -435,7 +435,7 @@ static void vc_free(vc_t* vc)
     return;
 }
 
-static int vc_set_addr(vc_t* vc, mv2_ud_exch_info_t *rem_info, int port)
+static int vc_set_addr(vc_t* vc, ud_addr *rem_info, int port)
 {
     /* don't bother to set anything if the state is already connecting
      * or connected */
@@ -903,7 +903,7 @@ static int ud_post_send(vc_t* vc, vbuf* v, mv2_ud_ctx_t* ud_ctx)
     v->vc = (void *)vc;
 
     /* write send context into packet header */
-    MPIDI_CH3I_MRAILI_Pkt_comm_header* p = v->pheader;
+    packet_header* p = v->pheader;
     p->srcid = vc->writeid;
 
     /* if we have too many outstanding sends, or if we have other items
@@ -1181,12 +1181,12 @@ static void ud_send_ack(vc_t *vc)
     v->vc = (void *)vc;
 
     /* prepare vbuf for sending */
-    unsigned long size = sizeof(MPIDI_CH3I_MRAILI_Pkt_comm_header);
+    unsigned long size = sizeof(packet_header);
     vbuf_prepare_send(v, size);
 
     /* get pointer to packet header */
-    MPIDI_CH3I_MRAILI_Pkt_comm_header* p = v->pheader;
-    memset((void*)p, 0xfc, sizeof(MPIDI_CH3I_MRAILI_Pkt_comm_header));
+    packet_header* p = v->pheader;
+    memset((void*)p, 0xfc, sizeof(packet_header));
 
     /* write type and send context into packet header */
     p->type  = PKT_UD_ACK;
@@ -1262,7 +1262,7 @@ static void ud_resend(vbuf *v)
     vc_t* vc = v->vc;
 
     /* get pointer to packet header */
-    MPIDI_CH3I_MRAILI_Pkt_comm_header* p = v->pheader;
+    packet_header* p = v->pheader;
 
     /* piggy-back ack on message and mark VC as ack completed */
     p->acknum = vc->seqnum_next_toack;
@@ -1349,7 +1349,7 @@ static void ud_process_recv(vbuf *v)
     vc_t* vc = v->vc;
 
     /* get pointer to packet header */
-    MPIDI_CH3I_MRAILI_Pkt_comm_header *p = v->pheader;
+    packet_header *p = v->pheader;
 
     /* read ack seq number from incoming packet and clear packets
      * up to and including this number from send and unack'd queues */
@@ -1580,7 +1580,7 @@ static int cq_poll()
         /* get pointer to packet header in vbuf */
         SET_PKT_LEN_HEADER(v, wcs[i]);
         SET_PKT_HEADER_OFFSET(v);
-        MPIDI_CH3I_MRAILI_Pkt_comm_header* p = v->pheader;
+        packet_header* p = v->pheader;
 
         switch (wc->opcode) {
             case IBV_WC_SEND:
@@ -1768,14 +1768,14 @@ static inline int packet_send(
     }
 
     /* compute size of packet header */
-    size_t header_size = sizeof(MPIDI_CH3I_MRAILI_Pkt_comm_header);
+    size_t header_size = sizeof(packet_header);
 
     /* check that we have space for payload */
     assert((MRAIL_MAX_UD_SIZE - header_size) >= payload_size);
 
     /* set packet header fields */
-    MPIDI_CH3I_MRAILI_Pkt_comm_header* p = v->pheader;
-    memset((void*)p, 0xfc, sizeof(MPIDI_CH3I_MRAILI_Pkt_comm_header));
+    packet_header* p = v->pheader;
+    memset((void*)p, 0xfc, sizeof(packet_header));
     p->type = type;
 
     /* copy in payload */
@@ -1866,7 +1866,7 @@ static int recv_accept_message(vc_t* vc)
     vbuf* v = packet_read(vc);
 
     /* message payload is write id we should use when sending */
-    size_t header_size = sizeof(MPIDI_CH3I_MRAILI_Pkt_comm_header);
+    size_t header_size = sizeof(packet_header);
     char* payload = PKT_DATA_OFFSET(v, header_size);
 
     /* extract write id from payload */
@@ -2302,7 +2302,7 @@ spawn_net_channel* spawn_net_connect_ib(const char* name)
     vc_t* vc = vc_alloc();
 
     /* store lid and queue pair */
-    mv2_ud_exch_info_t ep_info;
+    ud_addr ep_info;
     ep_info.lid = lid;
     ep_info.qpn = qpn;
 
@@ -2366,7 +2366,7 @@ spawn_net_channel* spawn_net_accept_ib(const spawn_net_endpoint* ep)
         v = recv_connect_message();
 
         /* get pointer to payload */
-        size_t header_size = sizeof(MPIDI_CH3I_MRAILI_Pkt_comm_header);
+        size_t header_size = sizeof(packet_header);
         char* connect_payload = PKT_DATA_OFFSET(v, header_size);
 
         /* TODO: read lid/qpn from vbuf and not payload to avoid
@@ -2421,7 +2421,7 @@ spawn_net_channel* spawn_net_accept_ib(const spawn_net_endpoint* ep)
     connected_tail = elem;
 
     /* store lid and queue pair */
-    mv2_ud_exch_info_t ep_info;
+    ud_addr ep_info;
     ep_info.lid = lid;
     ep_info.qpn = qpn;
 
@@ -2517,7 +2517,7 @@ int spawn_net_read_ib(const spawn_net_channel* ch, void* buf, size_t size)
     comm_lock();
 
     /* compute header and payload sizes */
-    size_t header_size = sizeof(MPIDI_CH3I_MRAILI_Pkt_comm_header);
+    size_t header_size = sizeof(packet_header);
     assert(MRAIL_MAX_UD_SIZE >= header_size);
 
     /* read data one packet at a time */
@@ -2559,7 +2559,7 @@ int spawn_net_write_ib(const spawn_net_channel* ch, const void* buf, size_t size
     comm_lock();
 
     /* compute header and payload sizes */
-    size_t header_size = sizeof(MPIDI_CH3I_MRAILI_Pkt_comm_header);
+    size_t header_size = sizeof(packet_header);
     size_t payload_size = MRAIL_MAX_UD_SIZE - header_size;
     assert(MRAIL_MAX_UD_SIZE >= header_size);
 
