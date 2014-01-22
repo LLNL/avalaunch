@@ -487,8 +487,7 @@ static int vc_set_addr(vc_t* vc, ud_addr *rem_info, int port)
  * regions that have been allocated.  They can be used for
  * error checking and to un-register and deallocate the regions
  * at program termination.  */
-typedef struct vbuf_region
-{
+typedef struct vbuf_region {
     struct ibv_mr* mem_handle; /* mem hndl for entire region */
     void* malloc_start;        /* used to free region later */
     void* malloc_end;          /* to bracket mem region */
@@ -497,7 +496,7 @@ typedef struct vbuf_region
     int count;                 /* number of vbufs in region */
     struct vbuf* vbuf_head;    /* first vbuf in region */
     struct vbuf_region* next;  /* thread vbuf regions */
-    int shmid;
+    int shmid;                 /* track shared memory id for huge pages */
 } vbuf_region;
 
 /* head of list of allocated vbuf regions */
