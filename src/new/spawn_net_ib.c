@@ -1,3 +1,17 @@
+/*
+ * Copyright (C) 1999-2001 The Regents of the University of California
+ * (through E.O. Lawrence Berkeley National Laboratory), subject to
+ * approval by the U.S. Department of Energy.
+ *
+ * Use of this software is under license. The license agreement is included
+ * in the file MVICH_LICENSE.TXT.
+ *
+ * Developed at Berkeley Lab as part of MVICH.
+ *
+ * Authors: Bill Saphir      <wcsaphir@lbl.gov>
+ *          Michael Welcome  <mlwelcome@lbl.gov>
+ */
+
 /* Copyright (c) 2001-2013, The Ohio State University. All rights
  * reserved.
  *
@@ -12,7 +26,6 @@
 
 #include "spawn_internal.h"
 #include "spawn_net_ib_internal.h"
-#include "spawn_net_ib_vbuf.h"
 #include "spawn_net_ib_debug_utils.h"
 
 /* need to block SIGCHLD in comm_thread */
@@ -30,14 +43,14 @@ static mv2_hca_info_t g_hca_info;
 static mv2_ud_exch_info_t local_ep_info;
 static MPIDI_VC_t** ud_vc_info = NULL; /* VC array */
 
-int rdma_num_rails = 1;
-int rdma_num_hcas = 1;
-int rdma_vbuf_max = -1;
-int rdma_enable_hugepage = 1;
-int rdma_vbuf_total_size;
-int rdma_vbuf_secondary_pool_size = RDMA_VBUF_SECONDARY_POOL_SIZE;
-int rdma_max_inline_size = RDMA_DEFAULT_MAX_INLINE_SIZE;
-uint16_t rdma_default_ud_mtu = 2048;
+static int rdma_num_rails = 1;
+static int rdma_num_hcas = 1;
+static int rdma_vbuf_max = -1;
+static int rdma_enable_hugepage = 1;
+static int rdma_vbuf_total_size;
+static int rdma_vbuf_secondary_pool_size = RDMA_VBUF_SECONDARY_POOL_SIZE;
+static int rdma_max_inline_size = RDMA_DEFAULT_MAX_INLINE_SIZE;
+static uint16_t rdma_default_ud_mtu = 2048;
 
 static uint32_t rdma_default_max_ud_send_wqe = RDMA_DEFAULT_MAX_UD_SEND_WQE;
 static uint32_t rdma_default_max_ud_recv_wqe = RDMA_DEFAULT_MAX_UD_RECV_WQE;
@@ -62,8 +75,11 @@ static uint64_t ud_vc_infos    = 0;    /* capacity of VC array */
 static pthread_t comm_thread;
 
 /*******************************************
- * interface to lock/unlock connection manager
+ * interface to lock/unlock communication
  ******************************************/
+
+/* this thread is used to ensure main thread and
+ * UD progress thread don't step on each other */
 
 static pthread_mutex_t comm_lock_object;
 
@@ -88,6 +104,8 @@ static void comm_unlock(void)
 /*******************************************
  * Message queue functions
  ******************************************/
+
+/* message queues manage various lists of vbufs */
 
 enum {
     MSG_QUEUED_RECVWIN,
@@ -383,6 +401,21 @@ static MPIDI_VC_t* vc_alloc()
     return vc;
 }
 
+static void vc_free(MPIDI_VC_t** pvc)
+{
+    if (pvc == NULL) {
+        return;
+    }
+
+    //MPIDI_VC_t* vc = *pvc;
+
+    /* TODO: free off any memory allocated for vc */
+
+    spawn_free(pvc);
+
+    return;
+}
+
 static int vc_set_addr(MPIDI_VC_t* vc, mv2_ud_exch_info_t *rem_info, int port)
 {
     /* don't bother to set anything if the state is already connecting
@@ -425,17 +458,363 @@ static int vc_set_addr(MPIDI_VC_t* vc, mv2_ud_exch_info_t *rem_info, int port)
     return 0;
 }
 
-static void vc_free(MPIDI_VC_t** pvc)
+/*******************************************
+ * vbuf functions
+ ******************************************/
+
+/* Vbufs are allocated in blocks called "regions".
+ * Regions are linked together into a list.
+ *
+ * These data structures record information on all the vbuf
+ * regions that have been allocated.  They can be used for
+ * error checking and to un-register and deallocate the regions
+ * at program termination.  */
+typedef struct vbuf_region
 {
-    if (pvc == NULL) {
-        return;
+    struct ibv_mr* mem_handle[MAX_NUM_HCAS]; /* mem hndl for entire region */
+    void* malloc_start;         /* used to free region later */
+    void* malloc_end;           /* to bracket mem region */
+    void* malloc_buf_start;     /* used to free DMA region later */
+    void* malloc_buf_end;       /* bracket DMA region */
+    int count;                  /* number of vbufs in region */
+    struct vbuf* vbuf_head;     /* first vbuf in region */
+    struct vbuf_region* next;   /* thread vbuf regions */
+    int shmid;
+} vbuf_region;
+
+/* head of list of allocated vbuf regions */
+static vbuf_region* vbuf_region_head = NULL;
+
+/* track vbufs stats */
+static vbuf* ud_free_vbuf_head = NULL; /* list of free vbufs */
+static int ud_vbuf_n_allocated = 0;    /* total number allocated */
+static long ud_num_free_vbuf   = 0;    /* number currently free */
+static long ud_num_vbuf_get    = 0;    /* number of times vbufs taken from free list */
+static long ud_num_vbuf_freed  = 0;    /* number of times vbufs added to free list */
+
+/* lock vbuf get/release calls */
+static pthread_spinlock_t vbuf_lock;
+
+/* initialize vbuf variables */
+static int vbuf_init(void)
+{
+    int rc = pthread_spin_init(&vbuf_lock, 0);
+    if (rc != 0) {
+        SPAWN_ERR("Failed to lock vbuf_lock (pthread_spin_init rc=%d %s)", rc, strerror(rc));
+        ibv_error_abort(-1, "Failed to init vbuf_lock\n");
     }
 
-    //MPIDI_VC_t* vc = *pvc;
+    return 0;
+}
 
-    /* TODO: free off any memory allocated for vc */
+static int vbuf_finalize()
+{
+  /* TODO: free regions */
+}
 
-    spawn_free(pvc);
+static int alloc_hugepage_region(int *shmid, void **buffer, int *nvbufs, int buf_size)
+{
+    int ret = 0;
+    size_t size = *nvbufs * buf_size;
+    MRAILI_ALIGN_LEN(size, HUGEPAGE_ALIGN);
+
+    /* create hugepage shared region */
+    *shmid = shmget(IPC_PRIVATE, size, 
+                        SHM_HUGETLB | IPC_CREAT | SHM_R | SHM_W);
+    if (*shmid < 0) {
+        if (rdma_enable_hugepage >= 2) {
+            SPAWN_ERR("Failed to get shared memory id (shmget errno=%d %s)", errno, strerror(errno));
+        }
+        goto fn_fail;
+    }
+
+    /* attach shared memory */
+    *buffer = (void *) shmat(*shmid, SHMAT_ADDR, SHMAT_FLAGS);
+    if (*buffer == (void *) -1) {
+        SPAWN_ERR("Failed to attach shared memory (shmat errno=%d %s)", errno, strerror(errno));
+        goto fn_fail;
+    }
+    
+    /* Mark shmem for removal */
+    if (shmctl(*shmid, IPC_RMID, 0) != 0) {
+        SPAWN_ERR("Failed to mark shared memory for removal (shmctl errno=%d %s)", errno, strerror(errno));
+    }
+    
+    /* Find max no.of vbufs can fit in allocated buffer */
+    *nvbufs = size / buf_size;
+     
+fn_exit:
+    return ret;
+fn_fail:
+    ret = -1;
+    if (rdma_enable_hugepage >= 2) {
+        SPAWN_ERR("Failed to allocate buffer from huge pages. "
+                  "Fallback to regular pages. Requested buf size: %llu",
+                  (long long unsigned) size
+        );
+    }
+    goto fn_exit;
+}    
+
+static int vbuf_region_alloc(struct ibv_pd* pdomain, int nvbufs)
+{
+    int i;
+    int result;
+
+    /* specify alignment parameters */
+    int alignment_vbuf = 64;
+    int alignment_dma = getpagesize();
+
+    PRINT_DEBUG(DEBUG_UD_verbose>0,"Allocating a UD buf region.\n");
+
+    if (ud_free_vbuf_head != NULL) {
+        ibv_error_abort(GEN_ASSERT_ERR, "free_vbuf_head = NULL");
+    }
+
+    struct vbuf_region* reg = (struct vbuf_region*) SPAWN_MALLOC(sizeof(struct vbuf_region));
+    
+    void* vbuf_dma_buffer = NULL;
+
+    /* get memory from huge pages if enabled */
+    if (rdma_enable_hugepage) {
+        result = alloc_hugepage_region(
+            &reg->shmid, &vbuf_dma_buffer, &nvbufs, rdma_default_ud_mtu
+        );
+    }
+
+    /* do posix_memalign if enable hugepage disabled or failed */
+    if (rdma_enable_hugepage == 0 || result != 0)  {
+        reg->shmid = -1;
+        result = posix_memalign(
+            &vbuf_dma_buffer, alignment_dma, nvbufs * rdma_default_ud_mtu
+        );
+        if (result != 0) {
+            SPAWN_ERR("Cannot allocate vbuf region (posix_memalign rc=%d %s)", result, strerror(result));
+        }
+    }
+
+    /* check that we got the dma buffer */
+    if ((result != 0) || (NULL == vbuf_dma_buffer)) {
+        ibv_error_abort(GEN_EXIT_ERR, "unable to malloc vbufs DMA buffer");
+    }
+    
+    /* allocate memory for vbuf data structures */
+    void* mem;
+    result = posix_memalign(
+        (void**) &mem, alignment_vbuf, nvbufs * sizeof(vbuf)
+    );
+    if (result != 0) {
+        SPAWN_ERR("Cannot allocate vbuf region (posix_memalign rc=%d %s)", result, strerror(result));
+        /* TODO: free vbuf_dma_buffer */
+        spawn_free(&reg);
+        return -1;
+    }
+
+    /* clear memory regions */
+    memset(mem,             0, nvbufs * sizeof(vbuf));
+    memset(vbuf_dma_buffer, 0, nvbufs * rdma_default_ud_mtu);
+
+    /* update global vbuf variables */
+    ud_vbuf_n_allocated += nvbufs;
+    ud_num_free_vbuf    += nvbufs;
+    ud_free_vbuf_head    = mem;
+
+    /* fill in fields of vbuf_region structure */
+    reg->malloc_start     = mem;
+    reg->malloc_buf_start = vbuf_dma_buffer;
+    reg->malloc_end       = (void *) ((char *) mem + nvbufs * sizeof(vbuf));
+    reg->malloc_buf_end   = (void *) ((char *) vbuf_dma_buffer + nvbufs * rdma_default_ud_mtu);
+    reg->count            = nvbufs;
+    reg->vbuf_head        = ud_free_vbuf_head;
+
+    PRINT_DEBUG(DEBUG_UD_verbose>0,
+            "VBUF REGION ALLOCATION SZ %d TOT %d FREE %ld NF %ld NG %ld\n",
+            rdma_default_ud_mtu,
+            ud_vbuf_n_allocated,
+            ud_num_free_vbuf,
+            ud_num_vbuf_freed,
+            ud_num_vbuf_get);
+
+    /* register region with each HCA */
+    for (i = 0; i < rdma_num_hcas; ++i) {
+        /* register memory region */
+        reg->mem_handle[i] = ibv_reg_mr(
+                pdomain,
+                vbuf_dma_buffer,
+                nvbufs * rdma_default_ud_mtu,
+                IBV_ACCESS_LOCAL_WRITE
+        );
+
+        if (reg->mem_handle[i] == NULL) {
+            SPAWN_ERR("Cannot register vbuf region (ibv_reg_mr errno=%d %s)", errno, strerror(errno)); 
+            /* TODO: need to free memory / unregister with some cards? */
+            return -1;
+        }
+    }
+
+    /* init the vbuf structures */
+    for (i = 0; i < nvbufs; ++i) {
+        /* get a pointer to the vbuf */
+        vbuf* cur = ud_free_vbuf_head + i;
+
+        /* set next pointer */
+        cur->desc.next = ud_free_vbuf_head + i + 1;
+        if (i == (nvbufs - 1)) {
+            cur->desc.next = NULL;
+        }
+
+        /* set pointer to region */
+        cur->region = reg;
+
+        /* set pointer to data buffer */
+        char* ptr = (char *)vbuf_dma_buffer + i * rdma_default_ud_mtu;
+        cur->buffer = (void*) ptr;
+
+        /* set pointer to head flag, comes as last bytes of buffer */
+        cur->head_flag = (VBUF_FLAG_TYPE *) (ptr + rdma_default_ud_mtu - sizeof(cur->head_flag));
+
+        /* set remaining fields */
+        cur->content_size = 0;
+    }
+
+    /* insert region into list */
+    reg->next = vbuf_region_head;
+    vbuf_region_head = reg;
+
+    return 0;
+}
+
+static vbuf* vbuf_get(struct ibv_pd* pd)
+{
+    vbuf* v = NULL;
+
+    pthread_spin_lock(&vbuf_lock);
+
+    /* if we don't have any free vufs left, try to allocate more */
+    if (ud_free_vbuf_head == NULL) {
+        if (vbuf_region_alloc(pd, rdma_vbuf_secondary_pool_size) != 0) {
+            ibv_va_error_abort(GEN_EXIT_ERR,
+                    "UD VBUF reagion allocation failed. Pool size %d\n", ud_vbuf_n_allocated);
+        }
+    }
+
+    /* pick item from head of list */
+    /* this correctly handles removing from single entry free list */
+    v = ud_free_vbuf_head;
+    ud_free_vbuf_head = ud_free_vbuf_head->desc.next;
+    ud_num_free_vbuf--;
+    ud_num_vbuf_get++;
+
+    /* need to change this to RPUT_VBUF_FLAG later
+     * if we are doing rput */
+    v->padding     = NORMAL_VBUF_FLAG;
+    v->pheader     = (void *)v->buffer;
+    v->transport   = IB_TRANSPORT_UD;
+    v->retry_count = 0;
+    v->flags       = 0;
+    v->pending_send_polls = 0;
+
+    /* this is probably not the right place to initialize shandle to NULL.
+     * Do it here for now because it will make sure it is always initialized.
+     * Otherwise we would need to very carefully add the initialization in
+     * a dozen other places, and probably miss one. */
+    v->content_size = 0;
+    /* TODO: Decide which transport need to assign here */
+
+    pthread_spin_unlock(&vbuf_lock);
+
+    return(v);
+}
+
+static void vbuf_release(vbuf* v)
+{
+    /* This message might be in progress. Wait for ib send completion 
+     * to release this buffer to avoid reusing buffer */
+    if (v->flags & UD_VBUF_MCAST_MSG) {
+        v->pending_send_polls--;
+        if(v->transport == IB_TRANSPORT_UD  &&
+           (v->flags & UD_VBUF_SEND_INPROGRESS || v->pending_send_polls > 0))
+        {
+            /* TODO: when is this really added back to the free buffer? */
+
+            /* if number of pending sends has dropped to 0,
+             * mark vbuf that it's ready to be freed */
+            if (v->pending_send_polls == 0) {
+                v->flags |= UD_VBUF_FREE_PENIDING;
+            }
+            return;
+        }
+    } else {
+        /* if send is still in progress (has not been ack'd),
+         * just mark vbuf as ready to be freed and return */
+        if(v->transport == IB_TRANSPORT_UD &&
+           (v->flags & UD_VBUF_SEND_INPROGRESS))
+        {
+            /* TODO: when is this really added back to the free buffer? */
+
+            /* mark vbuf that it's ready to be freed */
+            v->flags |= UD_VBUF_FREE_PENIDING;
+            return;
+        }
+    }
+
+    /* note this correctly handles appending to empty free list */
+    pthread_spin_lock(&vbuf_lock);
+
+    /* add vbuf to front of appropriate free list */
+    if(v->transport == IB_TRANSPORT_UD) {
+        /* add vbuf to front of UD free list */
+        assert(v != ud_free_vbuf_head);
+        v->desc.next = ud_free_vbuf_head;
+        ud_free_vbuf_head = v;
+        ud_num_free_vbuf++;
+        ud_num_vbuf_freed++;
+    }
+
+    if (v->padding != NORMAL_VBUF_FLAG) {
+        ibv_error_abort(GEN_EXIT_ERR, "vbuf not correct.\n");
+    }
+
+    /* clear out fields to prepare vbuf for next use */
+    *v->head_flag   = 0;
+    v->pheader      = NULL;
+    v->content_size = 0;
+    v->vc           = NULL;
+
+    /* note this correctly handles appending to empty free list */
+    pthread_spin_unlock(&vbuf_lock);
+}
+
+static void vbuf_prepare_recv(vbuf* v, unsigned long len, int hca_num)
+{
+    assert(v != NULL);
+
+    v->desc.u.rr.next = NULL;
+    v->desc.u.rr.wr_id = (uintptr_t) v;
+    v->desc.u.rr.num_sge = 1;
+    v->desc.u.rr.sg_list = &(v->desc.sg_entry);
+    v->desc.sg_entry.length = len;
+    v->desc.sg_entry.lkey = v->region->mem_handle[hca_num]->lkey;
+    v->desc.sg_entry.addr = (uintptr_t)(v->buffer);
+    v->padding = NORMAL_VBUF_FLAG;
+    v->rail = hca_num;
+}
+
+static void vbuf_prepare_send(vbuf* v, unsigned long len, int rail)
+{
+    int hca_num = rail / (rdma_num_rails / rdma_num_hcas);
+
+    v->desc.u.sr.next = NULL;
+    v->desc.u.sr.send_flags = IBV_SEND_SIGNALED;
+    v->desc.u.sr.opcode = IBV_WR_SEND;
+    v->desc.u.sr.wr_id = (uintptr_t) v;
+    v->desc.u.sr.num_sge = 1;
+    v->desc.u.sr.sg_list = &(v->desc.sg_entry);
+    v->desc.sg_entry.length = len;
+    v->desc.sg_entry.lkey = v->region->mem_handle[hca_num]->lkey;
+    v->desc.sg_entry.addr = (uintptr_t)(v->buffer);
+    v->padding = NORMAL_VBUF_FLAG;
+    v->rail = rail;
 
     return;
 }
@@ -602,7 +981,7 @@ static int ud_post_send(MPIDI_VC_t* vc, vbuf* v, int rail, mv2_ud_ctx_t *send_ud
 
 /* churn through and send as many as packets as we can from the
  * VC extended send queue */
-static inline void mv2_ud_flush_ext_window(MPIDI_VC_t *vc)
+static inline void ud_flush_ext_window(MPIDI_VC_t *vc)
 {
     /* get pointer to ud info, send queue, and extended send queue */
     message_queue_t* sendwin = &vc->send_window;
@@ -642,7 +1021,7 @@ static inline void mv2_ud_flush_ext_window(MPIDI_VC_t *vc)
 
 /* given a VC and a seq number, remove all items in send and unack'd
  * queues up to and including this seq number */
-static inline void mv2_ud_process_ack(MPIDI_VC_t *vc, uint16_t acknum)
+static inline void ud_process_ack(MPIDI_VC_t *vc, uint16_t acknum)
 {
     PRINT_DEBUG(DEBUG_UD_verbose>2,"ack recieved: %d next_to_ack: %d\n",
         acknum, vc->seqnum_next_toack);
@@ -673,7 +1052,7 @@ static inline void mv2_ud_process_ack(MPIDI_VC_t *vc, uint16_t acknum)
     if (extwin->head != NULL &&
         sendwin->count < rdma_default_ud_sendwin_size)
     {
-        mv2_ud_flush_ext_window(vc);
+        ud_flush_ext_window(vc);
     }
 
     return;
@@ -702,7 +1081,7 @@ static inline void apprecv_window_add(message_queue_t *q, vbuf *v)
 }
 
 /* remove and return vbuf from apprecv queue */
-static inline vbuf* mv2_ud_apprecv_window_retrieve_and_remove(message_queue_t *q)
+static inline vbuf* apprecv_window_retrieve_and_remove(message_queue_t *q)
 {
     /* get pointer to first item in list */
     vbuf* v = q->head;
@@ -823,57 +1202,12 @@ static inline void mv2_ud_place_recvwin(vbuf *v)
     return;
 }
 
-/* when a send work element completes, issue another */
-static void mv2_ud_update_send_credits(int num)
-{
-    /* increment number of available send work queue elements */
-    mv2_ud_ctx_t* ud_ctx = proc.ud_ctx;
-    ud_ctx->send_wqes_avail += num;
-
-    /* get pointer to UD context extended send queue */
-    message_queue_t* q = &ud_ctx->ext_send_queue;
-
-    /* while we have slots available in the send queue and items on
-     * the UD context extended send queue, send them */
-    vbuf* cur = q->head;
-    while (cur != NULL && ud_ctx->send_wqes_avail > 0) {
-        /* get pointer to next item */
-        vbuf* next = cur->desc.next;
-
-        /* remove item from extended send queue */
-        q->head = next;
-        if (q->head == NULL) {
-            q->tail = NULL;
-        }
-        q->count--;
-
-        /* sever item from list */
-        cur->desc.next = NULL;
-
-        /* TODO: can we reset ack to latest? */
-        /* send item */
-        ud_ctx->send_wqes_avail--;
-        int ret = ibv_post_send(ud_ctx->qp, &(cur->desc.u.sr), &(cur->desc.y.bad_sr));
-        if (ret != 0) {
-            SPAWN_ERR("extend sendq send failed (ibv_post_send rc=%d %s)", ret, strerror(ret));
-            exit(-1);
-        }
-
-        /* track number of sends from extended queue */
-        ud_ctx->ext_sendq_count++;
-
-        PRINT_DEBUG(DEBUG_UD_verbose>1,"sending from ext send queue seqnum: %d qlen: %d\n",
-            cur->seqnum, q->count);
-
-        /* go on to next item in queue */
-        cur = next;
-    }
-
-    return;
-}
+/*******************************************
+ * Functions to manage flow
+ ******************************************/
 
 /* send control message with ack update */
-static void mv2_send_explicit_ack(MPIDI_VC_t *vc)
+static void ud_send_ack(MPIDI_VC_t *vc)
 {
     /* get a vbuf to build our packet */
     vbuf *v = vbuf_get(g_hca_info.pd);
@@ -916,15 +1250,31 @@ static void mv2_send_explicit_ack(MPIDI_VC_t *vc)
     /* keep track of total number of control messages sent */
     vc->cntl_acks++;
 
-#if 0
-    PRINT_DEBUG(DEBUG_UD_verbose>1,"Sent explicit ACK to :%d acknum:%d\n",
-        vc->pg_rank, p->acknum);
-#endif
+    return;
+}
+
+/* iterate over all active vc's and send ACK messages if necessary */
+static inline void ud_check_acks()
+{
+    /* walk list of connected virtual channels */
+    connected_list* elem = connected_head;
+    while (elem != NULL) {
+        /* get pointer to vc */
+        MPIDI_VC_t* vc = elem->vc;
+
+        /* send ack if necessary */
+        if (vc->ack_need_tosend) {
+            ud_send_ack(vc);
+        }
+
+        /* go to next virtual channel */
+        elem = elem->next;
+    }
 
     return;
 }
 
-static void mv2_ud_resend(vbuf *v)
+static void ud_resend(vbuf *v)
 {
     /* if vbuf is marked as send-in-progress, don't send again,
      * unless "always retry" flag is set */
@@ -984,53 +1334,9 @@ static void mv2_ud_resend(vbuf *v)
     return;
 }
 
-static void MRAILI_Process_recv(vbuf *v) 
-{
-    /* TODO: consider sending immedate ack with each receive,
-     * trades bandwidth for latency */
-
-    /* get VC of vbuf */
-    MPIDI_VC_t* vc = v->vc;
-
-    /* get pointer to packet header */
-    MPIDI_CH3I_MRAILI_Pkt_comm_header *p = v->pheader;
-
-    /* read ack seq number from incoming packet and clear packets
-     * up to and including this number from send and unack'd queues */
-    mv2_ud_process_ack(vc, p->acknum);
-
-    /* TODO: test a bit in packet type rather than one-by-one */
-
-    /* if this is a control message, we're done (no need to send ack
-     * or add packet to receive queues) */
-    if ((p->type & MPIDI_CH3_PKT_CONTROL_BIT) &&
-        p->type != MPIDI_CH3_PKT_UD_ACCEPT)
-    {
-        PRINT_DEBUG(DEBUG_UD_verbose>1,"recv cntl message ack: %d\n", p->acknum);
-        vbuf_release(v);
-        goto fn_exit;
-    }
-
-    /* send an explicit ack if we've exceeded our pending ack count */
-    if (v->transport == IB_TRANSPORT_UD) {
-        /* get pointer to ud info on vc */
-        vc->ack_pending++;
-        if (vc->ack_pending > rdma_ud_max_ack_pending) {
-            mv2_send_explicit_ack(vc);
-        }
-    }
-
-    /* insert packet in receive queues (or throw it away if seq num
-     * is out of current range) */
-    mv2_ud_place_recvwin(v); 
-
-fn_exit:
-    return;
-}
-
 /* iterates over all items on unack queue, checks time since last send,
  * and resends if timer has expired */
-static void mv2_check_resend()
+static void ud_check_resend()
 {
     /* get pointer to unack queue */
     message_queue_t* q = &proc.unack_queue;
@@ -1041,7 +1347,7 @@ static void mv2_check_resend()
     /* walk through unack'd list */
     vbuf* cur = q->head;
     while (cur != NULL) {
-        //TODO:: if (cur->left_to_send == 0 || cur->retry_always) {
+        //TODO:: if (cur->left_to_send == 0 || cur->retry_always)
 
         /* get log of retry count for this packet */
         int r;
@@ -1062,7 +1368,7 @@ static void mv2_check_resend()
 
             /* we've waited long enough, try again and update
              * its send timestamp */
-            mv2_ud_resend(cur);
+            ud_resend(cur);
             cur->timestamp = timestamp;
 
             /* since this may have taken some time, update our current
@@ -1074,6 +1380,50 @@ static void mv2_check_resend()
         cur = cur->unack_msg.next;
     }
 
+    return;
+}
+
+static void ud_process_recv(vbuf *v) 
+{
+    /* TODO: consider sending immedate ack with each receive,
+     * trades bandwidth for latency */
+
+    /* get VC of vbuf */
+    MPIDI_VC_t* vc = v->vc;
+
+    /* get pointer to packet header */
+    MPIDI_CH3I_MRAILI_Pkt_comm_header *p = v->pheader;
+
+    /* read ack seq number from incoming packet and clear packets
+     * up to and including this number from send and unack'd queues */
+    ud_process_ack(vc, p->acknum);
+
+    /* TODO: test a bit in packet type rather than one-by-one */
+
+    /* if this is a control message, we're done (no need to send ack
+     * or add packet to receive queues) */
+    if ((p->type & MPIDI_CH3_PKT_CONTROL_BIT) &&
+        p->type != MPIDI_CH3_PKT_UD_ACCEPT)
+    {
+        PRINT_DEBUG(DEBUG_UD_verbose>1,"recv cntl message ack: %d\n", p->acknum);
+        vbuf_release(v);
+        goto fn_exit;
+    }
+
+    /* send an explicit ack if we've exceeded our pending ack count */
+    if (v->transport == IB_TRANSPORT_UD) {
+        /* get pointer to ud info on vc */
+        vc->ack_pending++;
+        if (vc->ack_pending > rdma_ud_max_ack_pending) {
+            ud_send_ack(vc);
+        }
+    }
+
+    /* insert packet in receive queues (or throw it away if seq num
+     * is out of current range) */
+    mv2_ud_place_recvwin(v); 
+
+fn_exit:
     return;
 }
 
@@ -1186,22 +1536,50 @@ static int ud_post_recv_buffers(int num_bufs, mv2_ud_ctx_t *ud_ctx)
     return count;
 }
 
-/* iterate over all active vc's and send ACK messages if necessary */
-static inline void ud_send_acks()
+/* when a send work element completes, issue another */
+static void ud_update_send_credits(int num)
 {
-    /* walk list of connected virtual channels */
-    connected_list* elem = connected_head;
-    while (elem != NULL) {
-        /* get pointer to vc */
-        MPIDI_VC_t* vc = elem->vc;
+    /* increment number of available send work queue elements */
+    mv2_ud_ctx_t* ud_ctx = proc.ud_ctx;
+    ud_ctx->send_wqes_avail += num;
 
-        /* send ack if necessary */
-        if (vc->ack_need_tosend) {
-            mv2_send_explicit_ack(vc);
+    /* get pointer to UD context extended send queue */
+    message_queue_t* q = &ud_ctx->ext_send_queue;
+
+    /* while we have slots available in the send queue and items on
+     * the UD context extended send queue, send them */
+    vbuf* cur = q->head;
+    while (cur != NULL && ud_ctx->send_wqes_avail > 0) {
+        /* get pointer to next item */
+        vbuf* next = cur->desc.next;
+
+        /* remove item from extended send queue */
+        q->head = next;
+        if (q->head == NULL) {
+            q->tail = NULL;
+        }
+        q->count--;
+
+        /* sever item from list */
+        cur->desc.next = NULL;
+
+        /* TODO: can we reset ack to latest? */
+        /* send item */
+        ud_ctx->send_wqes_avail--;
+        int ret = ibv_post_send(ud_ctx->qp, &(cur->desc.u.sr), &(cur->desc.y.bad_sr));
+        if (ret != 0) {
+            SPAWN_ERR("extend sendq send failed (ibv_post_send rc=%d %s)", ret, strerror(ret));
+            exit(-1);
         }
 
-        /* go to next virtual channel */
-        elem = elem->next;
+        /* track number of sends from extended queue */
+        ud_ctx->ext_sendq_count++;
+
+        PRINT_DEBUG(DEBUG_UD_verbose>1,"sending from ext send queue seqnum: %d qlen: %d\n",
+            cur->seqnum, q->count);
+
+        /* go on to next item in queue */
+        cur = next;
     }
 
     return;
@@ -1299,7 +1677,7 @@ static int cq_poll()
                     v->rail   = p->rail;
                     v->seqnum = p->seqnum;
 
-                    MRAILI_Process_recv(v);
+                    ud_process_recv(v);
                 } else {
                     /* a connect message does not have a valid src id field,
                      * so we can't associate msg with a vc yet, we stick this
@@ -1339,7 +1717,7 @@ static int cq_poll()
 
     /* if sends completed, issue pending sends if we have any */
     if (sendcnt > 0) {
-        mv2_ud_update_send_credits(sendcnt);
+        ud_update_send_credits(sendcnt);
     }
 
     return ne;
@@ -1354,6 +1732,209 @@ static inline void cq_drain()
     }
     return;
 }
+
+/*******************************************
+ * UD Progress thread
+ ******************************************/
+
+/* this is the function executed by the communication progress thread */
+static void* cm_timeout_handler(void *arg)
+{
+    int nspin = 0;
+
+    /* define sleep time between waking and checking for events */
+    cm_timeout.tv_sec = rdma_ud_progress_timeout / 1000000;
+    cm_timeout.tv_nsec = (rdma_ud_progress_timeout - cm_timeout.tv_sec * 1000000) * 1000;
+
+    while(1) {
+        /* sleep for some time before we look, release lock while
+         * sleeping */
+        //comm_unlock();
+        nanosleep(&cm_timeout, &cm_remain);
+        //comm_lock();
+
+#if 0
+        /* spin poll for some time to look for new events */
+        for (nspin = 0; nspin < rdma_ud_progress_spin; nspin++) {
+            cq_poll();
+        }
+#endif
+
+        /* resend messages and send acks if we're due */
+//        long time = mv2_get_time_us();
+//        long delay = time - rdma_ud_last_check;
+//        if (delay > rdma_ud_progress_timeout) {
+            /* time is up, grab lock and process acks */
+            comm_lock();
+
+            /* send explicit acks out on all vc's if we need to,
+             * this ensures acks flow out even if main thread is
+             * busy doing other work */
+            ud_check_acks();
+
+            /* process any messages that may have come in, we may
+             * clear messages we'd otherwise try to resend below */
+            cq_drain();
+
+            /* resend any unack'd packets whose timeout has expired */
+            ud_check_resend();
+
+            /* done sending messages, release lock */
+            comm_unlock();
+
+            /* record the last time we checked acks */
+//            rdma_ud_last_check = mv2_get_time_us();
+//        }
+    }
+
+    return NULL;
+}
+
+/*******************************************
+ * Functions to send / recv packets
+ ******************************************/
+
+/* given a virtual channel, a packet type, and payload, construct and
+ * send UD packet */
+static inline int packet_send(
+    MPIDI_VC_t* vc,
+    uint8_t type,
+    const void* payload,
+    size_t payload_size)
+{
+    /* grab a packet */
+    vbuf* v = vbuf_get(g_hca_info.pd);
+    if (v == NULL) {
+        SPAWN_ERR("Failed to get vbuf");
+        return SPAWN_FAILURE;
+    }
+
+    /* compute size of packet header */
+    size_t header_size = sizeof(MPIDI_CH3I_MRAILI_Pkt_comm_header);
+
+    /* check that we have space for payload */
+    assert((MRAIL_MAX_UD_SIZE - header_size) >= payload_size);
+
+    /* set packet header fields */
+    MPIDI_CH3I_MRAILI_Pkt_comm_header* p = v->pheader;
+    memset((void*)p, 0xfc, sizeof(MPIDI_CH3I_MRAILI_Pkt_comm_header));
+    p->type = type;
+
+    /* copy in payload */
+    if (payload_size > 0) {
+        char* ptr = (char*)v->buffer + header_size;
+        memcpy(ptr, payload, payload_size);
+    }
+
+    /* set packet size */
+    v->content_size = header_size + payload_size;
+
+    /* prepare packet for send */
+    int rail = 0;
+    vbuf_prepare_send(v, v->content_size, rail);
+
+    /* and send it */
+    ud_post_send(vc, v, rail, NULL);
+
+    return SPAWN_SUCCESS;
+}
+
+/* blocks until packet comes in on specified VC */
+static vbuf* packet_read(MPIDI_VC_t* vc)
+{
+    /* eagerly pull all events from completion queue */
+    cq_drain();
+
+    /* look for entry in apprecv queue */
+    vbuf* v = apprecv_window_retrieve_and_remove(&vc->app_recv_window);
+    while (v == NULL) {
+        /* TODO: at this point, we should block for incoming event */
+
+        /* release the lock for some time to let other threads make
+         * progress */
+        comm_unlock();
+//        nanosleep(&cm_timeout, &cm_remain);
+        comm_lock();
+
+        /* eagerly pull all events from completion queue */
+        cq_drain();
+
+        /* look for entry in apprecv queue */
+        v = apprecv_window_retrieve_and_remove(&vc->app_recv_window);
+    }
+    return v;
+}
+
+/* blocks until element arrives on connect queue,
+ * extracts element and returns its vbuf */
+static vbuf* recv_connect_message()
+{
+    /* eagerly pull all events from completion queue */
+    cq_drain();
+
+    /* wait until we see at item at head of connect queue */
+    while (connect_head == NULL) {
+        /* TODO: at this point, we should block for incoming event */
+
+        comm_unlock();
+//        nanosleep(&cm_timeout, &cm_remain);
+        comm_lock();
+
+        /* eagerly pull all events from completion queue */
+        cq_drain();
+    }
+
+    /* get pointer to element */
+    connect_list* elem = connect_head;
+
+    /* extract element from queue */
+    connect_head = elem->next;
+    if (connect_head == NULL) {
+        connect_tail = NULL;
+    }
+
+    /* get pointer to vbuf */
+    vbuf* v = elem->v;
+
+    /* free element */
+    spawn_free(&elem);
+
+    /* return vbuf */
+    return v;
+}
+
+static int recv_accept_message(MPIDI_VC_t* vc)
+{
+    /* first incoming packet should be accept */
+    vbuf* v = packet_read(vc);
+
+    /* message payload is write id we should use when sending */
+    size_t header_size = sizeof(MPIDI_CH3I_MRAILI_Pkt_comm_header);
+    char* payload = PKT_DATA_OFFSET(v, header_size);
+
+    /* extract write id from payload */
+    int id;
+    int parsed = sscanf(payload, "%06x", &id);
+    if (parsed != 1) {
+        SPAWN_ERR("Couldn't parse write id from accept message");
+        vbuf_release(v);
+        return SPAWN_FAILURE;
+    }
+
+    /* TODO: avoid casting up from int here */
+    /* set our write id */
+    uint64_t writeid = (uint64_t) id;
+    vc->writeid = writeid;
+
+    /* put vbuf back on free list */
+    vbuf_release(v);
+
+    return SPAWN_SUCCESS;
+}
+
+/*******************************************
+ * Functions to setup / tear down UD QP
+ ******************************************/
 
 /* Get HCA parameters */
 static int hca_open(int devnum, mv2_hca_info_t *hca_info)
@@ -1565,59 +2146,6 @@ static struct ibv_qp* qp_create(ud_qp_info_t *qp_info)
     return qp;
 }
 
-/* this is the function executed by the communication progress thread */
-static void* cm_timeout_handler(void *arg)
-{
-    int nspin = 0;
-
-    /* define sleep time between waking and checking for events */
-    cm_timeout.tv_sec = rdma_ud_progress_timeout / 1000000;
-    cm_timeout.tv_nsec = (rdma_ud_progress_timeout - cm_timeout.tv_sec * 1000000) * 1000;
-
-    while(1) {
-        /* sleep for some time before we look, release lock while
-         * sleeping */
-        //comm_unlock();
-        nanosleep(&cm_timeout, &cm_remain);
-        //comm_lock();
-
-#if 0
-        /* spin poll for some time to look for new events */
-        for (nspin = 0; nspin < rdma_ud_progress_spin; nspin++) {
-            cq_poll();
-        }
-#endif
-
-        /* resend messages and send acks if we're due */
-//        long time = mv2_get_time_us();
-//        long delay = time - rdma_ud_last_check;
-//        if (delay > rdma_ud_progress_timeout) {
-            /* time is up, grab lock and process acks */
-            comm_lock();
-
-            /* send explicit acks out on all vc's if we need to,
-             * this ensures acks flow out even if main thread is
-             * busy doing other work */
-            ud_send_acks();
-
-            /* process any messages that may have come in, we may
-             * clear messages we'd otherwise try to resend below */
-            cq_drain();
-
-            /* resend any unack'd packets whose timeout has expired */
-            mv2_check_resend();
-
-            /* done sending messages, release lock */
-            comm_unlock();
-
-            /* record the last time we checked acks */
-//            rdma_ud_last_check = mv2_get_time_us();
-//        }
-    }
-
-    return NULL;
-}
-
 /* Initialize UD Context */
 static spawn_net_endpoint* ud_ctx_create()
 {
@@ -1764,144 +2292,6 @@ static void ud_ctx_destroy(spawn_net_endpoint** pep)
     pthread_cancel(comm_thread);
 
     return;
-}
-
-/* blocks until packet comes in on specified VC */
-static vbuf* packet_read(MPIDI_VC_t* vc)
-{
-    /* eagerly pull all events from completion queue */
-    cq_drain();
-
-    /* look for entry in apprecv queue */
-    vbuf* v = mv2_ud_apprecv_window_retrieve_and_remove(&vc->app_recv_window);
-    while (v == NULL) {
-        /* TODO: at this point, we should block for incoming event */
-
-        /* release the lock for some time to let other threads make
-         * progress */
-        comm_unlock();
-//        nanosleep(&cm_timeout, &cm_remain);
-        comm_lock();
-
-        /* eagerly pull all events from completion queue */
-        cq_drain();
-
-        /* look for entry in apprecv queue */
-        v = mv2_ud_apprecv_window_retrieve_and_remove(&vc->app_recv_window);
-    }
-    return v;
-}
-
-/* given a virtual channel, a packet type, and payload, construct and
- * send UD packet */
-static inline int packet_send(
-    MPIDI_VC_t* vc,
-    uint8_t type,
-    const void* payload,
-    size_t payload_size)
-{
-    /* grab a packet */
-    vbuf* v = vbuf_get(g_hca_info.pd);
-    if (v == NULL) {
-        SPAWN_ERR("Failed to get vbuf");
-        return SPAWN_FAILURE;
-    }
-
-    /* compute size of packet header */
-    size_t header_size = sizeof(MPIDI_CH3I_MRAILI_Pkt_comm_header);
-
-    /* check that we have space for payload */
-    assert((MRAIL_MAX_UD_SIZE - header_size) >= payload_size);
-
-    /* set packet header fields */
-    MPIDI_CH3I_MRAILI_Pkt_comm_header* p = v->pheader;
-    memset((void*)p, 0xfc, sizeof(MPIDI_CH3I_MRAILI_Pkt_comm_header));
-    p->type = type;
-
-    /* copy in payload */
-    if (payload_size > 0) {
-        char* ptr = (char*)v->buffer + header_size;
-        memcpy(ptr, payload, payload_size);
-    }
-
-    /* set packet size */
-    v->content_size = header_size + payload_size;
-
-    /* prepare packet for send */
-    int rail = 0;
-    vbuf_prepare_send(v, v->content_size, rail);
-
-    /* and send it */
-    ud_post_send(vc, v, rail, NULL);
-
-    return SPAWN_SUCCESS;
-}
-
-/* blocks until element arrives on connect queue,
- * extracts element and returns its vbuf */
-static vbuf* recv_connect_message()
-{
-    /* eagerly pull all events from completion queue */
-    cq_drain();
-
-    /* wait until we see at item at head of connect queue */
-    while (connect_head == NULL) {
-        /* TODO: at this point, we should block for incoming event */
-
-        comm_unlock();
-//        nanosleep(&cm_timeout, &cm_remain);
-        comm_lock();
-
-        /* eagerly pull all events from completion queue */
-        cq_drain();
-    }
-
-    /* get pointer to element */
-    connect_list* elem = connect_head;
-
-    /* extract element from queue */
-    connect_head = elem->next;
-    if (connect_head == NULL) {
-        connect_tail = NULL;
-    }
-
-    /* get pointer to vbuf */
-    vbuf* v = elem->v;
-
-    /* free element */
-    spawn_free(&elem);
-
-    /* return vbuf */
-    return v;
-}
-
-static int recv_accept_message(MPIDI_VC_t* vc)
-{
-    /* first incoming packet should be accept */
-    vbuf* v = packet_read(vc);
-
-    /* message payload is write id we should use when sending */
-    size_t header_size = sizeof(MPIDI_CH3I_MRAILI_Pkt_comm_header);
-    char* payload = PKT_DATA_OFFSET(v, header_size);
-
-    /* extract write id from payload */
-    int id;
-    int parsed = sscanf(payload, "%06x", &id);
-    if (parsed != 1) {
-        SPAWN_ERR("Couldn't parse write id from accept message");
-        vbuf_release(v);
-        return SPAWN_FAILURE;
-    }
-
-    /* TODO: avoid casting up from int here */
-    /* set our write id */
-    uint64_t writeid = (uint64_t) id;
-    vc->writeid = writeid;
-
-    /* put vbuf back on free list */
-    vbuf_release(v);
-
-    return SPAWN_SUCCESS;
 }
 
 /*******************************************
@@ -2083,7 +2473,7 @@ spawn_net_channel* spawn_net_accept_ib(const spawn_net_endpoint* ep)
     v->vc = vc;
 
     /* put vbuf back on free list */
-    MRAILI_Process_recv(v);
+    ud_process_recv(v);
 
     /* Increment the next expected seq num */
     vc->seqnum_next_torecv++;
