@@ -17,12 +17,11 @@ launcher_SOURCES = \
   spawn_net_fifo.c spawn_net_fifo.h \
   spawn_net_util.c spawn_net_util.h \
   spawn_util.c spawn_util.h \
+  spawn_clock.c spawn_clock.h \
   timer_util.c timer_util.h\
   strmap.c strmap.h \
   spawn_net_ib.c spawn_net_ib.h \
-  spawn_net_ib_internal.h \
-  spawn_net_ib_debug_utils.c spawn_net_ib_debug_utils.h \
-  spawn_net_ib_clock.c spawn_net_ib_clock.h
+  spawn_net_ib_internal.h
 launcher_CFLAGS = -pthread -Wall -g
 launcher_LDFLAGS = -lpthread -lrt
 launcher_LDADD = hostfile/libhostfile.a

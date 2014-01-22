@@ -45,8 +45,8 @@
  *
  */
 
-#ifndef SPAWN_NET_IB_CLOCK_H
-#define SPAWN_NET_IB_CLOCK_H
+#ifndef SPAWN_CLOCK_H
+#define SPAWN_CLOCK_H
 
 #if defined (__x86_64__) || defined(__i386__)
 /* Note: only x86 CPUs which have rdtsc instruction are supported. */
@@ -87,9 +87,10 @@ static inline cycles_t get_cycles()
 #include <asm/timex.h>
 #endif
 
-extern double get_cpu_mhz(void);
+void spawn_clock_measure_cpu(void);
 
-void mv2_init_timers(void);
-double mv2_get_time_us(void);
+double spawn_clock_cpu_mhz(void);
 
-#endif /* SPAWN_NET_IB_CLOCK_H */
+double spawn_clock_time_us(void);
+
+#endif /* SPAWN_CLOCK_H */

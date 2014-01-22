@@ -114,14 +114,12 @@
 #include <sys/mman.h>
 #include <sys/types.h>
 #include <arpa/inet.h>
-#include <spawn_net_ib_clock.h>
-#include <spawn_net.h>
-#include <spawn_util.h>
 #include <sys/socket.h>
 #include <netinet/tcp.h>
-#include <spawn_net_ib_debug_utils.h>
 #include <infiniband/verbs.h>
-//#include <infiniband/umad.h>
+#include "spawn_util.h"
+#include "spawn_net.h"
+#include "spawn_clock.h"
 
 #ifdef __ia64__
 /* Only ia64 requires this */
@@ -146,32 +144,6 @@
 #define RDMA_DEFAULT_MAX_UD_RECV_WQE    (4096)
 #define RDMA_DEFAULT_MAX_INLINE_SIZE    (128)
 #define DEFAULT_CM_THREAD_STACKSIZE     (1024*1024)
-
-#define GEN_EXIT_ERR     -1     /* general error which forces us to abort */
-#define GEN_ASSERT_ERR   -2     /* general assert error */
-#define IBV_RETURN_ERR   -3     /* gen2 function return error */
-#define IBV_STATUS_ERR   -4     /* gen2 function status error */
-
-#define ibv_va_error_abort(code, message, args...)  {           \
-    if (errno) {                                                \
-        PRINT_ERROR_ERRNO( "%s:%d: " message, errno, __FILE__, __LINE__, ##args);     \
-    } else {                                                    \
-        PRINT_ERROR( "%s:%d: " message "\n", __FILE__, __LINE__, ##args);     \
-    }                                                           \
-    fflush (stderr);                                            \
-    exit(code);                                                 \
-}
-
-#define ibv_error_abort(code, message)                          \
-{                                                               \
-    if (errno) {                                                \
-        PRINT_ERROR_ERRNO( "%s:%d: " message, errno, __FILE__, __LINE__);     \
-    } else {                                                    \
-        PRINT_ERROR( "%s:%d: " message "\n", __FILE__, __LINE__);     \
-    }                                                           \
-    fflush (stderr);                                            \
-    exit(code);                                                 \
-}
 
 #define LOG2(_v, _r)                            \
 do {                                            \
@@ -312,15 +284,6 @@ typedef struct _mv2_hca_info_t {
     struct ibv_port_attr port_attr[MAX_NUM_PORTS];
     struct ibv_device_attr device_attr;
 } mv2_hca_info_t;
-
-//extern int rdma_num_rails;
-//extern int rdma_num_hcas;
-//extern int rdma_vbuf_max;
-//extern int rdma_enable_hugepage;
-//extern int rdma_vbuf_total_size;
-//extern int rdma_vbuf_secondary_pool_size;
-//extern int rdma_max_inline_size;
-//extern uint16_t rdma_default_ud_mtu;
 
 /* check whether val is within [start, end] */
 #define INCL_BETWEEN(_val, _start, _end)                            \

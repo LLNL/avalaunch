@@ -1,12 +1,11 @@
 OBJS= \
   strmap.o \
   spawn_util.o \
+  spawn_clock.o \
   spawn_net_tcp.o \
   spawn_net_fifo.o \
   spawn_net_ib.o \
-  spawn_net.o \
-  spawn_net_ib_debug_utils.o \
-  spawn_net_ib_clock.o
+  spawn_net.o
 
 LIBS= \
   -libverbs \
@@ -15,12 +14,11 @@ LIBS= \
 
 all: clean
 	gcc -g -O0 -o spawn_util.o -c ../spawn_util.c
+	gcc -g -O0 -o spawn_clock.o -c ../spawn_clock.c -I ../.
 	gcc -g -O0 -o spawn_net.o -c ../spawn_net.c
 	gcc -g -O0 -o spawn_net_tcp.o -c ../spawn_net_tcp.c
 	gcc -g -O0 -o spawn_net_fifo.o -c ../spawn_net_fifo.c
 	gcc -g -O0 -o spawn_net_ib.o -c ../spawn_net_ib.c -I../.
-	gcc -g -O0 -o spawn_net_ib_debug_utils.o -c ../spawn_net_ib_debug_utils.c -I ../.
-	gcc -g -O0 -o spawn_net_ib_clock.o -c ../spawn_net_ib_clock.c -I ../.
 	gcc -g -O0 -o strmap.o -c ../strmap.c
 	gcc -g -O0 -o strmap_test strmap_test.c $(OBJS) -I../. $(LIBS)
 	gcc -g -O0 -o pmi_test pmi_test.c $(OBJS) -I../../../install/include ../../../install/lib/libpmi.a $(LIBS)

@@ -26,7 +26,6 @@
 
 #include "spawn_internal.h"
 #include "spawn_net_ib_internal.h"
-#include "spawn_net_ib_debug_utils.h"
 
 /* need to block SIGCHLD in comm_thread */
 #include <signal.h>
@@ -122,7 +121,6 @@ static inline void ext_sendq_add(message_queue_t *q, vbuf *v)
     }
     q->tail = v;
     q->count++;
-    PRINT_DEBUG(DEBUG_UD_verbose>1,"queued to ext send queue, queue len:%d seqnum:%d\n", q->count, v->seqnum);
 }
 
 /* adds vbuf to extended send queue, which tracks messages we will be
@@ -208,9 +206,6 @@ static inline void unack_queue_remove(message_queue_t *q, vbuf *v)
 
 static inline int recv_window_add(message_queue_t *q, vbuf *v, int recv_win_start)
 {
-    PRINT_DEBUG(DEBUG_UD_verbose>1,"recv window add recv_win_start:%d rece'd seqnum:%d\n",
-        recv_win_start, v->seqnum);
-
     /* clear next and previous pointers in vbuf */
     v->recvwin_msg.next = v->recvwin_msg.prev = NULL;
 
@@ -501,7 +496,7 @@ static int vbuf_init(void)
     int rc = pthread_spin_init(&vbuf_lock, 0);
     if (rc != 0) {
         SPAWN_ERR("Failed to lock vbuf_lock (pthread_spin_init rc=%d %s)", rc, strerror(rc));
-        ibv_error_abort(-1, "Failed to init vbuf_lock\n");
+        spawn_exit(-1);
     }
 
     return 0;
@@ -565,10 +560,9 @@ static int vbuf_region_alloc(struct ibv_pd* pdomain, int nvbufs)
     int alignment_vbuf = 64;
     int alignment_dma = getpagesize();
 
-    PRINT_DEBUG(DEBUG_UD_verbose>0,"Allocating a UD buf region.\n");
-
     if (ud_free_vbuf_head != NULL) {
-        ibv_error_abort(GEN_ASSERT_ERR, "free_vbuf_head = NULL");
+        SPAWN_ERR("Free vbufs available but trying to allocation more");
+        spawn_exit(-1);
     }
 
     struct vbuf_region* reg = (struct vbuf_region*) SPAWN_MALLOC(sizeof(struct vbuf_region));
@@ -595,7 +589,8 @@ static int vbuf_region_alloc(struct ibv_pd* pdomain, int nvbufs)
 
     /* check that we got the dma buffer */
     if ((result != 0) || (NULL == vbuf_dma_buffer)) {
-        ibv_error_abort(GEN_EXIT_ERR, "unable to malloc vbufs DMA buffer");
+        SPAWN_ERR("Failed to allocate vbufs");
+        spawn_exit(-1);
     }
     
     /* allocate memory for vbuf data structures */
@@ -626,14 +621,6 @@ static int vbuf_region_alloc(struct ibv_pd* pdomain, int nvbufs)
     reg->malloc_buf_end   = (void *) ((char *) vbuf_dma_buffer + nvbufs * rdma_default_ud_mtu);
     reg->count            = nvbufs;
     reg->vbuf_head        = ud_free_vbuf_head;
-
-    PRINT_DEBUG(DEBUG_UD_verbose>0,
-            "VBUF REGION ALLOCATION SZ %d TOT %d FREE %ld NF %ld NG %ld\n",
-            rdma_default_ud_mtu,
-            ud_vbuf_n_allocated,
-            ud_num_free_vbuf,
-            ud_num_vbuf_freed,
-            ud_num_vbuf_get);
 
     /* register region with each HCA */
     for (i = 0; i < rdma_num_hcas; ++i) {
@@ -693,8 +680,8 @@ static vbuf* vbuf_get(struct ibv_pd* pd)
     /* if we don't have any free vufs left, try to allocate more */
     if (ud_free_vbuf_head == NULL) {
         if (vbuf_region_alloc(pd, rdma_vbuf_secondary_pool_size) != 0) {
-            ibv_va_error_abort(GEN_EXIT_ERR,
-                    "UD VBUF reagion allocation failed. Pool size %d\n", ud_vbuf_n_allocated);
+            SPAWN_ERR("UD VBUF reagion allocation failed. Pool size %d", ud_vbuf_n_allocated);
+            spawn_exit(-1);
         }
     }
 
@@ -772,7 +759,8 @@ static void vbuf_release(vbuf* v)
     }
 
     if (v->padding != NORMAL_VBUF_FLAG) {
-        ibv_error_abort(GEN_EXIT_ERR, "vbuf not correct.\n");
+        SPAWN_ERR("Invalid vbuf type detected");
+        spawn_exit(-1);
     }
 
     /* clear out fields to prepare vbuf for next use */
@@ -925,9 +913,6 @@ static int ud_post_send(MPIDI_VC_t* vc, vbuf* v, int rail, mv2_ud_ctx_t *send_ud
     {
         ext_window_add(extwin, v);
 
-        PRINT_DEBUG(DEBUG_UD_verbose>1,"msg(%p) queued to ext window size:%d\n",
-            v, extwin->count);
-
         return 0;
     }
 
@@ -945,11 +930,6 @@ static int ud_post_send(MPIDI_VC_t* vc, vbuf* v, int rail, mv2_ud_ctx_t *send_ud
     /* mark vbuf as send-in-progress */
     v->flags |= UD_VBUF_SEND_INPROGRESS;
 
-#if 0
-    PRINT_DEBUG(DEBUG_UD_verbose>1,"UD Send : to:%d seqnum:%d acknum:%d len:%d\n", 
-                vc->pg_rank, p->seqnum, p->acknum, v->desc.sg_entry.length);
-#endif
-
     /* get pointer to UD context */
     mv2_ud_ctx_t* ud_ctx = send_ud_ctx; 
     if (ud_ctx == NULL ) {
@@ -960,7 +940,7 @@ static int ud_post_send(MPIDI_VC_t* vc, vbuf* v, int rail, mv2_ud_ctx_t *send_ud
     ibv_ud_post_sr(v, vc, ud_ctx);
 
     /* record packet and time in our send queue */
-    rdma_ud_last_check = mv2_get_time_us();
+    rdma_ud_last_check = spawn_clock_time_us();
 
     /* TODO: what's this mean? */
     /* dont' track messages in this case */
@@ -968,7 +948,7 @@ static int ud_post_send(MPIDI_VC_t* vc, vbuf* v, int rail, mv2_ud_ctx_t *send_ud
         return 0;
     }
 
-    v->timestamp = mv2_get_time_us();
+    v->timestamp = spawn_clock_time_us();
 
     /* Add vbuf to the send window */
     send_window_add(&(vc->send_window), v);
@@ -1023,9 +1003,6 @@ static inline void ud_flush_ext_window(MPIDI_VC_t *vc)
  * queues up to and including this seq number */
 static inline void ud_process_ack(MPIDI_VC_t *vc, uint16_t acknum)
 {
-    PRINT_DEBUG(DEBUG_UD_verbose>2,"ack recieved: %d next_to_ack: %d\n",
-        acknum, vc->seqnum_next_toack);
-
     /* get pointer to ud info, send queue, and extended send queue */
     message_queue_t* sendwin = &vc->send_window;
     message_queue_t* extwin  = &vc->ext_window;
@@ -1128,9 +1105,6 @@ static inline void mv2_ud_place_recvwin(vbuf *v)
 
         /* got a packet within range, now check whether its in order or not */
         if (v->seqnum == vc->seqnum_next_torecv) {
-            PRINT_DEBUG(DEBUG_UD_verbose>2,"get one with in-order seqnum:%d \n",
-              v->seqnum);
-
             /* packet is the one we expect, add to tail of VC receive queue */
             apprecv_window_add(&vc->app_recv_window, v);
 
@@ -1145,9 +1119,6 @@ static inline void mv2_ud_place_recvwin(vbuf *v)
                 vc->ack_need_tosend = 1;
             }
         } else {
-            PRINT_DEBUG(DEBUG_UD_verbose>1,"Got out-of-order packet recv:%d expected:%d\n",
-                v->seqnum, vc->seqnum_next_torecv);
-
             /* in this case, the packet does not match the expected
              * sequence number, but it is within the window range,
              * add it to our (out-of-order) receive queue */
@@ -1169,9 +1140,6 @@ static inline void mv2_ud_place_recvwin(vbuf *v)
         while (recvwin->head != NULL && 
                recvwin->head->seqnum == vc->seqnum_next_torecv)
         {
-            PRINT_DEBUG(DEBUG_UD_verbose>1,"get one with in-order seqnum:%d \n",
-                vc->seqnum_next_torecv);
-
             /* move item to VC apprecv queue */
             apprecv_window_add(&vc->app_recv_window, recvwin->head);
 
@@ -1185,9 +1153,6 @@ static inline void mv2_ud_place_recvwin(vbuf *v)
             vc->seqnum_next_torecv++;
         }
     } else {
-        PRINT_DEBUG(DEBUG_UD_verbose>1,"Message is not in recv window seqnum:%d win start:%d win end:%d\n",
-            v->seqnum, recv_win_start, recv_win_end);
-
         /* we got a packet that is not within the receive window,
          * just throw it away */
         MPIDI_CH3I_MRAIL_Release_vbuf(v);
@@ -1289,12 +1254,12 @@ static void ud_resend(vbuf *v)
 
     /* give up with fatal error if we exceed the retry count */
     if (v->retry_count > rdma_ud_max_retry_count) {
-        PRINT_ERROR ("UD reliability error. Exeeced max retries(%d) "
+        SPAWN_ERR("UD reliability error. Exeeced max retries(%d) "
                 "in resending the message(%p). current retry timeout(us): %lu. "
                 "This Error may happen on clusters based on the InfiniBand "
                 "topology and traffic patterns. Please try with increased "
                 "timeout using MV2_UD_RETRY_TIMEOUT\n", 
-                v->retry_count, v, rdma_ud_retry_timeout );
+                v->retry_count, v, rdma_ud_retry_timeout);
         exit(EXIT_FAILURE);
     }
 
@@ -1342,7 +1307,7 @@ static void ud_check_resend()
     message_queue_t* q = &proc.unack_queue;
 
     /* get current time */
-    double timestamp = mv2_get_time_us();
+    double timestamp = spawn_clock_time_us();
 
     /* walk through unack'd list */
     vbuf* cur = q->head;
@@ -1363,9 +1328,6 @@ static void ud_check_resend()
         if ((delay > (rdma_ud_retry_timeout * r)) ||
             (delay > rdma_ud_max_retry_timeout))
         {
-            PRINT_DEBUG(DEBUG_UD_verbose>1,"resend seqnum: %d retry: %d\n",
-                cur->seqnum, cur->retry_count);
-
             /* we've waited long enough, try again and update
              * its send timestamp */
             ud_resend(cur);
@@ -1373,7 +1335,7 @@ static void ud_check_resend()
 
             /* since this may have taken some time, update our current
              * timestamp */
-            timestamp = mv2_get_time_us();
+            timestamp = spawn_clock_time_us();
         }
 
         /* go on to next item in list */
@@ -1405,7 +1367,6 @@ static void ud_process_recv(vbuf *v)
     if ((p->type & MPIDI_CH3_PKT_CONTROL_BIT) &&
         p->type != MPIDI_CH3_PKT_UD_ACCEPT)
     {
-        PRINT_DEBUG(DEBUG_UD_verbose>1,"recv cntl message ack: %d\n", p->acknum);
         vbuf_release(v);
         goto fn_exit;
     }
@@ -1431,7 +1392,7 @@ static int ud_post_recv_buffers(int num_bufs, mv2_ud_ctx_t *ud_ctx)
 {
     /* TODO: post buffers as a linked list to be more efficient? */
 
-//    long start = mv2_get_time_us();
+//    long start = spawn_clock_time_us();
 
 #if 0
     /* post receives one at a time */
@@ -1527,11 +1488,8 @@ static int ud_post_recv_buffers(int num_bufs, mv2_ud_ctx_t *ud_ctx)
     }
 #endif
 
-//    long end = mv2_get_time_us();
+//    long end = spawn_clock_time_us();
 //    printf("Posted %d bufs in %lu usecs\n", num_bufs, (end - start));
-
-    PRINT_DEBUG(DEBUG_UD_verbose>0 ,"Posted %d buffers of size:%d to UD QP\n",
-        num_bufs, rdma_default_ud_mtu);
 
     return count;
 }
@@ -1574,9 +1532,6 @@ static void ud_update_send_credits(int num)
 
         /* track number of sends from extended queue */
         ud_ctx->ext_sendq_count++;
-
-        PRINT_DEBUG(DEBUG_UD_verbose>1,"sending from ext send queue seqnum: %d qlen: %d\n",
-            cur->seqnum, q->count);
 
         /* go on to next item in queue */
         cur = next;
@@ -1761,7 +1716,7 @@ static void* cm_timeout_handler(void *arg)
 #endif
 
         /* resend messages and send acks if we're due */
-//        long time = mv2_get_time_us();
+//        long time = spawn_clock_time_us();
 //        long delay = time - rdma_ud_last_check;
 //        if (delay > rdma_ud_progress_timeout) {
             /* time is up, grab lock and process acks */
@@ -1783,7 +1738,7 @@ static void* cm_timeout_handler(void *arg)
             comm_unlock();
 
             /* record the last time we checked acks */
-//            rdma_ud_last_check = mv2_get_time_us();
+//            rdma_ud_last_check = spawn_clock_time_us();
 //        }
     }
 
@@ -2157,7 +2112,7 @@ static spawn_net_endpoint* ud_ctx_create()
     if (ret != 0) {
         SPAWN_ERR("Failed to init comm_lock_object (pthread_mutex_init ret=%d %s)",
             ret, strerror(ret));
-        ibv_error_abort(-1, "Failed to init comm_lock_object\n");
+        spawn_exit(-1);
     }   
 
     rdma_ud_max_ack_pending = rdma_default_ud_sendwin_size / 4;

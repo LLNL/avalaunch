@@ -49,9 +49,14 @@
 /* #define DEBUG_DATA 1 */
 /* #define GET_CPU_MHZ_FROM_PROC 1 */
 
+#include "spawn_util.h"
+#include "spawn_clock.h"
+
 /* For gettimeofday */
 #define _BSD_SOURCE
-#include <spawn_net_ib_internal.h>
+
+#include <stdio.h>
+#include <sys/time.h>
 
 /* clock_gettime */
 #include <time.h>
@@ -92,13 +97,13 @@ static double sample_get_cpu_mhz(void)
         start = get_cycles();
 
         if (gettimeofday(&tv1, NULL)) {
-            PRINT_ERROR("gettimeofday failed.\n");
+            SPAWN_ERR("gettimeofday failed");
             return 0;
         }
 
         do {
             if (gettimeofday(&tv2, NULL)) {
-                PRINT_ERROR("gettimeofday failed.\n");
+                SPAWN_ERR("gettimeofday failed");
                 return 0;
             }
         } while ((tv2.tv_sec - tv1.tv_sec) * 1000000 +
@@ -138,7 +143,7 @@ static double sample_get_cpu_mhz(void)
         PRINT_INFO(1,"r^2 = %g\n", r_2);
     if (r_2 < 0.9) {
         if (DEBUG)
-            PRINT_ERROR("Correlation coefficient r^2: %g < 0.9\n", r_2);
+            SPAWN_ERR("Correlation coefficient r^2: %g < 0.9", r_2);
         return 0;
     }
 
@@ -177,9 +182,9 @@ static double proc_get_cpu_mhz()
         }
         if (mhz != m) {
             if (DEBUG) {
-                PRINT_ERROR("Conflicting CPU frequency values"
-                        " detected: %lf != %lf\n", mhz, m);
-                PRINT_ERROR("Test integrity may be harmed !\n");
+                SPAWN_ERR("Conflicting CPU frequency values"
+                        " detected: %lf != %lf", mhz, m);
+                SPAWN_ERR("Test integrity may be harmed");
             }
             continue;
         }
@@ -189,7 +194,7 @@ static double proc_get_cpu_mhz()
 }
 
 
-double get_cpu_mhz()
+double spawn_clock_cpu_mhz()
 {
     double sample, proc, delta;
     sample = sample_get_cpu_mhz();
@@ -206,25 +211,23 @@ double get_cpu_mhz()
     delta = proc > sample ? proc - sample : sample - proc;
     if (delta / proc > 0.01) {
         if (DEBUG)
-            PRINT_ERROR("Warning: measured timestamp frequency "
-                    "%g differs from nominal %g MHz\n",sample, proc);
+            SPAWN_ERR("Warning: measured timestamp frequency "
+                    "%g differs from nominal %g MHz",sample, proc);
         return sample;
     }
     return proc;
 }
 
-#ifndef DISABLE_LOW_LEVEL_TIMERS
-
-void mv2_init_timers()
+void spawn_clock_measure_cpu()
 {
-    global_mhz = get_cpu_mhz();
+    global_mhz = spawn_clock_cpu_mhz();
     if (global_mhz <= 0) {
-        PRINT_ERROR("Error in measuring timestamp CPU frequency: global_mhz equals to %lf.\n", global_mhz);
+        SPAWN_ERR("Error in measuring timestamp CPU frequency: global_mhz equals to %lf", global_mhz);
         exit(-1);
     }
 }
 
-double mv2_get_time_us()
+double spawn_clock_time_us()
 {
     struct timespec t;
     clock_gettime(CLOCK_MONOTONIC_RAW, &t);
@@ -234,16 +237,3 @@ double mv2_get_time_us()
     return (get_cycles()/global_mhz);
 #endif
 }
-
-#else
-
-void mv2_init_timers()
-{
-}
-
-double mv2_get_time_us()
-{
-    return MPI_Wtime()*1.0e6;
-}
-
-#endif
