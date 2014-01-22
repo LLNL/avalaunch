@@ -204,7 +204,6 @@ typedef enum {
 #define UD_VBUF_FREE_PENIDING       (0x01)
 #define UD_VBUF_SEND_INPROGRESS     (0x02)
 #define UD_VBUF_RETRY_ALWAYS        (0x04)
-#define UD_VBUF_MCAST_MSG           (0x08)
 
 /* ibverbs reserves the first 40 bytes of each UD packet, this may
  * sometimes contain valid data for a Global Routine Header */
@@ -265,13 +264,13 @@ typedef struct vbuf
 
 /* packet types: must fit within uint8_t, set highest order bit to
  * denote control packets */
-#define MPIDI_CH3_PKT_CONTROL_BIT   (0x80)
+#define PKT_CONTROL_BIT   (0x80)
 
-#define MPIDI_CH3_PKT_UD_CONNECT    (0x80)
-#define MPIDI_CH3_PKT_UD_ACCEPT     (0x81)
-#define MPIDI_CH3_PKT_UD_DISCONNECT (0x82)
-#define MPIDI_CH3_PKT_UD_ACK        (0x83)
-#define MPIDI_CH3_PKT_UD_DATA       (0x04)
+#define PKT_UD_CONNECT    (0x80)
+#define PKT_UD_ACCEPT     (0x81)
+#define PKT_UD_DISCONNECT (0x82)
+#define PKT_UD_ACK        (0x83)
+#define PKT_UD_DATA       (0x04)
 
 /* hca_info */
 typedef struct _mv2_hca_info_t {
@@ -307,9 +306,9 @@ typedef struct MPIDI_CH3I_MRAILI_Pkt_comm_header_t {
 } MPIDI_CH3I_MRAILI_Pkt_comm_header;
 
 /* VC state values */
-#define MRAILI_INIT             (0x0040)
-#define MRAILI_UD_CONNECTING    (0x0001)
-#define MRAILI_UD_CONNECTED     (0x0002)
+#define VC_STATE_INIT       (0x0040)
+#define VC_STATE_CONNECTING (0x0001)
+#define VC_STATE_CONNECTED  (0x0002)
 
 /* tracks a list of vbufs */
 typedef struct message_queue_t {
@@ -354,13 +353,17 @@ typedef struct _mv2_ud_exch_info_t {
 } mv2_ud_exch_info_t;
 
 /* ud vc info - tracks connection info between process pair */
-typedef struct MPIDI_VC
+typedef struct vc_struct
 {
-    /* remote address info and VC state */
+    /* VC state */
+    uint16_t state;               /* state of VC */
+    int local_closed;             /* track whether local side has disconnected */
+    int remote_closed;            /* track whether remote has disconnected */
+
+    /* remote address info */
     struct ibv_ah *ah;            /* IB address of remote process */
     uint32_t qpn;                 /* queue pair number of remote process */
     uint16_t lid;                 /* lid of remote process */
-    uint16_t state;               /* state of VC */
 
     /* read/write context ids */
     uint64_t readid;              /* remote proc labels its packets with this id when sending to us */
@@ -383,7 +386,7 @@ typedef struct MPIDI_VC
     uint64_t cntl_acks;          /* number of explicit ACK messages sent */
     uint64_t resend_count;       /* number of resend operations */
     uint64_t ext_win_send_count; /* number of sends from extended send wnidow */
-} MPIDI_VC_t;
+} vc_t;
 
 /* allocated as a global data structure to bind a UD context and
  * unack'd queue */
