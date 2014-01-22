@@ -48,7 +48,6 @@ static vc_t** g_ud_vc_info       = NULL; /* VC array */
 static uint64_t g_ud_vc_info_id  = 0;    /* next id to be assigned */
 static uint64_t g_ud_vc_infos    = 0;    /* capacity of VC array */
 
-static int rdma_num_hcas = 1;
 static int rdma_vbuf_max = -1;
 static int rdma_enable_hugepage = 1;
 static int rdma_vbuf_total_size;
@@ -490,14 +489,14 @@ static int vc_set_addr(vc_t* vc, ud_addr *rem_info, int port)
  * at program termination.  */
 typedef struct vbuf_region
 {
-    struct ibv_mr* mem_handle[MAX_NUM_HCAS]; /* mem hndl for entire region */
-    void* malloc_start;         /* used to free region later */
-    void* malloc_end;           /* to bracket mem region */
-    void* malloc_buf_start;     /* used to free DMA region later */
-    void* malloc_buf_end;       /* bracket DMA region */
-    int count;                  /* number of vbufs in region */
-    struct vbuf* vbuf_head;     /* first vbuf in region */
-    struct vbuf_region* next;   /* thread vbuf regions */
+    struct ibv_mr* mem_handle; /* mem hndl for entire region */
+    void* malloc_start;        /* used to free region later */
+    void* malloc_end;          /* to bracket mem region */
+    void* malloc_buf_start;    /* used to free DMA region later */
+    void* malloc_buf_end;      /* bracket DMA region */
+    int count;                 /* number of vbufs in region */
+    struct vbuf* vbuf_head;    /* first vbuf in region */
+    struct vbuf_region* next;  /* thread vbuf regions */
     int shmid;
 } vbuf_region;
 
@@ -646,21 +645,17 @@ static int vbuf_region_alloc(struct ibv_pd* pdomain, int nvbufs)
     reg->count            = nvbufs;
     reg->vbuf_head        = ud_free_vbuf_head;
 
-    /* register region with each HCA */
-    for (i = 0; i < rdma_num_hcas; ++i) {
-        /* register memory region */
-        reg->mem_handle[i] = ibv_reg_mr(
-                pdomain,
-                vbuf_dma_buffer,
-                nvbufs * rdma_default_ud_mtu,
-                IBV_ACCESS_LOCAL_WRITE
-        );
-
-        if (reg->mem_handle[i] == NULL) {
-            SPAWN_ERR("Cannot register vbuf region (ibv_reg_mr errno=%d %s)", errno, strerror(errno)); 
-            /* TODO: need to free memory / unregister with some cards? */
-            return -1;
-        }
+    /* register memory region with HCA */
+    reg->mem_handle = ibv_reg_mr(
+        pdomain,
+        vbuf_dma_buffer,
+        nvbufs * rdma_default_ud_mtu,
+        IBV_ACCESS_LOCAL_WRITE
+    );
+    if (reg->mem_handle == NULL) {
+        SPAWN_ERR("Cannot register vbuf region (ibv_reg_mr errno=%d %s)", errno, strerror(errno)); 
+        /* TODO: need to free memory / unregister with some cards? */
+        return -1;
     }
 
     /* init the vbuf structures */
@@ -781,7 +776,7 @@ static void vbuf_release(vbuf* v)
     return;
 }
 
-static inline void vbuf_prepare_recv(vbuf* v, unsigned long len, int hca_num)
+static inline void vbuf_prepare_recv(vbuf* v, unsigned long len)
 {
     assert(v != NULL);
 
@@ -790,7 +785,7 @@ static inline void vbuf_prepare_recv(vbuf* v, unsigned long len, int hca_num)
     v->desc.u.rr.num_sge = 1;
     v->desc.u.rr.sg_list = &(v->desc.sg_entry);
     v->desc.sg_entry.length = len;
-    v->desc.sg_entry.lkey = v->region->mem_handle[hca_num]->lkey;
+    v->desc.sg_entry.lkey = v->region->mem_handle->lkey;
     v->desc.sg_entry.addr = (uintptr_t)(v->buffer);
     v->padding = NORMAL_VBUF_FLAG;
 }
@@ -804,7 +799,7 @@ static inline void vbuf_prepare_send(vbuf* v, unsigned long len)
     v->desc.u.sr.num_sge = 1;
     v->desc.u.sr.sg_list = &(v->desc.sg_entry);
     v->desc.sg_entry.length = len;
-    v->desc.sg_entry.lkey = v->region->mem_handle[0]->lkey;
+    v->desc.sg_entry.lkey = v->region->mem_handle->lkey;
     v->desc.sg_entry.addr = (uintptr_t)(v->buffer);
     v->padding = NORMAL_VBUF_FLAG;
 
@@ -1411,7 +1406,7 @@ static int ud_post_recv_buffers(int num_bufs, ud_ctx_t *ud_ctx)
         }
 
         /* initialize vubf for UD */
-        vbuf_prepare_recv(v, rdma_default_ud_mtu, 0);
+        vbuf_prepare_recv(v, rdma_default_ud_mtu);
         v->transport = IB_TRANSPORT_UD;
 
         /* post vbuf to receive queue */
@@ -1453,7 +1448,7 @@ static int ud_post_recv_buffers(int num_bufs, ud_ctx_t *ud_ctx)
         }
 
         /* initialize vubf for UD */
-        vbuf_prepare_recv(v, rdma_default_ud_mtu, 0);
+        vbuf_prepare_recv(v, rdma_default_ud_mtu);
         v->transport = IB_TRANSPORT_UD;
 
         /* get pointer to receive work request */

@@ -132,7 +132,6 @@
 #define HUGEPAGE_ALIGN  (2*1024*1024)
 
 #define MAX_NUM_PORTS                   (1)
-#define MAX_NUM_HCAS                    (1)
 #define RDMA_DEFAULT_PSN                (0)
 #define RDMA_DEFAULT_PORT               (1)
 #define RDMA_DEFAULT_UD_MTU             (2048)
