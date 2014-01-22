@@ -48,7 +48,6 @@ static vc_t** g_ud_vc_info       = NULL; /* VC array */
 static uint64_t g_ud_vc_info_id  = 0;    /* next id to be assigned */
 static uint64_t g_ud_vc_infos    = 0;    /* capacity of VC array */
 
-static int rdma_num_rails = 1;
 static int rdma_num_hcas = 1;
 static int rdma_vbuf_max = -1;
 static int rdma_enable_hugepage = 1;
@@ -794,13 +793,10 @@ static inline void vbuf_prepare_recv(vbuf* v, unsigned long len, int hca_num)
     v->desc.sg_entry.lkey = v->region->mem_handle[hca_num]->lkey;
     v->desc.sg_entry.addr = (uintptr_t)(v->buffer);
     v->padding = NORMAL_VBUF_FLAG;
-    v->rail = hca_num;
 }
 
-static inline void vbuf_prepare_send(vbuf* v, unsigned long len, int rail)
+static inline void vbuf_prepare_send(vbuf* v, unsigned long len)
 {
-    int hca_num = rail / (rdma_num_rails / rdma_num_hcas);
-
     v->desc.u.sr.next = NULL;
     v->desc.u.sr.send_flags = IBV_SEND_SIGNALED;
     v->desc.u.sr.opcode = IBV_WR_SEND;
@@ -808,10 +804,9 @@ static inline void vbuf_prepare_send(vbuf* v, unsigned long len, int rail)
     v->desc.u.sr.num_sge = 1;
     v->desc.u.sr.sg_list = &(v->desc.sg_entry);
     v->desc.sg_entry.length = len;
-    v->desc.sg_entry.lkey = v->region->mem_handle[hca_num]->lkey;
+    v->desc.sg_entry.lkey = v->region->mem_handle[0]->lkey;
     v->desc.sg_entry.addr = (uintptr_t)(v->buffer);
     v->padding = NORMAL_VBUF_FLAG;
-    v->rail = rail;
 
     return;
 }
@@ -898,7 +893,7 @@ static inline void ibv_ud_post_sr(
     return;
 }
 
-static int ud_post_send(vc_t* vc, vbuf* v, int rail, mv2_ud_ctx_t* ud_ctx)
+static int ud_post_send(vc_t* vc, vbuf* v, mv2_ud_ctx_t* ud_ctx)
 {
     /* check that vbuf is for UD and that data fits within UD packet */
     assert(v->transport == IB_TRANSPORT_UD);
@@ -907,9 +902,8 @@ static int ud_post_send(vc_t* vc, vbuf* v, int rail, mv2_ud_ctx_t* ud_ctx)
     /* record pointer to VC in vbuf */
     v->vc = (void *)vc;
 
-    /* write rail id and send context into packet header */
+    /* write send context into packet header */
     MPIDI_CH3I_MRAILI_Pkt_comm_header* p = v->pheader;
-    p->rail  = rail;
     p->srcid = vc->writeid;
 
     /* if we have too many outstanding sends, or if we have other items
@@ -984,7 +978,7 @@ static inline void ud_flush_ext_window(vc_t *vc)
 
         /* send item, associated vbuf will be released when send
          * completion event is processed */
-        ud_post_send(vc, cur, cur->rail, proc.ud_ctx);
+        ud_post_send(vc, cur, proc.ud_ctx);
 
         /* track number of sends from extended send queue */
         vc->ext_win_send_count++;
@@ -1187,17 +1181,15 @@ static void ud_send_ack(vc_t *vc)
     v->vc = (void *)vc;
 
     /* prepare vbuf for sending */
-    int rail = 0;
     unsigned long size = sizeof(MPIDI_CH3I_MRAILI_Pkt_comm_header);
-    vbuf_prepare_send(v, size, rail);
+    vbuf_prepare_send(v, size);
 
     /* get pointer to packet header */
     MPIDI_CH3I_MRAILI_Pkt_comm_header* p = v->pheader;
     memset((void*)p, 0xfc, sizeof(MPIDI_CH3I_MRAILI_Pkt_comm_header));
 
-    /* write type, rail, and send context into packet header */
+    /* write type and send context into packet header */
     p->type  = PKT_UD_ACK;
-    p->rail  = rail;
     p->srcid = vc->writeid;
 
     /* control messages don't have a seq numer */
@@ -1641,7 +1633,6 @@ static int cq_poll()
                     }
 
                     v->vc     = vc;
-                    v->rail   = p->rail;
                     v->seqnum = p->seqnum;
 
                     ud_process_recv(v);
@@ -1797,11 +1788,10 @@ static inline int packet_send(
     v->content_size = header_size + payload_size;
 
     /* prepare packet for send */
-    int rail = 0;
-    vbuf_prepare_send(v, v->content_size, rail);
+    vbuf_prepare_send(v, v->content_size);
 
     /* and send it */
-    ud_post_send(vc, v, rail, proc.ud_ctx);
+    ud_post_send(vc, v, proc.ud_ctx);
 
     return SPAWN_SUCCESS;
 }

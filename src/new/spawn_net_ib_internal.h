@@ -241,7 +241,6 @@ typedef struct vbuf
     void* pheader;
     struct vbuf_region* region;
     void* vc;
-    int rail;
     int padding;
     VBUF_FLAG_TYPE* head_flag;
     unsigned char* buffer;
@@ -302,7 +301,6 @@ typedef struct MPIDI_CH3I_MRAILI_Pkt_comm_header_t {
     uint64_t srcid;  /* source context id to identify sender */
     uint16_t seqnum; /* sequence number from source */
     uint16_t acknum; /* most recent seq number source has received from us */
-    uint8_t  rail;   /* rail id to send packet on */
 } MPIDI_CH3I_MRAILI_Pkt_comm_header;
 
 /* VC state values */
