@@ -324,7 +324,7 @@ typedef struct message_queue_t {
 }
 
 /* ud context - tracks access to open UD QP on HCA */
-typedef struct _mv2_ud_ctx_t {
+typedef struct ud_ctx_struct {
     struct ibv_qp *qp;        /* UD QP */
     int hca_num;              /* id of HCA to use, starts at 0 */
     int send_wqes_avail;      /* number of available send work queue elements for UD QP */
@@ -332,7 +332,7 @@ typedef struct _mv2_ud_ctx_t {
     int credit_preserve;      /* low-water mark for number of posted receives */
     message_queue_t ext_send_queue; /* UD extended send queue */
     uint64_t ext_sendq_count; /* cumulative number of messages sent from UD extended send queue */
-} mv2_ud_ctx_t;
+} ud_ctx_t;
 
 /* structure to pass to mv2_ud_create_qp to create an ibv_qp */
 typedef struct ud_qp_info {
@@ -389,8 +389,8 @@ typedef struct vc_struct
 /* allocated as a global data structure to bind a UD context and
  * unack'd queue */
 typedef struct _mv2_proc_info_t {
-    mv2_ud_ctx_t*       ud_ctx;      /* pointer to UD context */
-    message_queue_t     unack_queue; /* queue of sent packets yet to be ACK'd */
+    ud_ctx_t*       ud_ctx;      /* pointer to UD context */
+    message_queue_t unack_queue; /* queue of sent packets yet to be ACK'd */
 } mv2_proc_info_t;
 
 #endif /* _SPAWN_NET_IB_INTERNAL_H */

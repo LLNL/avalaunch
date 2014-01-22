@@ -867,7 +867,7 @@ static int MRAILI_Process_send(void *vbuf_addr)
 static inline void ibv_ud_post_sr(
     vbuf* v,
     vc_t* vc,
-    mv2_ud_ctx_t* ud_ctx)
+    ud_ctx_t* ud_ctx)
 {
     if(v->desc.sg_entry.length <= rdma_max_inline_size) {
         v->desc.u.sr.send_flags = (enum ibv_send_flags)
@@ -893,7 +893,7 @@ static inline void ibv_ud_post_sr(
     return;
 }
 
-static int ud_post_send(vc_t* vc, vbuf* v, mv2_ud_ctx_t* ud_ctx)
+static int ud_post_send(vc_t* vc, vbuf* v, ud_ctx_t* ud_ctx)
 {
     /* check that vbuf is for UD and that data fits within UD packet */
     assert(v->transport == IB_TRANSPORT_UD);
@@ -1202,7 +1202,7 @@ static void ud_send_ack(vc_t *vc)
     vc->ack_pending = 0;
 
     /* get pointer to UD context */
-    mv2_ud_ctx_t* ud_ctx = proc.ud_ctx;
+    ud_ctx_t* ud_ctx = proc.ud_ctx;
 
     /* send packet */
     ibv_ud_post_sr(v, vc, ud_ctx);
@@ -1274,7 +1274,7 @@ static void ud_resend(vbuf *v)
     v->flags |= UD_VBUF_SEND_INPROGRESS;
 
     /* get pointer to UD context */
-    mv2_ud_ctx_t* ud_ctx = proc.ud_ctx;
+    ud_ctx_t* ud_ctx = proc.ud_ctx;
 
     /* send vbuf (or add to extended UD send queue if we don't have credits) */
     if (ud_ctx->send_wqes_avail > 0) {
@@ -1392,7 +1392,7 @@ fn_exit:
     return;
 }
 
-static int ud_post_recv_buffers(int num_bufs, mv2_ud_ctx_t *ud_ctx)
+static int ud_post_recv_buffers(int num_bufs, ud_ctx_t *ud_ctx)
 {
     /* TODO: post buffers as a linked list to be more efficient? */
 
@@ -1502,7 +1502,7 @@ static int ud_post_recv_buffers(int num_bufs, mv2_ud_ctx_t *ud_ctx)
 static void ud_update_send_credits(int num)
 {
     /* increment number of available send work queue elements */
-    mv2_ud_ctx_t* ud_ctx = proc.ud_ctx;
+    ud_ctx_t* ud_ctx = proc.ud_ctx;
     ud_ctx->send_wqes_avail += num;
 
     /* get pointer to UD context extended send queue */
@@ -2137,7 +2137,7 @@ static spawn_net_endpoint* ud_ctx_create()
 //    allocate_ud_vbufs(g_hca_info.pd, RDMA_DEFAULT_NUM_VBUFS);
 
     /* allocate UD context structure */
-    mv2_ud_ctx_t* ud_ctx = (mv2_ud_ctx_t*) SPAWN_MALLOC(sizeof(mv2_ud_ctx_t));
+    ud_ctx_t* ud_ctx = (ud_ctx_t*) SPAWN_MALLOC(sizeof(ud_ctx_t));
 
     /* initialize context fields */
     ud_ctx->qp               = NULL;
@@ -2231,7 +2231,7 @@ static void ud_ctx_destroy(spawn_net_endpoint** pep)
     spawn_net_endpoint* ep = *pep;
 
     /* extract context from endpoint */
-    mv2_ud_ctx_t* ud_ctx = proc.ud_ctx;
+    ud_ctx_t* ud_ctx = proc.ud_ctx;
 
     pthread_cancel(comm_thread);
 
