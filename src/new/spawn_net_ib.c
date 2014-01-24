@@ -2237,6 +2237,9 @@ static void ud_ctx_destroy(spawn_net_endpoint** pep)
     /* now free context data structure */
     spawn_free(&ud_ctx);
 
+    /* free endpoint name */
+    spawn_free(&ep->name);
+
     /* free endpoint */
     spawn_free(pep);
 
@@ -2490,6 +2493,9 @@ int spawn_net_disconnect_ib(spawn_net_channel** pch)
     vc_free(vc);
 
     comm_unlock();
+
+    /* free channel name */
+    spawn_free(&ch->name);
 
     /* free memory associated with channel */
     spawn_free(&ch);
