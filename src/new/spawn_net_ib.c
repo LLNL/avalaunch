@@ -714,7 +714,6 @@ static vbuf* vbuf_get(struct ibv_pd* pd)
      * if we are doing rput */
     v->padding     = NORMAL_VBUF_FLAG;
     v->pheader     = (void *)v->buffer;
-    v->transport   = IB_TRANSPORT_UD;
     v->retry_count = 0;
     v->flags       = 0;
     v->pending_send_polls = 0;
@@ -724,7 +723,6 @@ static vbuf* vbuf_get(struct ibv_pd* pd)
      * Otherwise we would need to very carefully add the initialization in
      * a dozen other places, and probably miss one. */
     v->content_size = 0;
-    /* TODO: Decide which transport need to assign here */
 
     pthread_spin_unlock(&vbuf_lock);
 
@@ -738,9 +736,7 @@ static void vbuf_release(vbuf* v)
 
     /* if send is still in progress (has not been ack'd),
      * just mark vbuf as ready to be freed and return */
-    if (v->transport == IB_TRANSPORT_UD &&
-       (v->flags & UD_VBUF_SEND_INPROGRESS))
-    {
+    if (v->flags & UD_VBUF_SEND_INPROGRESS) {
         /* TODO: when is this really added back to the free buffer? */
 
         /* mark vbuf that it's ready to be freed */
@@ -890,7 +886,6 @@ static inline void ibv_ud_post_sr(
 static int ud_post_send(vc_t* vc, vbuf* v, ud_ctx_t* ud_ctx)
 {
     /* check that vbuf is for UD and that data fits within UD packet */
-    assert(v->transport == IB_TRANSPORT_UD);
     assert(v->desc.sg_entry.length <= MRAIL_MAX_UD_SIZE);
 
     /* record pointer to VC in vbuf */
@@ -1106,9 +1101,7 @@ static inline void mv2_ud_place_recvwin(vbuf *v)
             vc->seqnum_next_torecv++;
 
             /* mark VC that we need to send an ack message */
-            if (v->transport == IB_TRANSPORT_UD) {
-                vc->ack_need_tosend = 1;
-            }
+            vc->ack_need_tosend = 1;
         } else {
             /* in this case, the packet does not match the expected
              * sequence number, but it is within the window range,
@@ -1120,9 +1113,7 @@ static inline void mv2_ud_place_recvwin(vbuf *v)
             }
 
             /* mark VC that we need to send an ack message */
-            if (v->transport == IB_TRANSPORT_UD) {
-                vc->ack_need_tosend = 1;
-            }
+            vc->ack_need_tosend = 1;
         }
 
         /* if we have items at front of (out-of-order) receive queue
@@ -1150,9 +1141,7 @@ static inline void mv2_ud_place_recvwin(vbuf *v)
 
         /* TODO: why? */
         /* mark VC that we need to send an ack message */
-        if (v->transport == IB_TRANSPORT_UD) {
-            vc->ack_need_tosend = 1;
-        }
+        vc->ack_need_tosend = 1;
     }
 
     return;
@@ -1167,9 +1156,6 @@ static void ud_send_ack(vc_t *vc)
 {
     /* get a vbuf to build our packet */
     vbuf *v = vbuf_get(g_hca_info.pd);
-
-    /* ensure packet is for UD */
-    assert(v->transport == IB_TRANSPORT_UD);
 
     /* record pointer to VC in vbuf */
     v->vc = (void *)vc;
@@ -1371,11 +1357,9 @@ static void ud_process_recv(vbuf *v)
     }
 
     /* send an explicit ack if we've exceeded our pending ack count */
-    if (v->transport == IB_TRANSPORT_UD) {
-        vc->ack_pending++;
-        if (vc->ack_pending > rdma_ud_max_ack_pending) {
-            ud_send_ack(vc);
-        }
+    vc->ack_pending++;
+    if (vc->ack_pending > rdma_ud_max_ack_pending) {
+        ud_send_ack(vc);
     }
 
     /* insert packet in receive queues (or throw it away if seq num
@@ -1406,7 +1390,6 @@ static int ud_post_recv_buffers(int num_bufs, ud_ctx_t *ud_ctx)
 
         /* initialize vubf for UD */
         vbuf_prepare_recv(v, rdma_default_ud_mtu);
-        v->transport = IB_TRANSPORT_UD;
 
         /* post vbuf to receive queue */
         struct ibv_recv_wr* bad_wr;
@@ -1448,7 +1431,6 @@ static int ud_post_recv_buffers(int num_bufs, ud_ctx_t *ud_ctx)
 
         /* initialize vubf for UD */
         vbuf_prepare_recv(v, rdma_default_ud_mtu);
-        v->transport = IB_TRANSPORT_UD;
 
         /* get pointer to receive work request */
         struct ibv_recv_wr* cur =  &v->desc.u.rr;
@@ -1615,15 +1597,13 @@ static int cq_poll()
 
                     /* for UD packets, check that source lid and source
                      * qpn match expected vc to avoid spoofing */
-                    if (v->transport == IB_TRANSPORT_UD) {
-                        if (vc->lid != wc->slid ||
-                            vc->qpn != wc->src_qp)
-                        {
-                            SPAWN_ERR("Packet source lid/qpn do not match expected values");
-                            vbuf_release(v);
-                            v = NULL;
-                            break;
-                        }
+                    if (vc->lid != wc->slid ||
+                        vc->qpn != wc->src_qp)
+                    {
+                        SPAWN_ERR("Packet source lid/qpn do not match expected values");
+                        vbuf_release(v);
+                        v = NULL;
+                        break;
                     }
 
                     v->vc     = vc;

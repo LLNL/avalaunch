@@ -195,11 +195,6 @@ struct ibv_wr_descriptor
     void* next;
 };
 
-typedef enum {
-    IB_TRANSPORT_UD = 1,
-    IB_TRANSPORT_RC = 2,
-} ib_transport;
-
 #define UD_VBUF_FREE_PENIDING       (0x01)
 #define UD_VBUF_SEND_INPROGRESS     (0x02)
 #define UD_VBUF_RETRY_ALWAYS        (0x04)
@@ -208,14 +203,10 @@ typedef enum {
  * sometimes contain valid data for a Global Routine Header */
 #define MV2_UD_GRH_LEN (40)
 
-#define PKT_TRANSPORT_OFFSET(_v) ((_v->transport == IB_TRANSPORT_UD) ? MV2_UD_GRH_LEN : 0)
+#define PKT_TRANSPORT_OFFSET(_v) (MV2_UD_GRH_LEN)
 
 #define SET_PKT_LEN_HEADER(_v, _wc) {                                       \
-    if(IB_TRANSPORT_UD == (_v)->transport) {                                \
-        (_v)->content_size = (_wc).byte_len - MV2_UD_GRH_LEN ;              \
-    } else {                                                                \
-        (_v)->content_size= _wc.byte_len;                                   \
-    }                                                                       \
+    (_v)->content_size = (_wc).byte_len - MV2_UD_GRH_LEN ;              \
 }
 
 #define SET_PKT_HEADER_OFFSET(_v) {                                         \
@@ -246,7 +237,6 @@ typedef struct vbuf
 
     int content_size;
 
-    ib_transport transport;
     uint16_t seqnum;
     uint16_t retry_count;
     uint16_t pending_send_polls;
