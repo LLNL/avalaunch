@@ -1,7 +1,9 @@
 OBJS= \
+  lwgrp.o \
   strmap.o \
   spawn_util.o \
   spawn_clock.o \
+  spawn_net_util.o \
   spawn_net_tcp.o \
   spawn_net_fifo.o \
   spawn_net_ib.o \
@@ -19,7 +21,9 @@ all: clean
 	gcc -g -O0 -o spawn_net_tcp.o -c ../spawn_net_tcp.c
 	gcc -g -O0 -o spawn_net_fifo.o -c ../spawn_net_fifo.c
 	gcc -g -O0 -o spawn_net_ib.o -c ../spawn_net_ib.c -I../.
+	gcc -g -O0 -o spawn_net_util.o -c ../spawn_net_util.c -I../.
 	gcc -g -O0 -o strmap.o -c ../strmap.c
+	gcc -g -O0 -o lwgrp.o -c ../lwgrp.c
 	gcc -g -O0 -o strmap_test strmap_test.c $(OBJS) -I../. $(LIBS)
 	gcc -g -O0 -o pmi_test pmi_test.c $(OBJS) -I../../../install/include ../../../install/lib/libpmi.a $(LIBS)
 	gcc -g -O0 -o ring_test ring_test.c $(OBJS) -I../. -I../../../install/include ../../../install/lib/libpmi.a $(LIBS)
