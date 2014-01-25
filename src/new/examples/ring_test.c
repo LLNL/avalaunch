@@ -24,7 +24,7 @@
 
 /* keeps list of connections to procs 2^d hops away
  * on left and right sides, truncates at ends */
-typedef struct lwgrp_comm {
+typedef struct lwgrp {
   int64_t size;      /* number of processes in our group */
   int64_t rank;      /* our rank within the group [0,size) */
   char* name;        /* strdup of address of current process */
@@ -34,10 +34,10 @@ typedef struct lwgrp_comm {
   spawn_net_channel** list_left;  /* process addresses for 2^d hops to the left */
   spawn_net_channel** list_right; /* process addresses for 2^d hops to the right */
   spawn_net_endpoint* ep; /* pointer to endpoint to accept connections */
-} lwgrp_comm;
+} lwgrp;
 
 /* waits for channel in specified round to connect */
-static int lwgrp_accept_left(lwgrp_comm* group, int target_round)
+static int lwgrp_accept_left(lwgrp* group, int target_round)
 {
   /* return immediately if we already accepted this connection */
   if (group->list_left[target_round] != SPAWN_NET_CHANNEL_NULL) {
@@ -61,7 +61,7 @@ static int lwgrp_accept_left(lwgrp_comm* group, int target_round)
   return LWGRP_SUCCESS;
 }
 
-static int lwgrp_connect_right(lwgrp_comm* group, int round, const char* name)
+static int lwgrp_connect_right(lwgrp* group, int round, const char* name)
 {
   /* connect to specified name */
   spawn_net_channel* ch = spawn_net_connect(name);
@@ -77,7 +77,7 @@ static int lwgrp_connect_right(lwgrp_comm* group, int round, const char* name)
 
 /* given a group, build a list of neighbors that are 2^d away on
  * our left and right sides */
-static int lwgrp_comm_connect(lwgrp_comm* group)
+static int lwgrp_connect(lwgrp* group)
 {
   /* get our rank and size of the group */
   int64_t rank  = group->rank;
@@ -182,7 +182,7 @@ static int lwgrp_comm_connect(lwgrp_comm* group)
   return LWGRP_SUCCESS;
 }
 
-static lwgrp_comm* lwgrp_comm_create(
+lwgrp* lwgrp_create(
   int64_t ranks,
   int64_t rank,
   const char* name,
@@ -190,7 +190,7 @@ static lwgrp_comm* lwgrp_comm_create(
   const char* right,
   spawn_net_endpoint* ep)
 {
-  lwgrp_comm* group = (lwgrp_comm*) SPAWN_MALLOC(sizeof(lwgrp_comm));
+  lwgrp* group = (lwgrp*) SPAWN_MALLOC(sizeof(lwgrp));
 
   /* copy input values from caller */
   group->size  = ranks;
@@ -240,14 +240,14 @@ static lwgrp_comm* lwgrp_comm_create(
   group->list_right = list_right;
 
   /* create connections */
-  lwgrp_comm_connect(group);
+  lwgrp_connect(group);
 
   return group;
 }
 
-static int lwgrp_comm_free(lwgrp_comm** pgroup)
+int lwgrp_free(lwgrp** pgroup)
 {
-  lwgrp_comm* group = *pgroup;
+  lwgrp* group = *pgroup;
 
   /* disconnect all channels */
   int64_t i;
@@ -383,7 +383,7 @@ static int cmp_str_int(const void* a, const void* b, size_t offset)
   return 0;
 }
 
-static int lwgrp_comm_sort_bitonic_merge(
+static int lwgrp_sort_bitonic_merge(
   void* value,
   void* scratch,
   size_t size,
@@ -392,7 +392,7 @@ static int lwgrp_comm_sort_bitonic_merge(
   int64_t start,
   int64_t num,
   int direction,
-  const lwgrp_comm* group)
+  const lwgrp* group)
 {
   if (num > 1) {
     /* get our rank within the group */
@@ -431,7 +431,7 @@ static int lwgrp_comm_sort_bitonic_merge(
       }
 
       /* recursively merge our half */
-      lwgrp_comm_sort_bitonic_merge(
+      lwgrp_sort_bitonic_merge(
         value, scratch, size, offset, compare,
         start, count, direction,
         group
@@ -459,7 +459,7 @@ static int lwgrp_comm_sort_bitonic_merge(
       /* recursively merge our half */
       int64_t new_start = start + count;
       int64_t new_num   = num - count;
-      lwgrp_comm_sort_bitonic_merge(
+      lwgrp_sort_bitonic_merge(
         value, scratch, size, offset, compare,
         new_start, new_num, direction,
         group
@@ -470,7 +470,7 @@ static int lwgrp_comm_sort_bitonic_merge(
   return 0;
 }
 
-static int lwgrp_comm_sort_bitonic_sort(
+static int lwgrp_sort_bitonic_sort(
   void* value,
   void* scratch,
   size_t size,
@@ -479,7 +479,7 @@ static int lwgrp_comm_sort_bitonic_sort(
   int64_t start,
   int64_t num,
   int direction,
-  const lwgrp_comm* group)
+  const lwgrp* group)
 {
   if (num > 1) {
     /* get our rank in our group */
@@ -489,7 +489,7 @@ static int lwgrp_comm_sort_bitonic_sort(
     int64_t mid = num / 2;
     if (rank < start + mid) {
       /* sort first half in one direction */
-      lwgrp_comm_sort_bitonic_sort(
+      lwgrp_sort_bitonic_sort(
         value, scratch, size, offset, compare,
         start, mid, !direction,
         group
@@ -498,7 +498,7 @@ static int lwgrp_comm_sort_bitonic_sort(
       /* sort the second half in the other direction */
       int64_t new_start = start + mid;
       int64_t new_num   = num - mid;
-      lwgrp_comm_sort_bitonic_sort(
+      lwgrp_sort_bitonic_sort(
         value, scratch, size, offset, compare,
         new_start, new_num, direction,
         group
@@ -506,7 +506,7 @@ static int lwgrp_comm_sort_bitonic_sort(
     }
 
     /* merge the two sorted halves */
-    lwgrp_comm_sort_bitonic_merge(
+    lwgrp_sort_bitonic_merge(
       value, scratch, size, offset, compare,
       start, num, direction,
       group
@@ -520,19 +520,19 @@ static int lwgrp_comm_sort_bitonic_sort(
  * each process provides its tuple as item on input,
  * on output item is overwritten with a new item
  * such that if rank_i < rank_j, item_i < item_j for all i and j */
-static int lwgrp_comm_sort_bitonic(
+static int lwgrp_sort_bitonic(
   void* value,
   size_t size,
   size_t offset,
   int (*compare)(const void*, const void*, size_t),
-  const lwgrp_comm* group)
+  const lwgrp* group)
 {
   /* allocate a scratch buffer to hold received type during sort */
   void* scratch = SPAWN_MALLOC(size);
 
   /* conduct the bitonic sort on our values */
   int64_t ranks = group->size;
-  int rc = lwgrp_comm_sort_bitonic_sort(
+  int rc = lwgrp_sort_bitonic_sort(
     value, scratch, size, offset, compare,
     0, ranks, 1,
     group
@@ -568,12 +568,12 @@ enum chain_fields {
  *   2) executes left-to-right and right-to-left (double) inclusive
  *      segmented scan to compute number of ranks to left and right
  *      sides of host value */
-lwgrp_comm* lwgrp_comm_split_sorted(
+static lwgrp* lwgrp_split_sorted(
   const void* value,
   size_t size,
   size_t offset,
   int (*compare)(const void*, const void*, size_t),
-  const lwgrp_comm* group)
+  const lwgrp* group)
 {
   /* we will fill in 7 values (src, rank, size, groupid, groups, left, right)
    * representing the chain data structure for the the globally
@@ -771,7 +771,7 @@ lwgrp_comm* lwgrp_comm_split_sorted(
                            send_left_ints[SCAN_COLOR] - 1;
 
   /* sort item back to its originating rank */
-  lwgrp_comm_sort_bitonic(
+  lwgrp_sort_bitonic(
     result_buf, result_buf_size, 0, cmp_int, group
   );
 
@@ -786,7 +786,7 @@ lwgrp_comm* lwgrp_comm_split_sorted(
   if (newrank < newranks - 1) {
     newright = (char*)result_buf + 5 * sizeof(int64_t) + payload_size;
   }
-  lwgrp_comm* newgroup = lwgrp_comm_create(
+  lwgrp* newgroup = lwgrp_create(
     newranks, newrank, group->name, newleft, newright, group->ep
   );
 
@@ -797,11 +797,11 @@ lwgrp_comm* lwgrp_comm_split_sorted(
 }
 
 #if 0
-int lwgrp_comm_split(
-  const lwgrp_comm* comm,
+int lwgrp_split(
+  const lwgrp* comm,
   int64_t color,
   int64_t key,
-  lwgrp_comm* newcomm)
+  lwgrp* newcomm)
 {
   /* TODO: for small groups, fastest to do an allgather and
    * local sort */
@@ -828,7 +828,7 @@ int lwgrp_comm_split(
 
   /* sort our values using bitonic sort algorithm -- 
    * O(log^2 N) communication */
-  lwgrp_comm_sort_bitonic(
+  lwgrp_sort_bitonic(
     item, item_size, offset, cmp_three_ints, comm
   );
 
@@ -836,7 +836,7 @@ int lwgrp_comm_split(
    * left and right neighbors to determine group boundaries --
    * O(log N) communication */
   int recv_ints[7];
-  lwgrp_comm_split_sorted(
+  lwgrp_split_sorted(
     item, item_size, offset, cmp_int, comm, recv_ints
   );
 
@@ -859,14 +859,14 @@ int lwgrp_comm_split(
 #endif
 
   /* build comm from newly created chain */
-  lwgrp_comm* tmpgrp = lwgrp_comm_create(newranks, newrank, ep_name, newleft, newright, ep);
+  lwgrp* tmpgrp = lwgrp_create(newranks, newrank, ep_name, newleft, newright, ep);
   *newgroup = tmpgrp;
 
   return LWGRP_SUCCESS;
 }
 #endif
 
-/* int lwgrp_comm_split_str(MPI_Comm comm, const void* str, int* groups, int* groupid)
+/* int lwgrp_split_str(MPI_Comm comm, const void* str, int* groups, int* groupid)
  *   IN  comm    - input communicator (handle)
  *   IN  str     - string (NUL-terminated string)
  *   OUT groups  - number of unique strings in comm (non-negative integer)
@@ -892,7 +892,7 @@ int lwgrp_comm_split(
  * The groupid value is the same on two different processes
  * if and only if both processes specify the same string.
  * This groupid can be used as a color value in MPI_COMM_SPLIT. */
-lwgrp_comm* lwgrp_comm_split_str(const lwgrp_comm* comm, const char* str)
+lwgrp* lwgrp_split_str(const lwgrp* comm, const char* str)
 {
   /* require str not be NULL */
   if (str == NULL) {
@@ -903,7 +903,7 @@ lwgrp_comm* lwgrp_comm_split_str(const lwgrp_comm* comm, const char* str)
   uint64_t lengths[2];
   lengths[0] = (uint64_t) (strlen(str) + 1);
   lengths[1] = (uint64_t) (strlen(comm->name) + 1);
-  lwgrp_comm_allreduce_uint64_max(lengths, 2, comm);
+  lwgrp_allreduce_uint64_max(lengths, 2, comm);
   uint64_t max_len  = lengths[0];
   uint64_t max_name = lengths[1];
 
@@ -933,14 +933,14 @@ lwgrp_comm* lwgrp_comm_split_str(const lwgrp_comm* comm, const char* str)
 
   /* sort our values using bitonic sort algorithm -- 
    * O(log^2 N) communication */
-  lwgrp_comm_sort_bitonic(
+  lwgrp_sort_bitonic(
     buf, buf_size, max_len, cmp_str_int, comm
   );
 
   /* now split our sorted values by comparing our value with our
    * left and right neighbors to determine group boundaries --
    * O(log N) communication */
-  lwgrp_comm* newgroup = lwgrp_comm_split_sorted(
+  lwgrp* newgroup = lwgrp_split_sorted(
     buf, buf_size, max_len, cmp_str, comm
   );
 
@@ -950,7 +950,7 @@ lwgrp_comm* lwgrp_comm_split_str(const lwgrp_comm* comm, const char* str)
   return newgroup;
 }
 
-static int lwgrp_comm_allgather_strmap(strmap* map, lwgrp_comm* group)
+int lwgrp_allgather_strmap(strmap* map, lwgrp* group)
 {
   int64_t rank  = group->rank;
   int64_t ranks = group->size;
@@ -1016,7 +1016,7 @@ static int lwgrp_comm_allgather_strmap(strmap* map, lwgrp_comm* group)
   return LWGRP_SUCCESS;
 }
 
-int lwgrp_comm_barrier(const lwgrp_comm* group)
+int lwgrp_barrier(const lwgrp* group)
 {
   int64_t rank  = group->rank;
   int64_t ranks = group->size;
@@ -1076,7 +1076,7 @@ int lwgrp_comm_barrier(const lwgrp_comm* group)
   return LWGRP_SUCCESS;
 }
 
-int lwgrp_comm_allreduce_uint64_max(uint64_t* buf, uint64_t count, const lwgrp_comm* group)
+int lwgrp_allreduce_uint64_max(uint64_t* buf, uint64_t count, const lwgrp* group)
 {
   int64_t rank  = group->rank;
   int64_t ranks = group->size;
@@ -1177,7 +1177,7 @@ int main(int argc, char* argv[])
 #endif
 
   /* create to log(N) tasks on left and right sides */
-  lwgrp_comm* group = lwgrp_comm_create(ranks, rank, ep_name, left, right, ep);
+  lwgrp* group = lwgrp_create(ranks, rank, ep_name, left, right, ep);
 
   /* free left and right strings allocated in ring_create */
   spawn_free(&left);
@@ -1186,15 +1186,15 @@ int main(int argc, char* argv[])
   char split_str[256];
   //sprintf(split_str, "%d", (rank/2)*100);
   sprintf(split_str, "hello");
-  lwgrp_comm* newgroup = lwgrp_comm_split_str(group, split_str);
-  lwgrp_comm_barrier(newgroup);
-  lwgrp_comm_free(&newgroup);
+  lwgrp* newgroup = lwgrp_split_str(group, split_str);
+  lwgrp_barrier(newgroup);
+  lwgrp_free(&newgroup);
 
   /* gather endpoint addresses for all procs */
   strmap* map = strmap_new();
   strmap_setf(map, "%d=%s", rank, ep_name);
 
-  lwgrp_comm_allgather_strmap(map, group);
+  lwgrp_allgather_strmap(map, group);
 
 #if 0
   if (rank == 0) {
@@ -1210,7 +1210,7 @@ int main(int argc, char* argv[])
   strmap_delete(&map);
 
   /* disconnect and free group */
-  lwgrp_comm_free(&group);
+  lwgrp_free(&group);
 
   spawn_net_close(&ep);
 
