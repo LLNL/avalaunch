@@ -52,14 +52,33 @@ lwgrp* lwgrp_split_str(
 /* free a group and drop connections */
 int lwgrp_free(lwgrp** pgroup);
 
+/* return size of group */
+int64_t lwgrp_size(const lwgrp* group);
+
+/* return rank of process within its group [0,size) */
+int64_t lwgrp_rank(const lwgrp* group);
+
+/* send data in buffer to ranks on left and right sides,
+ * return value from left and right ranks */
+int lwgrp_shift(const void* buf, void* left, void* right, size_t buf_size, const lwgrp* group);
+
 /* execute a barrier on the group */
 int lwgrp_barrier(const lwgrp* group);
+
+/* compute sum across procs of a vector of uint64_t values */
+int lwgrp_allreduce_uint64_sum(uint64_t* buf, uint64_t count, const lwgrp* group);
 
 /* compute maximum across procs of a vector of uint64_t values */
 int lwgrp_allreduce_uint64_max(uint64_t* buf, uint64_t count, const lwgrp* group);
 
+/* compute prefix sum across procs of a vector of uint64_t values */
+int lwgrp_scan_uint64_sum(uint64_t* buf, uint64_t count, const lwgrp* group);
+
+/* compute prefix sum across procs of a vector of uint64_t values */
+int lwgrp_double_scan_uint64_sum(const uint64_t* buf, uint64_t* left, uint64_t* right, uint64_t count, const lwgrp* group);
+
 /* gather strmap from all procs */
-int lwgrp_allgather_strmap(strmap* map, lwgrp* group);
+int lwgrp_allgather_strmap(strmap* map, const lwgrp* group);
 
 #ifdef __cplusplus
 }

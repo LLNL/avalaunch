@@ -53,7 +53,9 @@
 #include "spawn_clock.h"
 
 /* For gettimeofday */
+#ifndef _BSD_SOURCE
 #define _BSD_SOURCE
+#endif
 
 #include <stdio.h>
 #include <sys/time.h>

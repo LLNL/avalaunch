@@ -250,6 +250,24 @@ int lwgrp_free(lwgrp** pgroup)
   return LWGRP_SUCCESS;
 }
 
+int64_t lwgrp_size(const lwgrp* group)
+{
+  int64_t size = 0;
+  if (group != NULL) {
+    size = group->size;
+  }
+  return size;
+}
+
+int64_t lwgrp_rank(const lwgrp* group)
+{
+  int64_t rank = -1;
+  if (group != NULL) {
+    rank = group->rank;
+  }
+  return rank;
+}
+
 /* TODO: need to unpack these values to convert them to right format */
 
 /* compares first int,
@@ -924,6 +942,57 @@ lwgrp* lwgrp_split_str(const lwgrp* comm, const char* str)
   return newgroup;
 }
 
+int lwgrp_shift(
+  const void* buf,
+  void* left,
+  void* right,
+  size_t buf_size,
+  const lwgrp* group)
+{
+  int64_t rank  = group->rank;
+  int64_t ranks = group->size;
+
+  if (rank & 0x1) {
+    /* we're an odd rank */
+
+    /* exchange data with left partner */
+    /* recv then send */
+    if (rank - 1 >= 0) {
+      spawn_net_channel* ch = group->list_left[0];
+      spawn_net_read(ch, left, buf_size);
+      spawn_net_write(ch, buf, buf_size);
+    }
+
+    /* exchange data with right partner */
+    /* send then recv */
+    if (rank < ranks) {
+      spawn_net_channel* ch = group->list_right[0];
+      spawn_net_write(ch, buf, buf_size);
+      spawn_net_read(ch, right, buf_size);
+    }
+  } else {
+    /* we're an even rank */
+
+    /* exchange data with right partner */
+    /* send then recv */
+    if (rank < ranks) {
+      spawn_net_channel* ch = group->list_right[0];
+      spawn_net_write(ch, buf, buf_size);
+      spawn_net_read(ch, right, buf_size);
+    }
+
+    /* exchange data with left partner */
+    /* recv then send */
+    if (rank - 1 >= 0) {
+      spawn_net_channel* ch = group->list_left[0];
+      spawn_net_read(ch, left, buf_size);
+      spawn_net_write(ch, buf, buf_size);
+    }
+  }
+
+  return LWGRP_SUCCESS;
+}
+
 int lwgrp_barrier(const lwgrp* group)
 {
   int64_t rank  = group->rank;
@@ -980,6 +1049,82 @@ int lwgrp_barrier(const lwgrp* group)
     dist <<= 1;
     round++;
   }
+
+  return LWGRP_SUCCESS;
+}
+
+int lwgrp_allreduce_uint64_sum(uint64_t* buf, uint64_t count, const lwgrp* group)
+{
+  int64_t rank  = group->rank;
+  int64_t ranks = group->size;
+
+  size_t buf_size = count * sizeof(uint64_t);
+  uint64_t* left_buf  = SPAWN_MALLOC(buf_size);
+  uint64_t* right_buf = SPAWN_MALLOC(buf_size);
+
+  int i;
+  int round = 0;
+  int64_t dist = 1;
+  while (dist < ranks) {
+    /* compute our relative rank for this round */
+    int64_t relrank  = (rank >> round);
+
+    if (relrank & 0x1) {
+      /* we're odd in this round */
+
+      /* exchange data with left partner */
+      if (rank - dist >= 0) {
+        /* recv then send */
+        spawn_net_channel* ch = group->list_left[round];
+        spawn_net_read(ch, left_buf, buf_size);
+        spawn_net_write(ch, buf, buf_size);
+      }
+
+      /* exchange data with right partner */
+      if (rank + dist < ranks) {
+        /* send then recv */
+        spawn_net_channel* ch = group->list_right[round];
+        spawn_net_write(ch, buf, buf_size);
+        spawn_net_read(ch, right_buf, buf_size);
+      }
+    } else {
+      /* we're even in this round */
+
+      /* exchange data with right partner */
+      if (rank + dist < ranks) {
+        /* send then recv */
+        spawn_net_channel* ch = group->list_right[round];
+        spawn_net_write(ch, buf, buf_size);
+        spawn_net_read(ch, right_buf, buf_size);
+      }
+
+      /* exchange data with left partner */
+      if (rank - dist >= 0) {
+        /* recv then send */
+        spawn_net_channel* ch = group->list_left[round];
+        spawn_net_read(ch, left_buf, buf_size);
+        spawn_net_write(ch, buf, buf_size);
+      }
+    }
+
+    /* merge received maps with our current map */
+    if (rank - dist >= 0) {
+      for (i = 0; i < count; i++) {
+        buf[i] += left_buf[i];
+      }
+    }
+    if (rank + dist < ranks) {
+      for (i = 0; i < count; i++) {
+        buf[i] += right_buf[i];
+      }
+    }
+
+    dist <<= 1;
+    round++;
+  }
+
+  spawn_free(&right_buf);
+  spawn_free(&left_buf);
 
   return LWGRP_SUCCESS;
 }
@@ -1064,7 +1209,160 @@ int lwgrp_allreduce_uint64_max(uint64_t* buf, uint64_t count, const lwgrp* group
   return LWGRP_SUCCESS;
 }
 
-int lwgrp_allgather_strmap(strmap* map, lwgrp* group)
+/* compute prefix sum across procs of a vector of uint64_t values */
+int lwgrp_scan_uint64_sum(uint64_t* buf, uint64_t count, const lwgrp* group)
+{
+  int64_t rank  = group->rank;
+  int64_t ranks = group->size;
+
+  size_t buf_size = count * sizeof(uint64_t);
+  uint64_t* recv_buf = SPAWN_MALLOC(buf_size);
+
+  int i;
+  int round = 0;
+  int64_t dist = 1;
+  while (dist < ranks) {
+    /* compute our relative rank for this round */
+    int64_t relrank  = (rank >> round);
+
+    if (relrank & 0x1) {
+      /* we're odd in this round */
+
+      /* exchange data with left partner */
+      if (rank - dist >= 0) {
+        spawn_net_channel* ch = group->list_left[round];
+        spawn_net_read(ch, recv_buf, buf_size);
+      }
+
+      /* exchange data with right partner */
+      if (rank + dist < ranks) {
+        spawn_net_channel* ch = group->list_right[round];
+        spawn_net_write(ch, buf, buf_size);
+      }
+    } else {
+      /* we're even in this round */
+
+      /* exchange data with right partner */
+      if (rank + dist < ranks) {
+        spawn_net_channel* ch = group->list_right[round];
+        spawn_net_write(ch, buf, buf_size);
+      }
+
+      /* exchange data with left partner */
+      if (rank - dist >= 0) {
+        spawn_net_channel* ch = group->list_left[round];
+        spawn_net_read(ch, recv_buf, buf_size);
+      }
+    }
+
+    /* merge received maps with our current map */
+    if (rank - dist >= 0) {
+      for (i = 0; i < count; i++) {
+        buf[i] += recv_buf[i];
+      }
+    }
+
+    dist <<= 1;
+    round++;
+  }
+
+  spawn_free(&recv_buf);
+
+  return LWGRP_SUCCESS;
+}
+
+int lwgrp_double_scan_uint64_sum(const uint64_t* buf, uint64_t* ltr, uint64_t* rtl, uint64_t count, const lwgrp* group)
+{
+  int64_t rank  = group->rank;
+  int64_t ranks = group->size;
+
+  size_t buf_size = count * sizeof(uint64_t);
+  uint64_t* left_send  = SPAWN_MALLOC(buf_size);
+  uint64_t* left_recv  = SPAWN_MALLOC(buf_size);
+  uint64_t* right_send = SPAWN_MALLOC(buf_size);
+  uint64_t* right_recv = SPAWN_MALLOC(buf_size);
+
+  /* initialize outgoing buffers */
+  int i;
+  for (i = 0; i < count; i++) {
+      left_send[i]  = buf[i];
+      right_send[i] = buf[i];
+  }
+
+  int round = 0;
+  int64_t dist = 1;
+  while (dist < ranks) {
+    /* compute our relative rank for this round */
+    int64_t relrank  = (rank >> round);
+
+    if (relrank & 0x1) {
+      /* we're odd in this round */
+
+      /* exchange data with left partner */
+      if (rank - dist >= 0) {
+        /* recv then send */
+        spawn_net_channel* ch = group->list_left[round];
+        spawn_net_read(ch, left_recv, buf_size);
+        spawn_net_write(ch, left_send, buf_size);
+      }
+
+      /* exchange data with right partner */
+      if (rank + dist < ranks) {
+        /* send then recv */
+        spawn_net_channel* ch = group->list_right[round];
+        spawn_net_write(ch, right_send, buf_size);
+        spawn_net_read(ch, right_recv, buf_size);
+      }
+    } else {
+      /* we're even in this round */
+
+      /* exchange data with right partner */
+      if (rank + dist < ranks) {
+        /* send then recv */
+        spawn_net_channel* ch = group->list_right[round];
+        spawn_net_write(ch, right_send, buf_size);
+        spawn_net_read(ch, right_recv, buf_size);
+      }
+
+      /* exchange data with left partner */
+      if (rank - dist >= 0) {
+        /* recv then send */
+        spawn_net_channel* ch = group->list_left[round];
+        spawn_net_read(ch, left_recv, buf_size);
+        spawn_net_write(ch, left_send, buf_size);
+      }
+    }
+
+    /* merge received maps with our current map */
+    if (rank - dist >= 0) {
+      for (i = 0; i < count; i++) {
+        right_send[i] += left_recv[i];
+      }
+    }
+    if (rank + dist < ranks) {
+      for (i = 0; i < count; i++) {
+        left_send[i] += right_recv[i];
+      }
+    }
+
+    dist <<= 1;
+    round++;
+  }
+
+  for (i = 0; i < count; i++) {
+    ltr[i] = right_send[i];
+    rtl[i] = left_send[i];
+  }
+
+  spawn_free(&right_recv);
+  spawn_free(&right_send);
+  spawn_free(&left_recv);
+  spawn_free(&left_send);
+
+  return LWGRP_SUCCESS;
+}
+
+int lwgrp_allgather_strmap(strmap* map, const lwgrp* group)
 {
   int64_t rank  = group->rank;
   int64_t ranks = group->size;
