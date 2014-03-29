@@ -58,6 +58,9 @@ int spawn_net_read(const spawn_net_channel* ch, void* buf, size_t size);
 /* write size bytes from buffer into connection */
 int spawn_net_write(const spawn_net_channel* ch, const void* buf, size_t size);
 
+/* wait for data on list of connections, return index of pending conn  */
+int spawn_net_waitany(int num, const spawn_net_channel** chs, int* index);
+
 /* TODO: isend/irecv/waitall */
 
 #ifdef __cplusplus

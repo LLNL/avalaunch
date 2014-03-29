@@ -219,3 +219,38 @@ int spawn_net_write(const spawn_net_channel* ch, const void* buf, size_t size)
     return SPAWN_FAILURE;
   }
 }
+
+int spawn_net_waitany(int num, const spawn_net_channel** chs, int* index)
+{
+  /* write is a NOP for a null channel */
+  if (num == 0) {
+    *index = -1;
+    return SPAWN_SUCCESS;
+  }
+
+  /* check that we got a list of channels */
+  if (chs == NULL) {
+    return SPAWN_FAILURE;
+  }
+
+  /* TODO: need to check that all channels are of the same type */
+  return spawn_net_waitany_ib(num, chs, index);
+
+#if 0
+  /* otherwise, call write routine for channel type */
+  if (ch->type == SPAWN_NET_TYPE_TCP) {
+    SPAWN_ERR("spawn_net_waitany unsupported for TCP channels");
+  } else if (ch->type == SPAWN_NET_TYPE_FIFO) {
+    SPAWN_ERR("spawn_net_waitany unsupported for FIFO channels");
+  }
+#ifdef HAVE_SPAWN_NET_IBUD
+  else if (ch->type == SPAWN_NET_TYPE_IBUD) {
+    return spawn_net_waitany_ib(num, chs, index);
+  }
+#endif
+  else {
+    SPAWN_ERR("Unknown channel type %d", ch->type);
+    return SPAWN_FAILURE;
+  }
+#endif
+}

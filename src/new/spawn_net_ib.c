@@ -34,8 +34,8 @@
 #include <sys/resource.h>
 
 /* TODO: bury all of these globals in allocated memory */
-static int64_t g_count_open = 0;
-static int64_t g_count_conn = 0;
+static int64_t g_count_open = 0; /* number of active endpoint opens (spawn_net_open w/o close) */
+static int64_t g_count_conn = 0; /* number of active VC connections (local + remote) */
 static spawn_net_endpoint* g_ep = SPAWN_NET_ENDPOINT_NULL;
 
 static mv2_proc_info_t proc;
@@ -45,12 +45,10 @@ static ud_addr local_ep_info;
 /* Tracks an array of virtual channels.  With each new channel created,
  * the id is incremented.  Grows channel array as needed. */
 static vc_t** g_ud_vc_info       = NULL; /* VC array */
-static uint64_t g_ud_vc_info_id  = 0;    /* next id to be assigned */
 static uint64_t g_ud_vc_infos    = 0;    /* capacity of VC array */
+static uint64_t g_ud_vc_info_id  = 0;    /* next id to be assigned */
 
-static int rdma_vbuf_max = -1;
 static int rdma_enable_hugepage = 1;
-static int rdma_vbuf_total_size;
 static int rdma_vbuf_secondary_pool_size = RDMA_VBUF_SECONDARY_POOL_SIZE;
 static int rdma_max_inline_size = RDMA_DEFAULT_MAX_INLINE_SIZE;
 static uint16_t rdma_default_ud_mtu = 2048;
@@ -59,18 +57,21 @@ static uint32_t rdma_default_max_ud_send_wqe = RDMA_DEFAULT_MAX_UD_SEND_WQE;
 static uint32_t rdma_default_max_ud_recv_wqe = RDMA_DEFAULT_MAX_UD_RECV_WQE;
 static uint32_t rdma_default_ud_sendwin_size = 400; /* Max number of outstanding buffers (waiting for ACK)*/
 static uint32_t rdma_default_ud_recvwin_size = 2501; /* Max number of buffered out-of-order messages */
-static long rdma_ud_progress_timeout = 25000; /* Time (usec) until ACK status is checked (and ACKs sent) */
-static long rdma_ud_retry_timeout = 50000; /* Time (usec) until a message is resent */
+static long rdma_ud_progress_timeout  = 25000; /* Time (usec) until ACK status is checked (and ACKs sent) */
+static long rdma_ud_retry_timeout     = 50000; /* Time (usec) until a message is resent */
 static long rdma_ud_max_retry_timeout = 20000000;
 static long rdma_ud_last_check;
-static uint16_t rdma_ud_progress_spin = 1200;
 static uint16_t rdma_ud_max_retry_count = 1000;
 static uint16_t rdma_ud_max_ack_pending;
 
 static struct timespec cm_remain;
 static struct timespec cm_timeout;
 
-static pthread_t comm_thread;
+static pthread_t recv_thread;    /* thread that handles CQ events */
+static pthread_t timeout_thread; /* thread that resends packets if timeout expires */
+
+static pthread_cond_t g_recv_cond; /* condition variable to wait on incoming msg */
+static int g_recv_flag;            /* flag indicating whether main thread is waiting */
 
 /*******************************************
  * interface to lock/unlock communication
@@ -426,6 +427,23 @@ static void vc_free(vc_t* vc)
 
         /* TODO: free off any memory allocated for vc */
 
+        /* TODO: delete items from message queues */
+        vc->send_window;
+        vc->ext_window;
+        vc->recv_window;
+        vc->app_recv_window;
+
+        /* TODO: delete any items from unack'd queue */
+
+        /* destroy address handle */
+        if (vc->ah != NULL) {
+            int ret = ibv_destroy_ah(vc->ah);
+            if (ret != 0) {
+                SPAWN_ERR("Error in destroying address handle (ibv_destroy_ah rc=%d %s)", ret, strerror(ret));
+            }
+            vc->ah = NULL;
+        }
+
         /* free vc object */
         spawn_free(&vc);
     }
@@ -517,7 +535,7 @@ static int vbuf_init(void)
 {
     int rc = pthread_spin_init(&vbuf_lock, 0);
     if (rc != 0) {
-        SPAWN_ERR("Failed to lock vbuf_lock (pthread_spin_init rc=%d %s)", rc, strerror(rc));
+        SPAWN_ERR("Failed to init vbuf_lock (pthread_spin_init rc=%d %s)", rc, strerror(rc));
         spawn_exit(-1);
     }
 
@@ -527,6 +545,15 @@ static int vbuf_init(void)
 static int vbuf_finalize()
 {
   /* TODO: free regions */
+
+  /* destroy pthread spin lock */
+  int rc = pthread_spin_destroy(&vbuf_lock);
+  if (rc != 0) {
+        SPAWN_ERR("Failed to destory vbuf_lock (pthread_spin_destroy rc=%d %s)", rc, strerror(rc));
+        spawn_exit(-1);
+  }
+
+  return 0;
 }
 
 static int alloc_hugepage_region(int *shmid, void **buffer, int *nvbufs, int buf_size)
@@ -1070,6 +1097,19 @@ static inline vbuf* apprecv_window_retrieve_and_remove(message_queue_t *q)
     return v;
 }
 
+/* returns 1 if a message is in the queue, 0 otherwise */
+static inline int apprecv_window_test(message_queue_t* q)
+{
+    /* get pointer to first item in list */
+    vbuf* v = q->head;
+
+    /* return 0 if it's empty and 1 otherwise */
+    if (v == NULL) {
+        return 0;
+    }
+    return 1;
+}
+
 static inline void mv2_ud_place_recvwin(vbuf *v)
 {
     int ret;
@@ -1329,7 +1369,7 @@ static void ud_process_recv(vbuf *v)
     vc_t* vc = v->vc;
 
     /* get pointer to packet header */
-    packet_header *p = v->pheader;
+    packet_header* p = v->pheader;
 
     /* read ack seq number from incoming packet and clear packets
      * up to and including this number from send and unack'd queues */
@@ -1341,10 +1381,18 @@ static void ud_process_recv(vbuf *v)
          * once all of our outgoing packets are acked and the local
          * side also calls disconnect, we can free the vc */
         if (p->type == PKT_UD_DISCONNECT) {
+            /* free the vbuf */
             vbuf_release(v);
+
+            /* record that remote side has disconnected */
             vc->remote_closed = 1;
+
+            /* decrement the number of active connections using the endpoint */
             g_count_conn--;
+
+            /* free the VC if we can */
             vc_free(vc);
+
             goto fn_exit;
         }
 
@@ -1520,7 +1568,13 @@ static void ud_update_send_credits(int num)
     return;
 }
 
-static int cq_poll()
+/* TODO: dedicate a thread to receive packets and append to queues,
+ * signal main thread that a new packet is ready */
+
+/* polls completion queue and handles any new items,
+ * either receiving messages and appending them to receive queue
+ * or adding connection requests to connect queue */
+static int cq_poll(int* got_recv)
 {
     /* get pointer to completion queue */
     struct ibv_cq* cq = g_hca_info.cq_hndl;
@@ -1537,6 +1591,9 @@ static int cq_poll()
 
     /* count number of completed sends */
     int sendcnt = 0;
+
+    /* count number of new messages */
+    int recvcnt = 0;
 
     /* process entries if we got any */
     int i;
@@ -1560,8 +1617,8 @@ static int cq_poll()
 
         switch (wc->opcode) {
             case IBV_WC_SEND:
-            case IBV_WC_RDMA_READ:
-            case IBV_WC_RDMA_WRITE:
+//            case IBV_WC_RDMA_READ:
+//            case IBV_WC_RDMA_WRITE:
                 /* remember that a send completed to issue more sends later */
                 sendcnt++;
 
@@ -1582,9 +1639,11 @@ static int cq_poll()
             case IBV_WC_RECV:
                 /* we don't have a source id for connect messages */
                 if (p->type != PKT_UD_CONNECT) {
-                    /* src field is valid (unless we have a connect message),
-                     * use src id to get vc */
+                    /* this is not a connect msg, so source id is valid,
+                     * we use the src id to lookup vc */
                     uint64_t index = p->srcid;
+
+                    /* check that the vc index is within range */
                     if (index >= g_ud_vc_info_id) {
                         SPAWN_ERR("Packet conext invalid");
                         vbuf_release(v);
@@ -1605,6 +1664,15 @@ static int cq_poll()
                         v = NULL;
                         break;
                     }
+
+                    /* Note that we don't increase the receive count
+                     * for invalid packets that we throw away.  We
+                     * are triggering receive events for control
+                     * packets.  An optimization would be to ignore
+                     * control packets, as well. */
+
+                    /* increment our receive count */
+                    recvcnt++;
 
                     v->vc     = vc;
                     v->seqnum = p->seqnum;
@@ -1630,12 +1698,19 @@ static int cq_poll()
                         connect_tail->next = elem;
                     }
                     connect_tail = elem;
+
+                    /* For now, we also count a connect message as a
+                     * receive.  An optimization would be count
+                     * connect messages separately. */
+
+                    /* increment our receive count */
+                    recvcnt++;
                 }
 
                 /* decrement the count of number of posted receives,
                  * and if we fall below the low-water limit, post more */ 
                 proc.ud_ctx->num_recvs_posted--;
-                if(proc.ud_ctx->num_recvs_posted < proc.ud_ctx->credit_preserve) {
+                if (proc.ud_ctx->num_recvs_posted < proc.ud_ctx->credit_preserve) {
                     int remaining = rdma_default_max_ud_recv_wqe - proc.ud_ctx->num_recvs_posted;
                     int posted = ud_post_recv_buffers(remaining, proc.ud_ctx);
                     proc.ud_ctx->num_recvs_posted += posted;
@@ -1652,16 +1727,34 @@ static int cq_poll()
         ud_update_send_credits(sendcnt);
     }
 
+    /* indicate to caller whether a new packet was received,
+     * we use this to signal the main thread if it's waiting */
+    *got_recv = 0;
+    if (recvcnt > 0) {
+        *got_recv = 1;
+    }
+
     return ne;
 }
 
 /* empty all events from completion queue queue */
 static inline void cq_drain()
 {
-    int rc = cq_poll();
+    int new_recv = 0;
+    int got_recv;
+    int rc = cq_poll(&got_recv);
     while (rc > 0) {
-        rc = cq_poll();
+        new_recv |= got_recv;
+        rc = cq_poll(&got_recv);
     }
+
+    /* signal the main thread if it's waiting
+     * and we got a new message */
+    if (new_recv && g_recv_flag) {
+        g_recv_flag = 0;
+        pthread_cond_signal(&g_recv_cond);
+    }
+
     return;
 }
 
@@ -1672,8 +1765,6 @@ static inline void cq_drain()
 /* this is the function executed by the communication progress thread */
 static void* cm_timeout_handler(void *arg)
 {
-    int nspin = 0;
-
     /* define sleep time between waking and checking for events */
     cm_timeout.tv_sec = rdma_ud_progress_timeout / 1000000;
     cm_timeout.tv_nsec = (rdma_ud_progress_timeout - cm_timeout.tv_sec * 1000000) * 1000;
@@ -1684,13 +1775,6 @@ static void* cm_timeout_handler(void *arg)
         //comm_unlock();
         nanosleep(&cm_timeout, &cm_remain);
         //comm_lock();
-
-#if 0
-        /* spin poll for some time to look for new events */
-        for (nspin = 0; nspin < rdma_ud_progress_spin; nspin++) {
-            cq_poll();
-        }
-#endif
 
         /* resend messages and send acks if we're due */
 //        long time = spawn_clock_time_us();
@@ -1718,6 +1802,70 @@ static void* cm_timeout_handler(void *arg)
 //            rdma_ud_last_check = spawn_clock_time_us();
 //        }
     }
+
+    return NULL;
+}
+
+/* this is the function executed by the communication progress thread */
+static void* cm_recv_handler(void *arg)
+{
+    /* get pointer to our HCA info structure */
+    mv2_hca_info_t* hca_info = &g_hca_info;
+
+    /* grab the lock so we own it when we specify that we should
+     * be notified for any CQ event */
+    comm_lock();
+
+    /* loop forever responding to CQ events */
+    while(1) {
+        /* TODO: do we want to set the solicited only bit? */
+
+        /* indicate to completion queue that we want to be notified
+         * of new events */
+        int solicited_only = 0;
+        int rc = ibv_req_notify_cq(hca_info->cq_hndl, solicited_only);
+        if (rc != 0) {
+            SPAWN_ERR("failed to request notification for cq (ibv_req_notify_cq rc=%d %s)", rc, strerror(rc));
+            exit(-1);
+        }
+
+        /* release the lock before we starting waiting */
+        comm_unlock();
+
+        /* wait for an event */
+        struct ibv_cq* cq;
+        void* context;
+        rc = ibv_get_cq_event(hca_info->comp_channel, &cq, &context);
+        if (rc != 0) {
+            SPAWN_ERR("failed to wait for event (ibv_get_cq_event errno=%d %s)", errno, strerror(errno));
+            exit(-1);
+        }
+
+        /* grab the lock again */
+        comm_lock();
+
+        /* TODO: we need to be sure to ack all events before
+         * the CQ can be destroyed */
+
+        /* TODO: batch up multiple events and ack at same time */
+
+        /* acknowledge the event */
+        ibv_ack_cq_events(cq, 1);
+
+        /* Note that even though we got an event that something is
+         * ready, the CQ may already be empty because the timeout
+         * thread may have already drained it before we can get
+         * the lock */
+
+        /* grab the lock, drain the cq, and release the lock */
+        cq_drain();
+
+        /* if the shutdown signal is set, bail out */
+        // break;
+    }
+
+    /* release the lock before we exit */
+    comm_unlock();
 
     return NULL;
 }
@@ -1773,14 +1921,20 @@ static inline int packet_send(
 /* blocks until packet comes in on specified VC */
 static vbuf* packet_read(vc_t* vc)
 {
+#if 0
     /* eagerly pull all events from completion queue */
     cq_drain();
+#endif
 
     /* look for entry in apprecv queue */
     vbuf* v = apprecv_window_retrieve_and_remove(&vc->app_recv_window);
     while (v == NULL) {
-        /* TODO: at this point, we should block for incoming event */
+        /* nothing ready on our receive queue,
+         * wait to be signaled for a new message */
+        g_recv_flag = 1;
+        pthread_cond_wait(&g_recv_cond, &comm_lock_object);
 
+#if 0
         /* release the lock for some time to let other threads make
          * progress */
         comm_unlock();
@@ -1789,6 +1943,7 @@ static vbuf* packet_read(vc_t* vc)
 
         /* eagerly pull all events from completion queue */
         cq_drain();
+#endif
 
         /* look for entry in apprecv queue */
         v = apprecv_window_retrieve_and_remove(&vc->app_recv_window);
@@ -1800,19 +1955,27 @@ static vbuf* packet_read(vc_t* vc)
  * extracts element and returns its vbuf */
 static vbuf* recv_connect_message()
 {
+#if 0
     /* eagerly pull all events from completion queue */
     cq_drain();
+#endif
 
     /* wait until we see at item at head of connect queue */
     while (connect_head == NULL) {
         /* TODO: at this point, we should block for incoming event */
+        /* nothing ready on our connect queue,
+         * wait to be signaled for a new message */
+        g_recv_flag = 1;
+        pthread_cond_wait(&g_recv_cond, &comm_lock_object);
 
+#if 0
         comm_unlock();
 //        nanosleep(&cm_timeout, &cm_remain);
         comm_lock();
 
         /* eagerly pull all events from completion queue */
         cq_drain();
+#endif
     }
 
     /* get pointer to element */
@@ -1868,7 +2031,7 @@ static int recv_accept_message(vc_t* vc)
  ******************************************/
 
 /* Get HCA parameters */
-static int hca_open(int devnum, mv2_hca_info_t *hca_info)
+static int hca_open(int devnum, mv2_hca_info_t* hca_info)
 {
     int i;
 
@@ -2107,9 +2270,6 @@ static spawn_net_endpoint* ud_ctx_create()
         return SPAWN_NET_ENDPOINT_NULL;
     }
 
-    /* allocate vbufs */
-//    allocate_ud_vbufs(g_hca_info.pd, RDMA_DEFAULT_NUM_VBUFS);
-
     /* allocate UD context structure */
     ud_ctx_t* ud_ctx = (ud_ctx_t*) SPAWN_MALLOC(sizeof(ud_ctx_t));
 
@@ -2186,8 +2346,14 @@ static spawn_net_endpoint* ud_ctx_create()
         SPAWN_ERR("Failed to block SIGCHLD (pthread_sigmask rc=%d %s)", ret, strerror(ret));
     }
 
-    /* start comm thread */
-    pthread_create(&comm_thread, &attr, cm_timeout_handler, NULL);
+    /* initialize the condition variable and flag, do this before
+     * creating threads that access these variables */
+    g_recv_flag = 0;
+    pthread_cond_init(&g_recv_cond, NULL);
+
+    /* start receive and resend timeout threads */
+    pthread_create(&timeout_thread, &attr, cm_timeout_handler, NULL);
+    pthread_create(&recv_thread,    &attr, cm_recv_handler,    NULL);
 
     /* reenable SIGCHLD in main thread */
     ret = pthread_sigmask(SIG_UNBLOCK, &sigmask, NULL);
@@ -2207,12 +2373,30 @@ static void ud_ctx_destroy(spawn_net_endpoint** pep)
     /* extract context from endpoint */
     ud_ctx_t* ud_ctx = proc.ud_ctx;
 
-    pthread_cancel(comm_thread);
+    /* TODO: send a shutdown message to force the recv_thread
+     * to get an event and thus wake up, then call pthread_join
+     * here instead */
+
+    /* shut down our threads */
+    pthread_cancel(timeout_thread);
+    pthread_cancel(recv_thread);
+
+    /* delete the condition variable */
+    pthread_cond_destroy(&g_recv_cond);
+
+    /* destroy the lock */
+    pthread_mutex_destroy(&comm_lock_object);
 
     /* destroy UD QP if we have one */
     if (ud_ctx->qp) {
         ibv_destroy_qp(ud_ctx->qp);
     }
+
+//    mv2_hca_info_t* hca_info = &g_hca_info;
+//    ibv_destroy_cq(hca_info->cq_hndl);
+//    ibv_destroy_comp_channel(hca_info->comp_channel);
+//    ibv_dealloc_pd(hca_info->pd);
+//    ibv_close_device(hca_info->context);
 
     /* now free context data structure */
     spawn_free(&ud_ctx);
@@ -2224,6 +2408,8 @@ static void ud_ctx_destroy(spawn_net_endpoint** pep)
     spawn_free(pep);
 
     spawn_free(&g_ud_vc_info);
+
+    //vbuf_finalize();
 
     return;
 }
@@ -2469,6 +2655,9 @@ int spawn_net_disconnect_ib(spawn_net_channel** pch)
     /* mark vc as closed from local side */
     vc->local_closed = 1;
 
+    /* decrement number of active connections using endpoint */
+    g_count_conn--;
+
     /* release vc if we can */
     vc_free(vc);
 
@@ -2570,4 +2759,66 @@ int spawn_net_write_ib(const spawn_net_channel* ch, const void* buf, size_t size
     comm_unlock();
 
     return ret;
+}
+
+/* this waits until one of the specified channels has a message
+ * pending, and then it sets index to the index of that channel,
+ * index is set to -1 if none of the channels are valid */
+int spawn_net_waitany_ib(int num, const spawn_net_channel** chs, int* index)
+{
+    /* bail out if channel array is empty */
+    if (chs == NULL) {
+        return SPAWN_FAILURE;
+    }
+
+    comm_lock();
+
+    /* loop until a message is available */
+    while (1) {
+        /* set flag to indicate that all channels are NULL */
+        int valid = 0;
+
+        /* cycle over every channel and check whether a message is ready */
+        int i;
+        for (i = 0; i < num; i++) {
+            /* get pointer to channel */
+            const spawn_net_channel* ch = chs[i];
+
+            /* skip NULL channels */
+            if (ch == SPAWN_NET_CHANNEL_NULL) {
+                continue;
+            }
+
+            /* get pointer to vc from channel data field */
+            vc_t* vc = (vc_t*) ch->data;
+            if (vc == NULL) {
+                continue;
+            }
+
+            /* we found at least one non-NULL channel */
+            valid = 1;
+
+            /* look for entry in apprecv queue */
+            int pending = apprecv_window_test(&vc->app_recv_window);
+            if (pending) {
+                /* we found a channel with a pending message,
+                 * set output parameter and exit */
+                *index = i;
+                comm_unlock();
+                return SPAWN_SUCCESS;
+            }
+        }
+
+        /* if all channels are NULL, we can't wait on any of them */
+        if (! valid) {
+            *index = -1;
+            comm_unlock();
+            return SPAWN_SUCCESS;
+        }
+
+        /* we have at least one valid channel, but nothing is ready
+         * on any channels, wait to be signaled for a new message */
+        g_recv_flag = 1;
+        pthread_cond_wait(&g_recv_cond, &comm_lock_object);
+    }
 }

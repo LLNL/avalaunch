@@ -22,7 +22,7 @@ launcher_SOURCES = \
   timer_util.c timer_util.h\
   strmap.c strmap.h \
   lwgrp.c lwgrp.h
-launcher_CFLAGS = -pthread -Wall -g
+launcher_CFLAGS = -DHAVE_SPAWN_NET_IBUD -pthread -Wall -g
 launcher_LDFLAGS = -lpthread -lrt
 launcher_LDADD = hostfile/libhostfile.a
 
@@ -37,3 +37,4 @@ libpmi_la_SOURCES = \
   mpir.c \
   ring.c ring.h \
   pmi.c pmi.h
+libpmi_la_CFLAGS = -DHAVE_SPAWN_NET_IBUD

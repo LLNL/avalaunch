@@ -259,6 +259,7 @@ typedef struct vbuf
 #define PKT_UD_DISCONNECT (0x82)
 #define PKT_UD_ACK        (0x83)
 #define PKT_UD_DATA       (0x04)
+#define PKT_UD_SHUTDOWN   (0x85)
 
 /* hca_info */
 typedef struct _mv2_hca_info_t {

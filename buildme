@@ -8,9 +8,9 @@ export CFLAGS="-g -O0"
 
 #autoreconf --install --force
 
-#./configure \
-#  --prefix=`pwd`/install \
-#  LDFLAGS="-libverbs -lrdmacm" \
+#/configure \
+# --prefix=`pwd`/install \
+# LDFLAGS="-libverbs -lrdmacm" \
 #  --disable-silent-rules
 
 make clean
