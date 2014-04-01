@@ -86,6 +86,12 @@ int PMI_Init( int *spawned )
     return PMI_FAIL;
   }
 
+  /* send PMI_INIT message to server */
+  strmap* init = strmap_new();
+  strmap_set(init, "MSG", "PMI_INIT");
+  spawn_net_write_strmap(server_ch, init);
+  strmap_delete(&init);
+
   /* read parameters from server */
   strmap* params = strmap_new();
   spawn_net_read_strmap(server_ch, params);
@@ -135,7 +141,10 @@ int PMI_Finalize( void )
   strmap_delete(&put);
 
   /* send "FINALIZE" to server */
-  spawn_net_write_str(server_ch, command_finalize);
+  strmap* final = strmap_new();
+  strmap_set(final, "MSG", "PMI_FINALIZE");
+  spawn_net_write_strmap(server_ch, final);
+  strmap_delete(&final);
 
   /* disconnect from parent */
   spawn_net_disconnect(&server_ch);
@@ -213,6 +222,14 @@ int PMI_Get_appnum( int *appnum )
 int PMI_Abort(int exit_code, const char error_msg[])
 {
   /* TODO: send "ABORT" message to server */
+  if (server_ch != SPAWN_NET_CHANNEL_NULL) {
+    strmap* final = strmap_new();
+    strmap_set(final,  "MSG", "PMI_ABORT");
+    strmap_setf(final, "CODE=%d", exit_code);
+    strmap_set(final,  "TEXT", error_msg);
+    spawn_net_write_strmap(server_ch, final);
+    strmap_delete(&final);
+  }
 
   /* function prototype requires us to return something */
   return PMI_SUCCESS;
@@ -367,7 +384,10 @@ int PMI_Barrier( void )
   }
 
   /* send "BARRIER" message to server */
-  spawn_net_write_str(server_ch, command_barrier);
+  strmap* map = strmap_new();
+  strmap_set(map, "MSG", "PMI_BARRIER");
+  spawn_net_write_strmap(server_ch, map);
+  strmap_delete(&map);
 
   /* send values in commit */
   spawn_net_write_strmap(server_ch, commit);
@@ -376,9 +396,10 @@ int PMI_Barrier( void )
   strmap_delete(&commit);
   commit = strmap_new();
 
-  /* wait for signal from server to complete barrier */
-  char* cmd = spawn_net_read_str(server_ch);
-  spawn_free(&cmd);
+  /* wait for PMI_BCAST message from server to complete barrier */
+  map = strmap_new();
+  spawn_net_read_strmap(server_ch, map);
+  strmap_delete(&map);
 
   return PMI_SUCCESS; 
 }
@@ -411,11 +432,17 @@ int PMI_KVS_Get( const char kvsname[], const char key[], char value[], int lengt
   }
 
   /* send request to server for key */
-  spawn_net_write_str(server_ch, command_get);
-  spawn_net_write_str(server_ch, key);
+  strmap* map = strmap_new();
+  strmap_set(map, "MSG", "PMI_GET");
+  strmap_set(map, "KEY", key);
+  spawn_net_write_strmap(server_ch, map);
+  strmap_delete(&map);
 
   /* get reply from server */
-  char* str = spawn_net_read_str(server_ch);
+  map = strmap_new();
+  spawn_net_read_strmap(server_ch, map);
+
+  char* str = strmap_get(map, "VAL");
   if (str == NULL) {
     /* failed to find the key */
     return PMI_FAIL;
@@ -424,7 +451,7 @@ int PMI_KVS_Get( const char kvsname[], const char key[], char value[], int lengt
   /* check that the user's buffer is large enough */
   int len = strlen(str) + 1;
   if (length < len) {
-    spawn_free(&str);
+    strmap_delete(&map);
     return PMI_ERR_INVALID_LENGTH;
   }
 
@@ -432,7 +459,7 @@ int PMI_KVS_Get( const char kvsname[], const char key[], char value[], int lengt
   strcpy(value, str);
 
   /* free the string */
-  spawn_free(&str);
+  strmap_delete(&map);
 
   return PMI_SUCCESS;
 }

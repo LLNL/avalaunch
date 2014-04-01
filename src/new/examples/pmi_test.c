@@ -77,8 +77,48 @@ int main(int argc, char* argv[])
     fflush(stdout);
   }
 
-  //printf("Rank %d Left=%s Right=%s\n", rank, leftval, rightval);
-  //fflush(stdout);
+//  printf("Rank %d Left: %s=%s Right: %s=%s\n", rank, leftkey, leftval, rightkey, rightval);
+//  fflush(stdout);
+
+  /* create key and value */
+  snprintf(key, key_len, "key2-%d", rank);
+  snprintf(val, val_len, "%d", rank);
+
+  rc = PMI_KVS_Put(kvs, key, val);
+  if (rc != PMI_SUCCESS) {
+    printf("Rank %d PMI_KVS_Put rc=%d\n", rank, rc);
+    fflush(stdout);
+  }
+
+  rc = PMI_KVS_Commit(kvs);
+  if (rc != PMI_SUCCESS) {
+    printf("Rank %d PMI_KVS_Commit rc=%d\n", rank, rc);
+    fflush(stdout);
+  }
+
+  rc = PMI_Barrier();
+  if (rc != PMI_SUCCESS) {
+    printf("Rank %d PMI_KVS_Barrier rc=%d\n", rank, rc);
+    fflush(stdout);
+  }
+
+  snprintf(leftkey,  key_len, "key2-%d", (rank + ranks - 1) % ranks);
+  snprintf(rightkey, key_len, "key2-%d", (rank + ranks + 1) % ranks);
+
+  rc = PMI_KVS_Get(kvs, leftkey, leftval, val_len);
+  if (rc != PMI_SUCCESS) {
+    printf("Rank %d PMI_KVS_Get rc=%d\n", rank, rc);
+    fflush(stdout);
+  }
+
+  rc = PMI_KVS_Get(kvs, rightkey, rightval, val_len);
+  if (rc != PMI_SUCCESS) {
+    printf("Rank %d PMI_KVS_Get rc=%d\n", rank, rc);
+    fflush(stdout);
+  }
+
+//  printf("Rank %d Left: %s=%s Right: %s=%s\n", rank, leftkey, leftval, rightkey, rightval);
+//  fflush(stdout);
 
   free(leftkey);
   free(rightkey);
