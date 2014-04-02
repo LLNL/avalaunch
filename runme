@@ -14,6 +14,9 @@ export MV2_SPAWN_DEGREE=64  # degree of k-ary tree
 export MV2_SPAWN_PPN=1   # number of app procs per node
 
 export MV2_SPAWN_EXE=/bin/env
+export MV2_SPAWN_EXE=/bin/hostname
+export MV2_SPAWN_EXE=echo
+export MV2_SPAWN_ARGS="-e -n hi there homey"
 
 #export MV2_SPAWN_EXE=src/new/examples/pmi_test
 #export MV2_SPAWN_PMI=1   # whether to enable PMI

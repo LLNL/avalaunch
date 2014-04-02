@@ -281,6 +281,73 @@ spawn_path_search (const char * command)
     return path;
 }
 
+/*******************************
+ * Argument and environment variable routines
+ ******************************/
+
+/* return number of arguments set in map */
+static int args_num(strmap* map)
+{
+    int num = 0;
+    const char* count = strmap_get(map, "ARGS");
+    if (count != NULL) {
+        num = atoi(count);
+    }
+    return num;
+}
+
+/* record program arguments in strmap */
+static void args_capture(strmap* map, const char* argstr)
+{
+    /* initialize our id to current number of args */
+    int num = args_num(map);
+
+    /* make a copy of the argument string so we can manipulate it */
+    char* copy = strdup(argstr);
+
+    /* TODO: tokenize argstring by parsing quotes and such */
+    char* arg = strtok(copy, " \t");
+
+    /* add each token as a new argument */
+    while (arg != NULL) {
+        /* add argument */
+        strmap_setf(map, "ARG%d=%s", num, arg);
+        num++;
+
+        /* get next token */
+        arg = strtok(NULL, " \t");
+    }
+
+    /* record the count */
+    strmap_setf(map, "ARGS=%d", num);
+
+    /* free our copy */
+    spawn_free(&copy);
+
+    return;
+}
+
+/* append all variables in src to dst */
+static void args_merge(strmap* dst, const strmap* src)
+{
+    /* get number of variables in each map */
+    int dst_num = args_num(dst);
+    int src_num = args_num(src);
+
+    /* lookup key/value from src and store in dst*/
+    int i;
+    for (i = 0; i < src_num; i++) {
+        const char* keyval = strmap_getf(src, "ARG%d", i);
+        strmap_setf(dst, "ARG%d=%s", dst_num, keyval);
+        dst_num++;
+    }
+
+    /* update number in dst */
+    strmap_setf(dst, "ARGS=%d", dst_num);
+
+    return;
+}
+
 extern char** environ;
 
 /* return number of ENV variables set in map */
@@ -633,12 +700,7 @@ exec_direct (const strmap * params, const char * cwd, const char * exe,
     }
 
     /* determine number of arguments */
-    const char* args_str = strmap_get(argmap, "ARGS");
-    if (args_str == NULL) {
-        SPAWN_ERR("Failed to read ARGS key");
-        return 1;
-    }
-    int args = atoi(args_str);
+    int args = args_num(argmap);
 
     /* allocate memory for argv array (one extra for terminating NULL) */
     char** argv = (char**) SPAWN_MALLOC((args + 1) * sizeof(char*));
@@ -650,13 +712,7 @@ exec_direct (const strmap * params, const char * cwd, const char * exe,
     argv[args] = (char*) NULL;
 
     /* determine number of environment variables */
-    const char* envs_str = strmap_get(envmap, "ENVS");
-    if (envs_str == NULL) {
-        SPAWN_ERR("Failed to read ENVS key");
-        spawn_free(&argv);
-        return 1;
-    }
-    int envs = atoi(envs_str);
+    int envs = environ_num(envmap);
 
     /* allocate memory for envp array (one extra for terminating NULL) */
     char** envp = (char**) SPAWN_MALLOC((envs + 1) * sizeof(char*));
@@ -2798,6 +2854,9 @@ process_group_start (session * s, const strmap * params)
         strmap_setf(argmap, "ARG0=%s", app_exe);
         strmap_setf(argmap, "ARGS=%d", 1);
 
+        /* copy rest of application args from params */
+        args_merge(argmap, params);
+
         /* create map for env vars */
         strmap* envmap = strmap_new();
 
@@ -3666,7 +3725,16 @@ session_start (session * s)
             strmap_set(appmap, "BIN_BCAST", "0");
         }
 
-environ_capture(appmap);
+        /* TODO: get args from argv or hostfile */
+
+        /* set command line arguments to be passed to app procs */
+        value = getenv("MV2_SPAWN_ARGS");
+        if (value != NULL) {
+            args_capture(appmap, value);
+        }
+
+        /* set environment variables for app procs */
+        environ_capture(appmap);
 
         /* print map for debugging */
         printf("Application parameters map:\n");
