@@ -39,3 +39,4 @@ libpmi_la_SOURCES = \
   ring.c ring.h \
   pmi.c pmi.h
 libpmi_la_CFLAGS = -DHAVE_SPAWN_NET_IBUD
+libpmi_la_LDFLAGS = -lpthread -lrt
