@@ -19,6 +19,14 @@ int ring_create(
   char** right      /* OUT - address of right rank, caller should free() */
 );
 
+int ring_create2(
+  const char* addr, /* IN  - address of caller */
+  uint64_t* rank,   /* OUT - rank of caller */
+  uint64_t* ranks,  /* OUT - number of ranks in job */
+  char** left,      /* OUT - address of left rank, caller should free() */
+  char** right      /* OUT - address of right rank, caller should free() */
+);
+
 #if defined(__cplusplus)
 }
 #endif

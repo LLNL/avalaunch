@@ -20,7 +20,7 @@ int main(int argc, char* argv[])
   /* get addresses of left and right procs */
   uint64_t rank, ranks;
   char *left, *right;
-  int rc = ring_create(ep_name, &rank, &ranks, &left, &right);
+  int rc = ring_create2(ep_name, &rank, &ranks, &left, &right);
 
 #if 0
   /* print what we got */
