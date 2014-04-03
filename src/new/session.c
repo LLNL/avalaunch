@@ -1356,15 +1356,15 @@ static char *
 bcast_file (const char * file, const spawn_tree * t, const strmap* params)
 {
     /* root spawn process reads file size */
-    ssize_t bufsize;
     ssize_t bcast_size = 0;
 
     /* check for the chunk size to be used for BIN_BCAST */
     const char* use_bin_bcast_chunk_sz_str = strmap_get(params, "BIN_BCAST_CHUNK_SZ");
     size_t use_bin_bcast_chunk_sz = atoi(use_bin_bcast_chunk_sz_str) * 1024 * 1024;
 
+    /* get file size */
+    ssize_t bufsize;
     if (t->rank == 0) {
-        /* get file size */
         bufsize = get_file_size(file);
     }
     bcast(&bufsize, sizeof(ssize_t), t);
@@ -1387,11 +1387,10 @@ bcast_file (const char * file, const spawn_tree * t, const strmap* params)
 
     /* bcast bytes from root with appropriate chunking */
     while (bcast_size < bufsize) {
-        fprintf(stdout,"Bcasted %ldMB\n", ((bcast_size) / (1024 * 1024 )));
+//        fprintf(stdout,"Bcasted %ldMB\n", ((bcast_size) / (1024 * 1024 )));
         bcast((buf+bcast_size), use_bin_bcast_chunk_sz, t);
         bcast_size += use_bin_bcast_chunk_sz;
     }
-
                 
     /* write file to ramdisk */
     char* newfile = write_to_ramdisk(file, (char*)buf, bufsize);
@@ -2486,9 +2485,28 @@ static void handle_pmi_ring_out(
         strmap_set(maps[i], "GROUP", pg->name);
     }
 
-    /* iterate over all maps and set left neighbor */
+    /* TODO: use int64_t for count */
+    /* get our starting count from the message */
+    int count = 0;
+    const char* count_str = strmap_get(msg, "COUNT");
+    if (count_str != NULL) {
+        count = atoi(count_str);
+    } else {
+        /* error */
+    }
+
+    /* iterate over all maps and set count and left neighbor */
     const char* left = strmap_get(msg, "LEFT");
     for (i = 0; i < total_count; i++) {
+        /* store current count in output map */
+        strmap_setf(maps[i], "COUNT=%d", count);
+
+        /* if this map has a count, add it to our running total */
+        const char* count_str = strmap_getf(pg->ring_map, "COUNT%d", i);
+        if (count_str != NULL) {
+            count += atoi(count_str);
+        }
+
         /* if left is set, record its value in map to this child */
         if (left != NULL) {
             strmap_set(maps[i], "LEFT", left);
@@ -2600,15 +2618,21 @@ static void handle_pmi_ring_in(
     }
 
     /* record left address in ring map (if it exists) */
-    const char* left = strmap_get(msg, "LEFT");
-    if (left != NULL) {
-        strmap_setf(pg->ring_map, "LEFT%d=%s", ring_id, left);
+    const char* value = strmap_get(msg, "LEFT");
+    if (value != NULL) {
+        strmap_setf(pg->ring_map, "LEFT%d=%s", ring_id, value);
     }
 
     /* record right address in ring map (if it exists) */
-    const char* right = strmap_get(msg, "RIGHT");
-    if (right != NULL) {
-        strmap_setf(pg->ring_map, "RIGHT%d=%s", ring_id, right);
+    value = strmap_get(msg, "RIGHT");
+    if (value != NULL) {
+        strmap_setf(pg->ring_map, "RIGHT%d=%s", ring_id, value);
+    }
+
+    /* record count in ring map (if it exists) */
+    value = strmap_get(msg, "COUNT");
+    if (value != NULL) {
+        strmap_setf(pg->ring_map, "COUNT%d=%s", ring_id, value);
     }
 
     /* if we have received ring input message from each app process and
@@ -2638,6 +2662,16 @@ static void handle_pmi_ring_in(
             }
         }
 
+        /* TODO: use int64_t for count */
+        /* total our count values across all children */
+        int count = 0;
+        for (i = 0; i < total_count; i++) {
+            const char* count_str = strmap_getf(pg->ring_map, "COUNT%d", i);
+            if (count_str != NULL) {
+                count += atoi(count_str);
+            }
+        }
+
         /* send to parent if we have one, otherwise create ring output
          * message and start the broadcast */
         if (t->rank > 0) {
@@ -2654,6 +2688,7 @@ static void handle_pmi_ring_in(
             if (rightmost != NULL) {
                 strmap_set(map, "RIGHT", rightmost);
             }
+            strmap_setf(map, "COUNT=%d", count);
             spawn_net_write_strmap(ch, map);
             strmap_delete(&map);
         } else {
@@ -2672,6 +2707,9 @@ static void handle_pmi_ring_in(
             if (leftmost != NULL) {
                 strmap_set(map, "RIGHT", leftmost);
             }
+
+            /* we start the top of the tree at offset 0 */
+            strmap_set(map, "COUNT", "0");
 
             /* simulate reception of a ring output msg */
             handle_pmi_ring_out(s, pg, -1, map);

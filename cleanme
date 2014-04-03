@@ -3,12 +3,14 @@ use strict;
 
 #num=75
 my $num = 646;
-my $hosts = `/usr/bin/glob-hosts -s $num -h 'apex[41-231,233-240,586-719,726-859,861-863,870-961,1080-1087,1089-1147,1249-1264]'`;
+#my $hosts = `/usr/bin/glob-hosts -s $num -h 'apex[41-231,233-240,586-719,726-859,861-863,870-961,1080-1087,1089-1147,1249-1264]'`;
+my $hosts = $ENV{SLURM_NODELIST};
 chomp $hosts;
 print "$hosts\n";
 
 my $rsh = `pdsh -w $hosts 'ps auxm | grep moody20 | grep rsh | grep -v grep'`;
-my $pmi = `pdsh -w $hosts 'ps auxm | grep moody20 | grep pmi_init | grep -v grep'`;
+my $pmi = `pdsh -w $hosts 'ps auxm | grep moody20 | grep pmi_test | grep -v grep'`;
+my $ring = `pdsh -w $hosts 'ps auxm | grep moody20 | grep ring_test | grep -v grep'`;
 my $launch = `pdsh -w $hosts 'ps auxm | grep moody20 | grep launcher | grep -v grep'`;
 
 my @rsh_lines = split("\n", $rsh);
@@ -19,6 +21,21 @@ foreach my $line (@rsh_lines) {
 my @pmi_lines = split("\n", $pmi);
 foreach my $line (@pmi_lines) {
   print "PMI: $line\n";
+}
+
+my @ring_lines = split("\n", $ring);
+foreach my $line (@ring_lines) {
+  print "RING: $line\n";
+  if ($line =~ /^([\w\d]+):\s+[\w\d]+\s+(\d+)\s+/) {
+    my $host = $1;
+    my $pid  = $2;
+    print "rsh $host 'kill $pid'\n";
+    `rsh $host 'kill $pid'`;
+    if ($? != 0) {
+      print "rsh $host 'kill -9 $pid'\n";
+      `rsh $host 'kill -9 $pid'`;
+    }
+  }
 }
 
 my @launch_lines = split("\n", $launch);

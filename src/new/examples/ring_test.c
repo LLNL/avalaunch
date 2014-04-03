@@ -20,6 +20,7 @@ int main(int argc, char* argv[])
   /* get addresses of left and right procs */
   uint64_t rank, ranks;
   char *left, *right;
+  //int rc = ring_create(ep_name, &rank, &ranks, &left, &right);
   int rc = ring_create2(ep_name, &rank, &ranks, &left, &right);
 
 #if 0
@@ -30,6 +31,7 @@ int main(int argc, char* argv[])
   fflush(stdout);
 #endif
 
+#if 1
   /* create to log(N) tasks on left and right sides */
   lwgrp* group = lwgrp_create(ranks, rank, ep_name, left, right, ep);
 
@@ -49,6 +51,7 @@ int main(int argc, char* argv[])
   strmap_setf(map, "%d=%s", rank, ep_name);
 
   lwgrp_allgather_strmap(map, group);
+#endif
 
 #if 0
   if (rank == 0) {
@@ -61,10 +64,12 @@ int main(int argc, char* argv[])
   }
 #endif
 
+#if 1
   strmap_delete(&map);
 
   /* disconnect and free group */
   lwgrp_free(&group);
+#endif
 
   spawn_net_close(&ep);
 
