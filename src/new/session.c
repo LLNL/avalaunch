@@ -135,6 +135,7 @@ typedef enum pmi_states {
     PMI_STATE_INIT = 0,
     PMI_STATE_NORMAL,
     PMI_STATE_BARRIER,
+    PMI_STATE_RING,
     PMI_STATE_FINAL,
 } pmi_state;
 
@@ -153,9 +154,11 @@ typedef struct process_group_struct {
     /* PMI-specific things */
     pmi_state* states;   /* records PMI state of each child */
     uint64_t barrier_count;  /* number of children that have sent barrier msg */
+    uint64_t ring_count;     /* number of children that have sent ring input msg */
     uint64_t finalize_count; /* number of children that have sent finalize msg */
     strmap* commit_map; /* holds keys committed by children but not yet stored in global */
     strmap* global_map; /* holds committed keys after barrier */
+    strmap* ring_map;   /* records data for a ring exchange */
 } process_group;
 
 /* TODO: need to map pid to process group */
@@ -2079,6 +2082,7 @@ process_group_new()
     pg->chs    = NULL;
     pg->commit_map = strmap_new();
     pg->global_map = strmap_new();
+    pg->ring_map   = strmap_new();
     return pg;
 }
 
@@ -2108,6 +2112,7 @@ process_group_delete (process_group ** ppg)
         /* delete PMI resources */
         strmap_delete(&pg->commit_map);
         strmap_delete(&pg->global_map);
+        strmap_delete(&pg->ring_map);
     }
 
     /* free process group structure */
@@ -2339,10 +2344,6 @@ static void handle_pmi_barrier(
             /* merge key/values into our global map */
             strmap_merge(pg->global_map, pg->commit_map);
 
-//printf("global\n");
-//strmap_print(pg->global_map);
-//printf("\n");
-
             /* delete bcast message */
             strmap_delete(&map);
 
@@ -2457,6 +2458,233 @@ static void handle_pmi_get(
 }
 
 /* given an input message of:
+ *   MSG=PMI_RING_OUT, LEFT=addr1, RIGHT=addr2
+ * create and send messages to children */
+static void handle_pmi_ring_out(
+    const session* s,
+    process_group* pg,
+    int child_id,
+    const strmap* msg)
+{
+    /* get pointer to spawn tree */
+    spawn_tree* t = s->tree;
+
+    /* compute number of procs we need to send to */
+    int total_count = pg->num + t->children;
+
+    /* TODO: if we have a lot of children, these double loops
+     * could be costly, it may be better to allocate maps
+     * for each children instead */
+    /* allocate a map for each child */
+    strmap** maps = (strmap**) SPAWN_MALLOC(total_count * sizeof(strmap*));
+
+    /* initialize messages to all children */
+    int i;
+    for (i = 0; i < total_count; i++) {
+        maps[i] = strmap_new();
+        strmap_set(maps[i], "MSG", "PMI_RING_OUT");
+        strmap_set(maps[i], "GROUP", pg->name);
+    }
+
+    /* iterate over all maps and set left neighbor */
+    const char* left = strmap_get(msg, "LEFT");
+    for (i = 0; i < total_count; i++) {
+        /* if left is set, record its value in map to this child */
+        if (left != NULL) {
+            strmap_set(maps[i], "LEFT", left);
+        }
+
+        /* get right address from child, if it exists,
+         * it will be the left neighbor of the next child,
+         * otherwise, reuse the current left value */
+        const char* next = strmap_getf(pg->ring_map, "RIGHT%d", i);
+        if (next != NULL) {
+            left = next;
+        }
+    }
+
+    /* now set all right values (iterate backwards through children) */
+    const char* right = strmap_get(msg, "RIGHT");
+    for (i = (total_count - 1); i >= 0; i--) {
+        /* if right is set, record its value in map to this child */
+        if (right != NULL) {
+            strmap_set(maps[i], "RIGHT", right);
+        }
+
+        /* get left address from child, if it exists,
+         * it will be the right neighbor of the next child,
+         * otherwise, reuse the current right value */
+        const char* next = strmap_getf(pg->ring_map, "LEFT%d", i);
+        if (next != NULL) {
+            right = next;
+        }
+    }
+
+    /* send messages to children in spawn tree,
+     * we do this first to get the message down
+     * the tree quickly */
+    for (i = 0; i < t->children; i++) {
+        /* get channel to spawn child */
+        spawn_net_channel* ch = t->child_chs[i];
+
+        /* send the map */
+        int ring_id = pg->num + i;
+        spawn_net_write_strmap(ch, maps[ring_id]);
+    }
+
+    /* now send messages to children app procs,
+     * and set their state back to normal */
+    for (i = 0; i < pg->num; i++) {
+        spawn_net_channel* ch = pg->chs[i];
+        spawn_net_write_strmap(ch, maps[i]);
+        pg->states[i] = PMI_STATE_NORMAL;
+    }
+
+    /* delete maps */
+    for (i = 0; i < total_count; i++) {
+        strmap_delete(&maps[i]);
+    }
+    spawn_free(&maps);
+
+    /* reset our ring count */
+    pg->ring_count = 0;
+
+    /* clear the ring map */
+    strmap_delete(&pg->ring_map);
+    pg->ring_map = strmap_new();
+
+    return;
+}
+
+/* given an input message of:
+ *   MSG=PMI_RING_IN, LEFT=addr1, RIGHT=addr2
+ * wait for all such messages from all children
+ * then send summary LEFT/RIGHT message to parent */
+static void handle_pmi_ring_in(
+    const session* s,
+    process_group* pg,
+    int child_id,
+    const strmap* msg,
+    int app_proc)
+{
+    /* get pointer to spawn tree */
+    spawn_tree* t = s->tree;
+
+    /* get channel to process that sent this message */
+    spawn_net_channel* ch;
+    int ring_id;
+    if (app_proc) {
+        /* message came from application process, check its state,
+         * it's an error to get a PMI_RING_IN message if we're in
+         * any state other than PMI_STATE_NORMAL */
+        int state = (int) pg->states[child_id];
+        if (state != PMI_STATE_NORMAL) {
+            SPAWN_ERR("Recevied PMI_BARRIER message in invalid state=%d", state);
+        }
+
+        /* update state of child */
+        pg->states[child_id] = PMI_STATE_RING;
+
+        /* get channel for this message */
+        ch = pg->chs[child_id];
+
+        /* compute ring id for this message */
+        ring_id = child_id;
+    } else {
+        /* message came from spawn process */
+        ch = t->child_chs[child_id];
+
+        /* compute ring id for this message,
+         * children in spawn tree come after app procs */
+        ring_id = pg->num + child_id;
+    }
+
+    /* record left address in ring map (if it exists) */
+    const char* left = strmap_get(msg, "LEFT");
+    if (left != NULL) {
+        strmap_setf(pg->ring_map, "LEFT%d=%s", ring_id, left);
+    }
+
+    /* record right address in ring map (if it exists) */
+    const char* right = strmap_get(msg, "RIGHT");
+    if (right != NULL) {
+        strmap_setf(pg->ring_map, "RIGHT%d=%s", ring_id, right);
+    }
+
+    /* if we have received ring input message from each app process and
+     * each child process in spawn tree, forward ring input message to
+     * our parent in the spawn tree */
+    pg->ring_count++;
+    int total_count = pg->num + t->children;
+    if (pg->ring_count == total_count) {
+        /* lookup leftmost address from all children */
+        int i;
+        const char* leftmost = NULL;
+        for (i = 0; i < total_count; i++) {
+            leftmost = strmap_getf(pg->ring_map, "LEFT%d", i);
+            if (leftmost != NULL) {
+                /* found one */
+                break;
+            }
+        }
+
+        /* lookup rightmost address from all children */
+        const char* rightmost = NULL;
+        for (i = (total_count - 1); i >= 0; i--) {
+            rightmost = strmap_getf(pg->ring_map, "RIGHT%d", i);
+            if (rightmost != NULL) {
+                /* found one */
+                break;
+            }
+        }
+
+        /* send to parent if we have one, otherwise create ring output
+         * message and start the broadcast */
+        if (t->rank > 0) {
+            /* get channel to parent */
+            ch = t->parent_ch;
+
+            /* send ring input message to parent, which includes group name */
+            strmap* map = strmap_new();
+            strmap_set(map, "MSG", "PMI_RING_IN");
+            strmap_set(map, "GROUP", pg->name);
+            if (leftmost != NULL) {
+                strmap_set(map, "LEFT", leftmost);
+            }
+            if (rightmost != NULL) {
+                strmap_set(map, "RIGHT", rightmost);
+            }
+            spawn_net_write_strmap(ch, map);
+            strmap_delete(&map);
+        } else {
+            /* we're the root of the tree, bcast values back down,
+             * build a bcast message */
+            strmap* map = strmap_new();
+            strmap_set(map, "MSG", "PMI_RING_OUT");
+            strmap_set(map, "GROUP", pg->name);
+
+            /* at the top level, we wrap the ends to create a ring,
+             * setting the rightmost process to be the left neighbor
+             * of the leftmost process */
+            if (rightmost != NULL) {
+                strmap_set(map, "LEFT", rightmost);
+            }
+            if (leftmost != NULL) {
+                strmap_set(map, "RIGHT", leftmost);
+            }
+
+            /* simulate reception of a ring output msg */
+            handle_pmi_ring_out(s, pg, -1, map);
+
+            /* delete bcast message */
+            strmap_delete(&map);
+        }
+    }
+
+    return;
+}
+
+/* given an input message of:
  *   MSG=PMI_FINALIZE
  * disconnect from child and clear key/value maps if all children have
  * sent such a message */
@@ -2479,9 +2707,6 @@ static int handle_pmi_finalize(
     /* update state of child */
     pg->states[child_id] = PMI_STATE_FINAL;
 
-    /* get channel for this message */
-    spawn_net_channel* ch = pg->chs[child_id];
-
     /* check whether all children sent us a finalize request */
     pg->finalize_count++;
     if (pg->finalize_count == pg->num) {
@@ -2498,6 +2723,7 @@ static int handle_pmi_finalize(
 
         /* clear our counters */
         pg->barrier_count  = 0;
+        pg->ring_count     = 0;
         pg->finalize_count = 0;
 
         /* free off memory holding key/value pairs */
@@ -2572,6 +2798,7 @@ pmi_exchange2(
 
     /* initialize our PMI state counters */
     pg->barrier_count  = 0;
+    pg->ring_count     = 0;
     pg->finalize_count = 0;
 
     /* allocate a channel for each child */
@@ -2690,6 +2917,12 @@ pmi_exchange2(
 
         } else if (strcmp(type, "PMI_BCAST") == 0) {
             handle_pmi_bcast(s, msg_pg, child_id, msg);
+
+        } else if (strcmp(type, "PMI_RING_IN") == 0) {
+            handle_pmi_ring_in(s, msg_pg, child_id, msg, app_proc);
+
+        } else if (strcmp(type, "PMI_RING_OUT") == 0) {
+            handle_pmi_ring_out(s, msg_pg, child_id, msg);
 
         } else if (strcmp(type, "PMI_INIT") == 0) {
             handle_pmi_init(s, msg_pg, child_id, msg);
