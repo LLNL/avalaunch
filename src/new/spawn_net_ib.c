@@ -70,8 +70,9 @@ static struct timespec cm_timeout;
 static pthread_t recv_thread;    /* thread that handles CQ events */
 static pthread_t timeout_thread; /* thread that resends packets if timeout expires */
 
-static pthread_cond_t g_recv_cond; /* condition variable to wait on incoming msg */
+static int g_recv_busy_spin = 1;   /* whether we should busy spin or yield CPU while waiting */
 static int g_recv_flag;            /* flag indicating whether main thread is waiting */
+static pthread_cond_t g_recv_cond; /* condition variable to wait on incoming msg */
 
 /*******************************************
  * interface to lock/unlock communication
@@ -1748,11 +1749,13 @@ static inline void cq_drain()
         rc = cq_poll(&got_recv);
     }
 
-    /* signal the main thread if it's waiting
-     * and we got a new message */
-    if (new_recv && g_recv_flag) {
-        g_recv_flag = 0;
-        pthread_cond_signal(&g_recv_cond);
+    /* if we're using a receive thread, and if we got a new message,
+     * then signal the main thread if it's waiting */
+    if (! g_recv_busy_spin) {
+        if (new_recv && g_recv_flag) {
+            g_recv_flag = 0;
+            pthread_cond_signal(&g_recv_cond);
+        }
     }
 
     return;
@@ -1921,29 +1924,31 @@ static inline int packet_send(
 /* blocks until packet comes in on specified VC */
 static vbuf* packet_read(vc_t* vc)
 {
-#if 0
-    /* eagerly pull all events from completion queue */
-    cq_drain();
-#endif
+    /* if we don't have a receive thread,
+     * eagerly pull all events from completion queue */
+    if (g_recv_busy_spin) {
+        cq_drain();
+    }
 
     /* look for entry in apprecv queue */
     vbuf* v = apprecv_window_retrieve_and_remove(&vc->app_recv_window);
     while (v == NULL) {
-        /* nothing ready on our receive queue,
-         * wait to be signaled for a new message */
-        g_recv_flag = 1;
-        pthread_cond_wait(&g_recv_cond, &comm_lock_object);
+        /* determine whether we should poll or wait for a new message */
+        if (g_recv_busy_spin) {
+            /* polling, release the lock for some time to let
+             * other threads make progress */
+            comm_unlock();
+//            nanosleep(&cm_timeout, &cm_remain);
+            comm_lock();
 
-#if 0
-        /* release the lock for some time to let other threads make
-         * progress */
-        comm_unlock();
-//        nanosleep(&cm_timeout, &cm_remain);
-        comm_lock();
-
-        /* eagerly pull all events from completion queue */
-        cq_drain();
-#endif
+            /* eagerly pull all events from completion queue */
+            cq_drain();
+        } else {
+            /* nothing ready on our receive queue,
+             * wait to be signaled for a new message */
+            g_recv_flag = 1;
+            pthread_cond_wait(&g_recv_cond, &comm_lock_object);
+        }
 
         /* look for entry in apprecv queue */
         v = apprecv_window_retrieve_and_remove(&vc->app_recv_window);
@@ -1955,27 +1960,30 @@ static vbuf* packet_read(vc_t* vc)
  * extracts element and returns its vbuf */
 static vbuf* recv_connect_message()
 {
-#if 0
-    /* eagerly pull all events from completion queue */
-    cq_drain();
-#endif
+    /* if we don't have a receive thread,
+     * eagerly pull all events from completion queue */
+    if (g_recv_busy_spin) {
+        cq_drain();
+    }
 
     /* wait until we see at item at head of connect queue */
     while (connect_head == NULL) {
-        /* TODO: at this point, we should block for incoming event */
-        /* nothing ready on our connect queue,
-         * wait to be signaled for a new message */
-        g_recv_flag = 1;
-        pthread_cond_wait(&g_recv_cond, &comm_lock_object);
+        /* determine whether we should poll or wait for a new message */
+        if (g_recv_busy_spin) {
+            /* polling, release the lock for some time to let
+             * other threads make progress */
+            comm_unlock();
+//            nanosleep(&cm_timeout, &cm_remain);
+            comm_lock();
 
-#if 0
-        comm_unlock();
-//        nanosleep(&cm_timeout, &cm_remain);
-        comm_lock();
-
-        /* eagerly pull all events from completion queue */
-        cq_drain();
-#endif
+            /* eagerly pull all events from completion queue */
+            cq_drain();
+        } else {
+            /* nothing ready on our connect queue,
+             * wait to be signaled for a new message */
+            g_recv_flag = 1;
+            pthread_cond_wait(&g_recv_cond, &comm_lock_object);
+        }
     }
 
     /* get pointer to element */
@@ -2346,14 +2354,20 @@ static spawn_net_endpoint* ud_ctx_create()
         SPAWN_ERR("Failed to block SIGCHLD (pthread_sigmask rc=%d %s)", ret, strerror(ret));
     }
 
-    /* initialize the condition variable and flag, do this before
-     * creating threads that access these variables */
-    g_recv_flag = 0;
-    pthread_cond_init(&g_recv_cond, NULL);
+    /* if we don't busy spin waiting for a message, start up a
+     * receive thread to signal us when a message is ready */
+    if (! g_recv_busy_spin) {
+        /* initialize the condition variable and flag, do this before
+         * creating threads that access these variables */
+        g_recv_flag = 0;
+        pthread_cond_init(&g_recv_cond, NULL);
+
+        /* start the receive thread */
+        pthread_create(&recv_thread, &attr, cm_recv_handler, NULL);
+    }
 
     /* start receive and resend timeout threads */
     pthread_create(&timeout_thread, &attr, cm_timeout_handler, NULL);
-    pthread_create(&recv_thread,    &attr, cm_recv_handler,    NULL);
 
     /* reenable SIGCHLD in main thread */
     ret = pthread_sigmask(SIG_UNBLOCK, &sigmask, NULL);
@@ -2379,10 +2393,15 @@ static void ud_ctx_destroy(spawn_net_endpoint** pep)
 
     /* shut down our threads */
     pthread_cancel(timeout_thread);
-    pthread_cancel(recv_thread);
 
-    /* delete the condition variable */
-    pthread_cond_destroy(&g_recv_cond);
+    /* shut down receive thread if we have one */
+    if (! g_recv_busy_spin) {
+        /* shut down the receive thread */
+        pthread_cancel(recv_thread);
+
+        /* delete the condition variable */
+        pthread_cond_destroy(&g_recv_cond);
+    }
 
     /* destroy the lock */
     pthread_mutex_destroy(&comm_lock_object);
