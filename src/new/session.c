@@ -150,6 +150,7 @@ typedef struct process_group_struct {
     pid_t* pids;     /* list of children pids */
     uint64_t* ranks; /* group rank of each child */
     spawn_net_channel** chs; /* channels to children */
+    strmap* file_map; /* list of files stored in ramdisk */
 
     /* PMI-specific things */
     pmi_state* states;   /* records PMI state of each child */
@@ -840,8 +841,36 @@ fork_proc (const char * host, const strmap * params, const char * cwd,
 /*******************************
  * Routines to remote copy launcher executable
  ******************************/
+
+/* return number of files in file map */
+static int pg_files_num(const process_group* pg)
+{
+    int count = 0;
+    const char* count_str = strmap_get(pg->file_map, "N");
+    if (count_str != NULL) {
+        count = atoi(count_str);
+    }
+    return count;
+}
+
+/* return number of files in file map */
+static void pg_files_append(process_group* pg, const char* file)
+{
+    /* get number of files in ramdisk */
+    int file_count = pg_files_num(pg);
+
+    /* append the file to the list */
+    strmap_setf(pg->file_map, "%d=%s", file_count, file);
+    file_count++;
+
+    /* update the number of files */
+    strmap_setf(pg->file_map, "N=%d", file_count);
+
+    return;
+}
+
 /* given full path, return file size */
-ssize_t
+static ssize_t
 get_file_size (const char * file)
 {
     struct stat statbuf;
@@ -852,17 +881,19 @@ get_file_size (const char * file)
 /* given path of the ramdisk file, delete it */
 /* TODO: move this code under a top-level process cleanup function*/
 static void
-clear_from_ramdisk (void)
+clear_from_ramdisk (process_group* pg)
 {
-    char* value = getenv("MV2_SPAWN_EXE");
-    if (value != NULL) {
-        char* file = SPAWN_STRDUPF("/tmp/mpilaunch/%s", basename(value));
-        if (unlink(file)) {
-            perror("Unable to cleanup tmp files");
+    int i;
+    int file_count = pg_files_num(pg);
+    for (i = (file_count - 1); i >= 0; i--) {
+        const char* file = strmap_getf(pg->file_map, "%d", i);
+        if (file != NULL) {
+            if (unlink(file)) {
+                perror("Unable to cleanup tmp files");
+            }
         }
     }
 }
-
 
 /* given full path of executable, copy it to memory */
 static char *
@@ -890,11 +921,13 @@ write_to_ramdisk (const char * src, const char * buf, ssize_t size)
         return NULL;
     }
 
+#if 0
     /* setup a hook to clear the ramdisk copies during at exit */
     if (atexit(clear_from_ramdisk)) {
         perror("atexit");
         exit(EXIT_FAILURE);
     }
+#endif
 
     /* write block to destination */
     size_t towrite = (size_t) size;
@@ -1353,13 +1386,13 @@ allgather_strmap (strmap * map, const spawn_tree * t)
 /* broadcast file from file system to /tmp using spawn tree,
  * returns name of file in /tmp (caller should free name) */
 static char *
-bcast_file (const char * file, const spawn_tree * t, const strmap* params)
+bcast_file (const char * file, const spawn_tree * t, process_group* pg)
 {
     /* root spawn process reads file size */
     ssize_t bcast_size = 0;
 
     /* check for the chunk size to be used for BIN_BCAST */
-    const char* use_bin_bcast_chunk_sz_str = strmap_get(params, "BIN_BCAST_CHUNK_SZ");
+    const char* use_bin_bcast_chunk_sz_str = strmap_get(pg->params, "BIN_BCAST_CHUNK_SZ");
     size_t use_bin_bcast_chunk_sz = atoi(use_bin_bcast_chunk_sz_str) * 1024 * 1024;
 
     /* get file size */
@@ -1392,8 +1425,12 @@ bcast_file (const char * file, const spawn_tree * t, const strmap* params)
         bcast_size += use_bin_bcast_chunk_sz;
     }
                 
-    /* write file to ramdisk */
+    /* write file to ramdisk and get name of new file */
     char* newfile = write_to_ramdisk(file, (char*)buf, bufsize);
+
+    /* record name of ramdisk file in process group,
+     * so we can delete it later */
+    pg_files_append(pg, newfile);
 
     /* free buffer */
     spawn_free(&buf);
@@ -2079,6 +2116,7 @@ process_group_new()
     pg->pids   = NULL;
     pg->ranks  = NULL;
     pg->chs    = NULL;
+    pg->file_map   = strmap_new();
     pg->commit_map = strmap_new();
     pg->global_map = strmap_new();
     pg->ring_map   = strmap_new();
@@ -2107,6 +2145,9 @@ process_group_delete (process_group ** ppg)
 
         /* delete channels */
         spawn_free(&pg->chs);
+
+        /* delete filemap */
+        strmap_delete(&pg->file_map);
 
         /* delete PMI resources */
         strmap_delete(&pg->commit_map);
@@ -3107,7 +3148,7 @@ process_group_start (session * s, const strmap * params)
     if (use_bin_bcast) {
         if (!rank) { tid = begin_delta("bcast app binary"); }
         signal_from_root(s);
-        bcastname = bcast_file(app_exe, s->tree, params);
+        bcastname = bcast_file(app_exe, s->tree, pg);
         signal_to_root(s);
         if (!rank) { end_delta(tid); }
 
@@ -3939,8 +3980,6 @@ session_start (session * s)
             char* app_path = spawn_path_search(value);
             strmap_set(appmap, "EXE", app_path);
             spawn_free(&app_path);
-        } else {
-            strmap_set(appmap, "EXE", "/bin/hostname");
         }
 
         /* set current working directory */
@@ -4019,11 +4058,16 @@ session_start (session * s)
     signal_to_root(s);
     if (!nodeid) { end_delta(tid); }
 
-    /* TODO: bcast args and environment */
-
-    process_group_start(s, appmap);
+    /* start the application processes if we have an executable */
+    const char* appexe = strmap_get(appmap, "EXE");
+    if (appexe != NULL) {
+        process_group_start(s, appmap);
+    }
 
     strmap_delete(&appmap);
+
+    /* TODO: before we can delete the process group, we need to
+     * ensure all procs have exited */
 
     /* TODO: print times for unfurl step */
     char* labels[] = {"parent connect", "parent params", "launcher copy", "children launch", "children connect", "children params"};
