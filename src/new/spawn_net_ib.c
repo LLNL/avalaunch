@@ -70,7 +70,7 @@ static struct timespec cm_timeout;
 static pthread_t recv_thread;    /* thread that handles CQ events */
 static pthread_t timeout_thread; /* thread that resends packets if timeout expires */
 
-static int g_recv_busy_spin = 1;   /* whether we should busy spin or yield CPU while waiting */
+static int g_recv_busy_spin = 0;   /* whether we should busy spin or yield CPU while waiting */
 static int g_recv_flag;            /* flag indicating whether main thread is waiting */
 static pthread_cond_t g_recv_cond; /* condition variable to wait on incoming msg */
 
