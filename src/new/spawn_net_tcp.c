@@ -27,13 +27,18 @@ static int reliable_read(const char* name, int fd, void* buf, size_t size)
   size_t total = 0;
   char* ptr = (char*) buf;
   while (total < size) {
+    /* compute number of bytes remaining and read */
     size_t remaining = size - total;
     ssize_t count = read(fd, ptr, remaining);
     if (count > 0) {
+      /* we read some bytes, update our count and pointer position */
       total += (size_t) count;
       ptr += count;
     } else if (count == 0) {
-      SPAWN_ERR("Unexpected read of 0 bytes %s (read() errno=%d %s)", name, errno, strerror(errno));
+      /* we can get this on EOF, e.g., remote socket closed normally,
+       * however, since caller tried to read something, we return
+       * an error */
+      //SPAWN_ERR("Unexpected read of 0 bytes %s (read() errno=%d %s)", name, errno, strerror(errno));
       return SPAWN_FAILURE;
     } else {
       /* TODO: if EINTR, retry */
@@ -51,9 +56,11 @@ static int reliable_write(const char* name, int fd, const void* buf, size_t size
   size_t total = 0;
   char* ptr = (char*) buf;
   while (total < size) {
+    /* compute number of bytes remaining and write */
     size_t remaining = size - total;
     ssize_t count = write(fd, ptr, remaining);
     if (count > 0) {
+      /* we wrote some bytes, update our count and pointer position */
       total += (size_t) count;
       ptr += count;
     } else if (count == 0) {
@@ -119,8 +126,10 @@ static char* spawn_net_get_remote_sockname(int fd, const char* host)
   return name;
 }
 
+/* modify socket so that data is sent as soon as it's written */
 static int spawn_net_set_tcp_nodelay(int fd)
 {
+  /* read no delay setting from environment if set */
   int set_nodelay = 0;
   char *env;
   if ((env = getenv("SPAWN_TCP_NODELAY")) != NULL ) {
@@ -129,11 +138,11 @@ static int spawn_net_set_tcp_nodelay(int fd)
 
   /* disable TCP Nagle buffering if requested */
   if (set_nodelay) {
-      int flag=1;
-      if (setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag)) < 0 ) {
-        SPAWN_ERR("Failed to set TCP_NODELAY option (setsockopt() errno=%d %s)", errno, strerror(errno));
-        return SPAWN_FAILURE;
-      }
+    int flag=1;
+    if (setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag)) < 0 ) {
+      SPAWN_ERR("Failed to set TCP_NODELAY option (setsockopt() errno=%d %s)", errno, strerror(errno));
+      return SPAWN_FAILURE;
+    }
   }
 
   return SPAWN_SUCCESS;
@@ -141,12 +150,13 @@ static int spawn_net_set_tcp_nodelay(int fd)
 
 spawn_net_endpoint* spawn_net_open_tcp()
 {
-  /* create a TCP socket */
+  /* create a TCP socket, we'll take new connections on this socket */
   int fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
   if (fd < 0) {
     return SPAWN_NET_ENDPOINT_NULL;
   }
 
+  /* set socket up for immediate send */
   if (spawn_net_set_tcp_nodelay(fd)) {
     close(fd);
     return SPAWN_NET_ENDPOINT_NULL;
@@ -517,5 +527,93 @@ int spawn_net_write_tcp(const spawn_net_channel* ch, const void* buf, size_t siz
   if (fd > 0) {
     return reliable_write(ch->name, fd, buf, size);
   }
+  return SPAWN_SUCCESS;
+}
+
+int spawn_net_waitany_tcp(int num, const spawn_net_channel** chs, int* index)
+{
+  /* bail out if channel array is empty */
+  if (chs == NULL) {
+      return SPAWN_FAILURE;
+  }
+
+  /* create fdset for checking read conditions */
+  fd_set readfds;
+  FD_ZERO(&readfds);
+
+  /* count number of active file descriptors */
+  int count = 0;
+
+  /* we'll set this to the highest socket number which is active */
+  int highest_fd;
+
+  /* add each active file descriptor to the set */
+  int i;
+  for (i = 0; i < num; i++) {
+    /* get pointer to channel */
+    const spawn_net_channel* ch = chs[i];
+
+    /* skip NULL channels */
+    if (ch == SPAWN_NET_CHANNEL_NULL) {
+        continue;
+    }
+
+    /* get pointer to TCP-specific channel data */
+    spawn_chdata* chdata = (spawn_chdata*) ch->data;
+
+    /* get the file descriptor */
+    int fd = chdata->fd;
+
+    /* add the descriptor to the read set */
+    FD_SET(fd, &readfds);
+
+    /* if count is 0, initialize highest_fd,
+     * otherwise check whether this fd is higher in value,
+     * we need to track the highest fd for use in select */
+    if (count == 0 || fd > highest_fd) {
+      highest_fd = fd;
+    }
+
+    /* increase our count of active file descriptors */
+    count++;
+  }
+
+  /* if all channels are NULL, we succeeded,
+   * but we can't set the index */
+  if (count == 0) {
+    *index = -1;
+    return SPAWN_SUCCESS;
+  }
+
+  /* otherwise, call select to find a file descriptor ready for reading */
+  int rc = select((highest_fd + 1), &readfds, NULL, NULL, NULL);
+  if (rc == -1) {
+    SPAWN_ERR("Failed to select file descriptor errno=%d %s", errno, strerror(errno));
+    return SPAWN_FAILURE;
+  }
+
+  /* select succeeded, find the matching file descriptor */
+  for (i = 0; i < num; i++) {
+    /* get pointer to channel */
+    const spawn_net_channel* ch = chs[i];
+
+    /* skip NULL channels */
+    if (ch == SPAWN_NET_CHANNEL_NULL) {
+        continue;
+    }
+
+    /* get pointer to TCP-specific channel data */
+    spawn_chdata* chdata = (spawn_chdata*) ch->data;
+
+    /* get the file descriptor */
+    int fd = chdata->fd;
+
+    /* check whether fd is ready, set index and break if so */
+    if (FD_ISSET(fd, &readfds)) {
+        *index = i;
+        break;
+    }
+  }
+
   return SPAWN_SUCCESS;
 }

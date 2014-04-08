@@ -222,7 +222,12 @@ int spawn_net_write(const spawn_net_channel* ch, const void* buf, size_t size)
 
 int spawn_net_waitany(int num, const spawn_net_channel** chs, int* index)
 {
-  /* write is a NOP for a null channel */
+  /* check that we got a pointer to a return value */
+  if (index == NULL) {
+    return SPAWN_FAILURE;
+  }
+
+  /* nothing to wait on if num is 0 */
   if (num == 0) {
     *index = -1;
     return SPAWN_SUCCESS;
@@ -233,24 +238,50 @@ int spawn_net_waitany(int num, const spawn_net_channel** chs, int* index)
     return SPAWN_FAILURE;
   }
 
-  /* TODO: need to check that all channels are of the same type */
-  return spawn_net_waitany_ib(num, chs, index);
+  /* TODO: support mixing of channels */
 
-#if 0
+  /* check that all channels are of the same type */
+  int type_set = 0;
+  spawn_net_type type;
+  int i;
+  for (i = 0; i < num; i++) {
+    /* get pointer to channel */
+    const spawn_net_channel* ch = chs[i];
+
+    /* skip NULL channels */
+    if (ch == SPAWN_NET_CHANNEL_NULL) {
+        continue;
+    }
+
+    /* set type to the type of the first valid channel */
+    if (! type_set) {
+        type = ch->type;
+        type_set = 1;
+    }
+
+    /* got a valid channel, check its type */
+    if (ch->type != type) {
+      SPAWN_ERR("Mixture of channel types in array");
+      return SPAWN_FAILURE;
+    }
+  }
+
   /* otherwise, call write routine for channel type */
-  if (ch->type == SPAWN_NET_TYPE_TCP) {
-    SPAWN_ERR("spawn_net_waitany unsupported for TCP channels");
-  } else if (ch->type == SPAWN_NET_TYPE_FIFO) {
+  if (type == SPAWN_NET_TYPE_TCP) {
+    return spawn_net_waitany_tcp(num, chs, index);
+  }
+#if 0
+  else if (type == SPAWN_NET_TYPE_FIFO) {
     SPAWN_ERR("spawn_net_waitany unsupported for FIFO channels");
   }
+#endif
 #ifdef HAVE_SPAWN_NET_IBUD
-  else if (ch->type == SPAWN_NET_TYPE_IBUD) {
+  else if (type == SPAWN_NET_TYPE_IBUD) {
     return spawn_net_waitany_ib(num, chs, index);
   }
 #endif
   else {
-    SPAWN_ERR("Unknown channel type %d", ch->type);
+    SPAWN_ERR("Unknown channel type %d", type);
     return SPAWN_FAILURE;
   }
-#endif
 }

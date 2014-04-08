@@ -2952,15 +2952,33 @@ pmi_exchange2(
         strmap* msg = strmap_new();
         spawn_net_read_strmap(ch, msg);
 
+        /* TODO: look for error condition on read */
+
+        /* When using TCP, select can indicate a file descriptor
+         * ready with an EOF (read of 0 bytes) when the remote end
+         * closes its socket.  This leads us to read en empty strmap,
+         * so check for that and continue if we have an empty map */
+
+        /* get message type */
+        const char* type = strmap_get(msg, "MSG");
+        if (type == NULL) {
+            /* if we get here, assume that we failed to read a message,
+             * and in that case, assume that we really got an EOF,
+             * so don't wait on this channel anymore */
+            chs[index] = SPAWN_NET_CHANNEL_NULL;
+
+            strmap_delete(&msg);
+            continue;
+        }
+
         /* determine whether this message came from an app proc or
          * a proc in the spawn tree */
         int app_proc = (pgs[index] != NULL);
 
-        /* set the process group */
+        /* set the process group based on the sender */
         process_group* msg_pg = pgs[index];
 
-        /* get group name, if there is no group key
-         * then this message applies to the spawn tree */
+        /* override group if message contains a group key */
         const char* name = strmap_get(msg, "GROUP");
         if (name != NULL) {
             /* we have a group name, now look it up */
@@ -2982,10 +3000,7 @@ pmi_exchange2(
   fflush(stdout);
 #endif
 
-        /* get message type */
-        const char* type = strmap_get(msg, "MSG");
-
-        /* select function to handle message */
+        /* select function to handle message based on message type */
         if (strcmp(type, "NULL") == 0) {
 
         } else if (strcmp(type, "PMI_GET") == 0) {
@@ -3018,6 +3033,8 @@ pmi_exchange2(
                  * to ourself) */
                 need_to_close--;
             }
+
+            /* TODO: we could blank out channel for app proc here */
 
         } else if (strcmp(type, "CLOSE_ASYNC") == 0) {
             /* if we receive a close async message, blank out
