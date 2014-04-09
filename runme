@@ -2,24 +2,25 @@
 
 set -x
 
-num=1
-#hosts=`glob-hosts -s $num -e -a -h 'rzmerl[1-2]'`
-hosts=`glob-hosts -s $num -e -a -h "$SLURM_NODELIST"`
+export LD_LIBRARY_PATH=`pwd`/install/lib
+
+#num=1
+#hosts=`glob-hosts -s $num -e -a -h "$SLURM_NODELIST"`
 #hosts=`scontrol show hostnames`
 scontrol show hostnames > hostfile
 
 #export MV2_SPAWN_SH=ssh # rsh/ssh - remote shell command (rsh is default)
 
-export MV2_SPAWN_DEGREE=64  # degree of k-ary tree
-export MV2_SPAWN_PPN=1   # number of app procs per node
+export MV2_SPAWN_DEGREE=64 # degree of k-ary tree
+export MV2_SPAWN_PPN=8 # number of app procs per node
 
-export MV2_SPAWN_EXE=/bin/env
-export MV2_SPAWN_EXE=/bin/hostname
-export MV2_SPAWN_EXE=echo
-export MV2_SPAWN_ARGS="-e -n hi there homey"
+#export MV2_SPAWN_EXE=/bin/hostname
 
-#export MV2_SPAWN_EXE=src/new/examples/pmi_test
-#export MV2_SPAWN_PMI=1   # whether to enable PMI
+#export MV2_SPAWN_EXE=echo
+#export MV2_SPAWN_ARGS="-e -n hi there world"
+
+export MV2_SPAWN_EXE=src/new/examples/pmi_test
+export MV2_SPAWN_PMI=1   # whether to enable PMI
 
 #export MV2_SPAWN_EXE=src/new/examples/ring_test
 #export MV2_SPAWN_RING=1  # whether to enable ring
@@ -29,19 +30,14 @@ export MV2_SPAWN_ARGS="-e -n hi there homey"
 #export MV2_SPAWN_LOCAL=sh # sh/direct - how to exec local procs (direct is default)
 #export MV2_SPAWN_COPY=1   # whether to rcp launcher proc to /tmp during unfurl
 #export MV2_SPAWN_BCAST_BIN=1 # whether to broadcast app binary to /tmp via spawn tree
-export MV2_SPAWN_NET=ibud  # tcp/ibud - network transport (tcp is default)
+#export MV2_SPAWN_NET=tcp  # tcp/ibud - network transport (ibud is default)
 
 # app/spawn - select whether to debug app or spawn tree when running under
 # totalview (defaults to spawn tree)
 #export MV2_SPAWN_DBG=app
 
-#totalview install/bin/launcher
 install/bin/launcher
-#install/bin/launcher $hosts
-#install/bin/launcher -h hostfile
+#totalview install/bin/launcher
 
 #install/bin/launcher -h hostfile
-#totalview install/bin/launcher
-#totalview install/bin/launcher -a $hosts
 #totalview install/bin/launcher -a -h hostfile
-#mtv install/bin/launcher
