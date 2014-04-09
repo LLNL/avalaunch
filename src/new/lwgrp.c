@@ -51,7 +51,7 @@ static int lwgrp_connect_right(lwgrp* group, int round, const char* name)
 
 /* given a group, build a list of neighbors that are 2^d away on
  * our left and right sides */
-static int lwgrp_connect(lwgrp* group)
+static int lwgrp_connect_blocking(lwgrp* group)
 {
   /* get our rank and size of the group */
   int64_t rank  = group->rank;
@@ -138,6 +138,90 @@ static int lwgrp_connect(lwgrp* group)
           /* send next right address to left */
           spawn_net_write_str(ch, right);
         }
+    }
+
+    spawn_free(&left);
+    spawn_free(&right);
+    left  = next_left;
+    right = next_right;
+
+    /* update our current left and right ranks to the next set */
+    dist <<= 1;
+    round++;
+  }
+
+  spawn_free(&left);
+  spawn_free(&right);
+
+  return LWGRP_SUCCESS;
+}
+
+/* given a group, build a list of neighbors that are 2^d away on
+ * our left and right sides */
+static int lwgrp_connect(lwgrp* group)
+{
+  /* get our rank and size of the group */
+  int64_t rank  = group->rank;
+  int64_t ranks = group->size;
+
+  /* build list of left and right ranks in our group */
+  char* left  = SPAWN_STRDUP(group->left);
+  char* right = SPAWN_STRDUP(group->right);
+  int round = 0;
+  int64_t dist = 1;
+  while (dist < ranks) {
+    /* compute our relative rank for this round */
+    int64_t relrank  = (rank >> round);
+    if (relrank & 0x1) {
+        /* we're an odd rank in this round */
+
+        /* first, even ranks connect to right */
+        if (rank - dist >= 0) {
+          lwgrp_accept_left(group, round);
+        }
+
+        /* then, odd ranks connect to the right */
+        if (rank + dist < ranks) {
+          lwgrp_connect_right(group, round, right);
+        }
+    } else {
+        /* we're an even rank in this round */
+
+        /* first, even ranks connect to the right */
+        if (rank + dist < ranks) {
+          lwgrp_connect_right(group, round, right);
+        }
+
+        /* then, odd ranks connect to the right */
+        if (rank - dist >= 0) {
+          lwgrp_accept_left(group, round);
+        }
+    }
+
+    /* send next right address to left */
+    if (rank - dist >= 0) {
+        spawn_net_channel* ch = group->list_left[round];
+        spawn_net_write_str(ch, right);
+    }
+
+    /* send next left address to right */
+    if (rank + dist < ranks) {
+        spawn_net_channel* ch = group->list_right[round];
+        spawn_net_write_str(ch, left);
+    }
+
+    /* receive next left address from left */
+    char* next_left = NULL;
+    if (rank - dist >= 0) {
+        spawn_net_channel* ch = group->list_left[round];
+        next_left = spawn_net_read_str(ch);
+    }
+
+    /* receive next right address from right */
+    char* next_right = NULL;
+    if (rank + dist < ranks) {
+        spawn_net_channel* ch = group->list_right[round];
+        next_right = spawn_net_read_str(ch);
     }
 
     spawn_free(&left);
@@ -375,7 +459,7 @@ static int cmp_str_int(const void* a, const void* b, size_t offset)
   return 0;
 }
 
-static int lwgrp_sort_bitonic_merge(
+static int lwgrp_sort_bitonic_merge_blocking(
   void* value,
   void* scratch,
   size_t size,
@@ -410,6 +494,93 @@ static int lwgrp_sort_bitonic_merge(
         spawn_net_channel* partner = group->list_right[index];
         spawn_net_read(partner, scratch, size);
         spawn_net_write(partner, value, size);
+
+        /* select the appropriate value,
+         * depedning on the sort direction */
+        int cmp = (*compare)(scratch, value, offset);
+        if ((direction && cmp < 0) || (!direction && cmp > 0)) {
+          /* we keep the value if
+           *   direction is ascending and new value is smaller,
+           *   direction is descending and new value is greater */
+          memcpy(value, scratch, size);
+        }
+      }
+
+      /* recursively merge our half */
+      lwgrp_sort_bitonic_merge_blocking(
+        value, scratch, size, offset, compare,
+        start, count, direction,
+        group
+      );
+    } else {
+      /* we are in the upper half, find a partner in the lower half */
+      int64_t dst_rank = rank - count;
+      if (dst_rank >= start) {
+        /* exchange data with our partner rank */
+        spawn_net_channel* partner = group->list_left[index];
+        spawn_net_write(partner, value, size);
+        spawn_net_read(partner, scratch, size);
+
+        /* select the appropriate value,
+         * depedning on the sort direction */
+        int cmp = (*compare)(scratch, value, offset);
+        if ((direction && cmp > 0) || (!direction && cmp < 0)) {
+          /* we keep the value if
+           *   direction is ascending and new value is bigger,
+           *   direction is descending and new value is smaller */
+          memcpy(value, scratch, size);
+        }
+      }
+
+      /* recursively merge our half */
+      int64_t new_start = start + count;
+      int64_t new_num   = num - count;
+      lwgrp_sort_bitonic_merge_blocking(
+        value, scratch, size, offset, compare,
+        new_start, new_num, direction,
+        group
+      );
+    }
+  }
+
+  return 0;
+}
+
+static int lwgrp_sort_bitonic_merge(
+  void* value,
+  void* scratch,
+  size_t size,
+  size_t offset,
+  int (*compare)(const void*, const void*, size_t),
+  int64_t start,
+  int64_t num,
+  int direction,
+  const lwgrp* group)
+{
+  if (num > 1) {
+    /* get our rank within the group */
+    int64_t rank = group->rank;
+
+    /* determine largest power of two that is smaller than num */
+    int64_t count = 1;
+    int64_t index = 0;
+    while (count < num) {
+      count <<= 1;
+      index++;
+    }
+    count >>= 1;
+    index--;
+
+    /* divide range into two chunks, execute bitonic half-clean step,
+     * then recursively merge each half */
+    if (rank < start + count) {
+      /* we are in the lower half, find a partner in the upper half */
+      int64_t dst_rank = rank + count;
+      if (dst_rank < start + num) {
+        /* exchange data with our partner rank */
+        spawn_net_channel* partner = group->list_right[index];
+        spawn_net_write(partner, value, size);
+        spawn_net_read(partner, scratch, size);
 
         /* select the appropriate value,
          * depedning on the sort direction */
@@ -560,7 +731,7 @@ enum chain_fields {
  *   2) executes left-to-right and right-to-left (double) inclusive
  *      segmented scan to compute number of ranks to left and right
  *      sides of host value */
-static lwgrp* lwgrp_split_sorted(
+static lwgrp* lwgrp_split_sorted_blocking(
   const void* value,
   size_t size,
   size_t offset,
@@ -714,6 +885,223 @@ static lwgrp* lwgrp_split_sorted(
         spawn_net_read(partner, recv_left_ints, scan_size);
         spawn_net_write(partner, send_left_ints, scan_size);
       }
+    }
+
+    /* TODO: unpack */
+    /* reduce data from left partner */
+    if (rank - dist >= 0) {
+      /* count the number of groups to our left */
+      send_right_ints[SCAN_COLOR] += recv_left_ints[SCAN_COLOR];
+
+      /* continue accumulating the count in our right-going data
+       * if our flag has not already been set */
+      if (send_right_ints[SCAN_FLAG] != 1) {
+        send_right_ints[SCAN_FLAG]   = recv_left_ints[SCAN_FLAG];
+        send_right_ints[SCAN_COUNT] += recv_left_ints[SCAN_COUNT];
+      }
+    }
+
+    /* reduce data from right partner */
+    if (rank + dist < ranks) {
+      /* count the number of groups to our right */
+      send_left_ints[SCAN_COLOR] += recv_right_ints[SCAN_COLOR];
+
+      /* continue accumulating the count in our left-going data
+       * if our flag has not already been set */
+      if (send_left_ints[SCAN_FLAG] != 1) {
+        send_left_ints[SCAN_FLAG]   = recv_right_ints[SCAN_FLAG];
+        send_left_ints[SCAN_COUNT] += recv_right_ints[SCAN_COUNT];
+      }
+    }
+
+    /* prepare for the next round */
+    dist <<= 1;
+    index++;
+  }
+
+  /* Now we can set our rank and the number of ranks in our group.
+   * At this point, our right-going count is the number of ranks to our
+   * left including ourself, and the left-going count is the number of
+   * ranks to our right including ourself.
+   * Our rank is the number of ranks to our left (right-going count
+   * minus 1), and the group size is the sum of right-going and
+   * left-going counts minus 1 so we don't double counts ourself. */
+  send_ints[CHAIN_RANK] = send_right_ints[SCAN_COUNT] - 1;
+  send_ints[CHAIN_SIZE] = send_right_ints[SCAN_COUNT] + 
+                          send_left_ints[SCAN_COUNT] - 1;
+  send_ints[CHAIN_ID]    = send_right_ints[SCAN_COLOR] - 1;
+  send_ints[CHAIN_COUNT] = send_right_ints[SCAN_COLOR] +
+                           send_left_ints[SCAN_COLOR] - 1;
+
+  /* sort item back to its originating rank */
+  lwgrp_sort_bitonic(
+    result_buf, result_buf_size, 0, cmp_int, group
+  );
+
+  /* build new group */
+  int64_t newrank  = send_ints[CHAIN_RANK];
+  int64_t newranks = send_ints[CHAIN_SIZE];
+  char* newleft    = NULL;
+  char* newright   = NULL;
+  if (newrank > 0) {
+    newleft = (char*)result_buf + 5 * sizeof(int64_t);
+  }
+  if (newrank < newranks - 1) {
+    newright = (char*)result_buf + 5 * sizeof(int64_t) + payload_size;
+  }
+  lwgrp* newgroup = lwgrp_create(
+    newranks, newrank, group->name, newleft, newright, group->ep
+  );
+
+  /* free buffer */
+  spawn_free(&result_buf);
+
+  return newgroup;
+}
+
+static lwgrp* lwgrp_split_sorted(
+  const void* value,
+  size_t size,
+  size_t offset,
+  int (*compare)(const void*, const void*, size_t),
+  const lwgrp* group)
+{
+  /* we will fill in 7 values (src, rank, size, groupid, groups, left, right)
+   * representing the chain data structure for the the globally
+   * ordered color/key/rank tuple that we hold, which we'll later
+   * send back to the rank that contributed our item */
+  size_t payload_offset = offset + sizeof(int64_t);
+  size_t payload_size = size - payload_offset;
+  size_t result_buf_size = 5 * sizeof(int64_t) + 2 * payload_size;
+  void* result_buf = SPAWN_MALLOC(result_buf_size);
+  int64_t* send_ints = (int64_t*) result_buf;
+
+  /* TODO: unpack */
+  /* record address of process that contributed this item */
+  int64_t* orig_ptr = (int64_t*)((char*)value + offset);
+  send_ints[CHAIN_SRC] = *orig_ptr;
+
+  /* allocate a scratch buffer to receive value from left neighbor */
+  void* left_buf = SPAWN_MALLOC(size);
+
+  /* allocate a scratch buffer to receive value from right neighbor */
+  void* right_buf = SPAWN_MALLOC(size);
+
+  /* exchange data with left and right neighbors to find
+   * boundaries of group */
+  int64_t rank  = group->rank;
+  int64_t ranks = group->size;
+
+  /* send data left */
+  if (rank > 0) {
+    spawn_net_channel* left = group->list_left[0];
+    spawn_net_write(left, value, size);
+  }
+
+  /* send data right */
+  if (rank < ranks - 1) {
+    spawn_net_channel* right = group->list_right[0];
+    spawn_net_write(right, value, size);
+  }
+
+  /* read data from left */
+  if (rank > 0) {
+    spawn_net_channel* left = group->list_left[0];
+    spawn_net_read(left, left_buf, size);
+  }
+
+  /* recv data from right */
+  if (rank < ranks - 1) {
+    spawn_net_channel* right = group->list_right[0];
+    spawn_net_read(right, right_buf, size);
+  }
+
+  /* if we have a left neighbor, and if his color value matches ours,
+   * then our element is part of his group, otherwise we are the first
+   * rank of a new group */
+  int first_in_group = 1;
+  if (rank > 0) {
+    /* copy endpoint name from neighbor */
+    if (payload_size > 0) {
+      char* payload = ((char*)left_buf + payload_offset);
+      char* bufptr = ((char*)result_buf + 5 * sizeof(int64_t));
+      memcpy(bufptr, payload, payload_size);
+    }
+
+    /* check whether we're first in a new group */
+    int left_cmp = (*compare)(left_buf, value, 0);
+    if (left_cmp == 0) {
+      first_in_group = 0;
+    }
+  }
+
+  /* if we have a right neighbor, and if his color value matches ours,
+   * then our element is part of his group, otherwise we are the last
+   * rank of our group */
+  int last_in_group = 1;
+  if (rank < ranks - 1) {
+    /* copy endpoint name from neighbor */
+    if (payload_size > 0) {
+      char* payload = ((char*)right_buf + payload_offset);
+      char* bufptr = ((char*)result_buf + 5 * sizeof(int64_t) + payload_size);
+      memcpy(bufptr, payload, payload_size);
+    }
+
+    /* check whether we're last in our group */
+    int right_cmp = (*compare)(right_buf, value, 0);
+    if (right_cmp == 0) {
+      last_in_group = 0;
+    }
+  }
+
+  /* free temporary buffers */
+  spawn_free(&left_buf);
+  spawn_free(&right_buf);
+
+  /* TODO: pack */
+  /* prepare buffers for our scan operations:
+   * group count, flag, rank count, next proc */
+  size_t scan_size = 3 * sizeof(int64_t);
+  int64_t send_left_ints[3]  = {0,0,1};
+  int64_t send_right_ints[3] = {0,0,1};
+  int64_t recv_left_ints[3]  = {0,0,0};
+  int64_t recv_right_ints[3] = {0,0,0};
+  if (first_in_group) {
+    send_right_ints[SCAN_COLOR] = 1;
+    send_right_ints[SCAN_FLAG] = 1;
+  }
+  if (last_in_group) {
+    send_left_ints[SCAN_COLOR] = 1;
+    send_left_ints[SCAN_FLAG] = 1;
+  }
+
+  /* execute inclusive scan in both directions to count number of
+   * ranks in our group to our left and right sides */
+  int64_t dist  = 1;
+  int64_t index = 0;
+  while (dist < ranks) {
+    /* send data left */
+    if (rank - dist >= 0) {
+      spawn_net_channel* partner = group->list_left[index];
+      spawn_net_write(partner, send_left_ints, scan_size);
+    }
+
+    /* send data right */
+    if (rank + dist < ranks) {
+      spawn_net_channel* partner = group->list_right[index];
+      spawn_net_write(partner, send_right_ints, scan_size);
+    }
+
+    /* recv data from left */
+    if (rank - dist >= 0) {
+      spawn_net_channel* partner = group->list_left[index];
+      spawn_net_read(partner, recv_left_ints, scan_size);
+    }
+
+    /* recv data from right */
+    if (rank + dist < ranks) {
+      spawn_net_channel* partner = group->list_right[index];
+      spawn_net_read(partner, recv_right_ints, scan_size);
     }
 
     /* TODO: unpack */
@@ -942,7 +1330,7 @@ lwgrp* lwgrp_split_str(const lwgrp* comm, const char* str)
   return newgroup;
 }
 
-int lwgrp_shift(
+int lwgrp_shift_blocking(
   const void* buf,
   void* left,
   void* right,
@@ -965,7 +1353,7 @@ int lwgrp_shift(
 
     /* exchange data with right partner */
     /* send then recv */
-    if (rank < ranks) {
+    if (rank + 1 < ranks) {
       spawn_net_channel* ch = group->list_right[0];
       spawn_net_write(ch, buf, buf_size);
       spawn_net_read(ch, right, buf_size);
@@ -975,7 +1363,7 @@ int lwgrp_shift(
 
     /* exchange data with right partner */
     /* send then recv */
-    if (rank < ranks) {
+    if (rank + 1 < ranks) {
       spawn_net_channel* ch = group->list_right[0];
       spawn_net_write(ch, buf, buf_size);
       spawn_net_read(ch, right, buf_size);
@@ -993,7 +1381,44 @@ int lwgrp_shift(
   return LWGRP_SUCCESS;
 }
 
-int lwgrp_barrier(const lwgrp* group)
+int lwgrp_shift(
+  const void* buf,
+  void* left,
+  void* right,
+  size_t buf_size,
+  const lwgrp* group)
+{
+  int64_t rank  = group->rank;
+  int64_t ranks = group->size;
+
+  /* send data left */
+  if (rank > 0) {
+    spawn_net_channel* ch = group->list_left[0];
+    spawn_net_write(ch, buf, buf_size);
+  }
+
+  /* send data right */
+  if (rank < ranks - 1) {
+    spawn_net_channel* ch = group->list_right[0];
+    spawn_net_write(ch, buf, buf_size);
+  }
+
+  /* recv data from left */
+  if (rank > 0) {
+    spawn_net_channel* ch = group->list_left[0];
+    spawn_net_read(ch, left, buf_size);
+  }
+
+  /* recv data from right */
+  if (rank < ranks - 1) {
+    spawn_net_channel* ch = group->list_right[0];
+    spawn_net_read(ch, right, buf_size);
+  }
+
+  return LWGRP_SUCCESS;
+}
+
+int lwgrp_barrier_blocking(const lwgrp* group)
 {
   int64_t rank  = group->rank;
   int64_t ranks = group->size;
@@ -1053,7 +1478,50 @@ int lwgrp_barrier(const lwgrp* group)
   return LWGRP_SUCCESS;
 }
 
-int lwgrp_allreduce_uint64_sum(uint64_t* buf, uint64_t count, const lwgrp* group)
+int lwgrp_barrier(const lwgrp* group)
+{
+  int64_t rank  = group->rank;
+  int64_t ranks = group->size;
+
+  char c = 'A';
+  void* buf = (void*) &c;
+  size_t buf_size = 1;
+
+  int round = 0;
+  int64_t dist = 1;
+  while (dist < ranks) {
+    /* send message left */
+    if (rank - dist >= 0) {
+      spawn_net_channel* ch = group->list_left[round];
+      spawn_net_write(ch, buf, buf_size);
+    }
+
+    /* send message right */
+    if (rank + dist < ranks) {
+      spawn_net_channel* ch = group->list_right[round];
+      spawn_net_write(ch, buf, buf_size);
+    }
+
+    /* recv message from left */
+    if (rank - dist >= 0) {
+      spawn_net_channel* ch = group->list_left[round];
+      spawn_net_read(ch, buf, buf_size);
+    }
+
+    /* recv message from right */
+    if (rank + dist < ranks) {
+      spawn_net_channel* ch = group->list_right[round];
+      spawn_net_read(ch, buf, buf_size);
+    }
+
+    dist <<= 1;
+    round++;
+  }
+
+  return LWGRP_SUCCESS;
+}
+
+int lwgrp_allreduce_uint64_sum_blocking(uint64_t* buf, uint64_t count, const lwgrp* group)
 {
   int64_t rank  = group->rank;
   int64_t ranks = group->size;
@@ -1129,7 +1597,66 @@ int lwgrp_allreduce_uint64_sum(uint64_t* buf, uint64_t count, const lwgrp* group
   return LWGRP_SUCCESS;
 }
 
-int lwgrp_allreduce_uint64_max(uint64_t* buf, uint64_t count, const lwgrp* group)
+int lwgrp_allreduce_uint64_sum(uint64_t* buf, uint64_t count, const lwgrp* group)
+{
+  int64_t rank  = group->rank;
+  int64_t ranks = group->size;
+
+  size_t buf_size = count * sizeof(uint64_t);
+  uint64_t* left_buf  = SPAWN_MALLOC(buf_size);
+  uint64_t* right_buf = SPAWN_MALLOC(buf_size);
+
+  int i;
+  int round = 0;
+  int64_t dist = 1;
+  while (dist < ranks) {
+    /* send message left */
+    if (rank - dist >= 0) {
+      spawn_net_channel* ch = group->list_left[round];
+      spawn_net_write(ch, buf, buf_size);
+    }
+
+    /* send message right */
+    if (rank + dist < ranks) {
+      spawn_net_channel* ch = group->list_right[round];
+      spawn_net_write(ch, buf, buf_size);
+    }
+
+    /* recv message from left */
+    if (rank - dist >= 0) {
+      spawn_net_channel* ch = group->list_left[round];
+      spawn_net_read(ch, left_buf, buf_size);
+    }
+
+    /* recv message from right */
+    if (rank + dist < ranks) {
+      spawn_net_channel* ch = group->list_right[round];
+      spawn_net_read(ch, right_buf, buf_size);
+    }
+
+    /* merge received maps with our current map */
+    if (rank - dist >= 0) {
+      for (i = 0; i < count; i++) {
+        buf[i] += left_buf[i];
+      }
+    }
+    if (rank + dist < ranks) {
+      for (i = 0; i < count; i++) {
+        buf[i] += right_buf[i];
+      }
+    }
+
+    dist <<= 1;
+    round++;
+  }
+
+  spawn_free(&right_buf);
+  spawn_free(&left_buf);
+
+  return LWGRP_SUCCESS;
+}
+
+int lwgrp_allreduce_uint64_max_blocking(uint64_t* buf, uint64_t count, const lwgrp* group)
 {
   int64_t rank  = group->rank;
   int64_t ranks = group->size;
@@ -1209,8 +1736,71 @@ int lwgrp_allreduce_uint64_max(uint64_t* buf, uint64_t count, const lwgrp* group
   return LWGRP_SUCCESS;
 }
 
+int lwgrp_allreduce_uint64_max(uint64_t* buf, uint64_t count, const lwgrp* group)
+{
+  int64_t rank  = group->rank;
+  int64_t ranks = group->size;
+
+  size_t buf_size = count * sizeof(uint64_t);
+  uint64_t* left_buf  = SPAWN_MALLOC(buf_size);
+  uint64_t* right_buf = SPAWN_MALLOC(buf_size);
+
+  int i;
+  int round = 0;
+  int64_t dist = 1;
+  while (dist < ranks) {
+    /* send message left */
+    if (rank - dist >= 0) {
+      spawn_net_channel* ch = group->list_left[round];
+      spawn_net_write(ch, buf, buf_size);
+    }
+
+    /* send message right */
+    if (rank + dist < ranks) {
+      spawn_net_channel* ch = group->list_right[round];
+      spawn_net_write(ch, buf, buf_size);
+    }
+
+    /* recv message from left */
+    if (rank - dist >= 0) {
+      spawn_net_channel* ch = group->list_left[round];
+      spawn_net_read(ch, left_buf, buf_size);
+    }
+
+    /* recv message from right */
+    if (rank + dist < ranks) {
+      spawn_net_channel* ch = group->list_right[round];
+      spawn_net_read(ch, right_buf, buf_size);
+    }
+
+    /* merge received maps with our current map */
+    if (rank - dist >= 0) {
+      for (i = 0; i < count; i++) {
+        if (left_buf[i] > buf[i]) {
+          buf[i] = left_buf[i];
+        }
+      }
+    }
+    if (rank + dist < ranks) {
+      for (i = 0; i < count; i++) {
+        if (right_buf[i] > buf[i]) {
+          buf[i] = right_buf[i];
+        }
+      }
+    }
+
+    dist <<= 1;
+    round++;
+  }
+
+  spawn_free(&right_buf);
+  spawn_free(&left_buf);
+
+  return LWGRP_SUCCESS;
+}
+
 /* compute prefix sum across procs of a vector of uint64_t values */
-int lwgrp_scan_uint64_sum(uint64_t* buf, uint64_t count, const lwgrp* group)
+int lwgrp_scan_uint64_sum_blocking(uint64_t* buf, uint64_t count, const lwgrp* group)
 {
   int64_t rank  = group->rank;
   int64_t ranks = group->size;
@@ -1271,7 +1861,48 @@ int lwgrp_scan_uint64_sum(uint64_t* buf, uint64_t count, const lwgrp* group)
   return LWGRP_SUCCESS;
 }
 
-int lwgrp_double_scan_uint64_sum(const uint64_t* buf, uint64_t* ltr, uint64_t* rtl, uint64_t count, const lwgrp* group)
+/* compute prefix sum across procs of a vector of uint64_t values */
+int lwgrp_scan_uint64_sum(uint64_t* buf, uint64_t count, const lwgrp* group)
+{
+  int64_t rank  = group->rank;
+  int64_t ranks = group->size;
+
+  size_t buf_size = count * sizeof(uint64_t);
+  uint64_t* recv_buf = SPAWN_MALLOC(buf_size);
+
+  int i;
+  int round = 0;
+  int64_t dist = 1;
+  while (dist < ranks) {
+    /* exchange data with right partner */
+    if (rank + dist < ranks) {
+      spawn_net_channel* ch = group->list_right[round];
+      spawn_net_write(ch, buf, buf_size);
+    }
+
+    /* exchange data with left partner */
+    if (rank - dist >= 0) {
+      spawn_net_channel* ch = group->list_left[round];
+      spawn_net_read(ch, recv_buf, buf_size);
+    }
+
+    /* merge received maps with our current map */
+    if (rank - dist >= 0) {
+      for (i = 0; i < count; i++) {
+        buf[i] += recv_buf[i];
+      }
+    }
+
+    dist <<= 1;
+    round++;
+  }
+
+  spawn_free(&recv_buf);
+
+  return LWGRP_SUCCESS;
+}
+
+int lwgrp_double_scan_uint64_sum_blocking(const uint64_t* buf, uint64_t* ltr, uint64_t* rtl, uint64_t count, const lwgrp* group)
 {
   int64_t rank  = group->rank;
   int64_t ranks = group->size;
@@ -1362,7 +1993,82 @@ int lwgrp_double_scan_uint64_sum(const uint64_t* buf, uint64_t* ltr, uint64_t* r
   return LWGRP_SUCCESS;
 }
 
-int lwgrp_allgather_strmap(strmap* map, const lwgrp* group)
+int lwgrp_double_scan_uint64_sum(const uint64_t* buf, uint64_t* ltr, uint64_t* rtl, uint64_t count, const lwgrp* group)
+{
+  int64_t rank  = group->rank;
+  int64_t ranks = group->size;
+
+  size_t buf_size = count * sizeof(uint64_t);
+  uint64_t* left_send  = SPAWN_MALLOC(buf_size);
+  uint64_t* left_recv  = SPAWN_MALLOC(buf_size);
+  uint64_t* right_send = SPAWN_MALLOC(buf_size);
+  uint64_t* right_recv = SPAWN_MALLOC(buf_size);
+
+  /* initialize outgoing buffers */
+  int i;
+  for (i = 0; i < count; i++) {
+      left_send[i]  = buf[i];
+      right_send[i] = buf[i];
+  }
+
+  int round = 0;
+  int64_t dist = 1;
+  while (dist < ranks) {
+    /* send data left */
+    if (rank - dist >= 0) {
+      spawn_net_channel* ch = group->list_left[round];
+      spawn_net_write(ch, left_send, buf_size);
+    }
+
+    /* send data right */
+    if (rank + dist < ranks) {
+      /* send then recv */
+      spawn_net_channel* ch = group->list_right[round];
+      spawn_net_write(ch, right_send, buf_size);
+    }
+
+    /* recv data from left */
+    if (rank - dist >= 0) {
+      spawn_net_channel* ch = group->list_left[round];
+      spawn_net_read(ch, left_recv, buf_size);
+    }
+
+    /* recv data from right */
+    if (rank + dist < ranks) {
+      spawn_net_channel* ch = group->list_right[round];
+      spawn_net_read(ch, right_recv, buf_size);
+    }
+
+    /* merge received maps with our current map */
+    if (rank - dist >= 0) {
+      for (i = 0; i < count; i++) {
+        right_send[i] += left_recv[i];
+      }
+    }
+    if (rank + dist < ranks) {
+      for (i = 0; i < count; i++) {
+        left_send[i] += right_recv[i];
+      }
+    }
+
+    dist <<= 1;
+    round++;
+  }
+
+  for (i = 0; i < count; i++) {
+    ltr[i] = right_send[i];
+    rtl[i] = left_send[i];
+  }
+
+  spawn_free(&right_recv);
+  spawn_free(&right_send);
+  spawn_free(&left_recv);
+  spawn_free(&left_send);
+
+  return LWGRP_SUCCESS;
+}
+
+int lwgrp_allgather_strmap_blocking(strmap* map, const lwgrp* group)
 {
   int64_t rank  = group->rank;
   int64_t ranks = group->size;
@@ -1413,6 +2119,55 @@ int lwgrp_allgather_strmap(strmap* map, const lwgrp* group)
         spawn_net_read_strmap(ch, map_left);
         spawn_net_write_strmap(ch, map);
       }
+    }
+
+    /* merge received maps with our current map */
+    strmap_merge(map, map_left);
+    strmap_merge(map, map_right);
+    strmap_delete(&map_left);
+    strmap_delete(&map_right);
+
+    dist <<= 1;
+    round++;
+  }
+
+  return LWGRP_SUCCESS;
+}
+
+int lwgrp_allgather_strmap(strmap* map, const lwgrp* group)
+{
+  int64_t rank  = group->rank;
+  int64_t ranks = group->size;
+
+  int round = 0;
+  int64_t dist = 1;
+  while (dist < ranks) {
+    /* create temps to hold maps received from left and right */
+    strmap* map_left = strmap_new();
+    strmap* map_right = strmap_new();
+
+    /* send map left */
+    if (rank - dist >= 0) {
+      spawn_net_channel* ch = group->list_left[round];
+      spawn_net_write_strmap(ch, map);
+    }
+
+    /* send map right */
+    if (rank + dist < ranks) {
+      spawn_net_channel* ch = group->list_right[round];
+      spawn_net_write_strmap(ch, map);
+    }
+
+    /* recv map from left */
+    if (rank - dist >= 0) {
+      spawn_net_channel* ch = group->list_left[round];
+      spawn_net_read_strmap(ch, map_left);
+    }
+
+    /* recv map from right */
+    if (rank + dist < ranks) {
+      spawn_net_channel* ch = group->list_right[round];
+      spawn_net_read_strmap(ch, map_right);
     }
 
     /* merge received maps with our current map */
