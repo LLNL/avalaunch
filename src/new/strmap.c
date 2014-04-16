@@ -9,6 +9,7 @@
 #include <stdint.h>
 
 #include "strmap.h"
+#include "spawn_util.h"
 
 #define STRMAP_FAILURE (1)
 

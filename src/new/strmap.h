@@ -8,8 +8,6 @@
 #include <sys/types.h>
 #include <string.h>
 
-#include "spawn_util.h"
-
 #ifdef __cplusplus
 extern "C" {
 #endif
