@@ -1,7 +1,6 @@
 #ifndef SPAWN_INTERNAL_H
 #define SPAWN_INTERNAL_H
 
-#include "timer_util.h"
 #include "spawn_util.h"
 #include "strmap.h"
 #include "spawn_net.h"
