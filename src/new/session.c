@@ -4553,6 +4553,7 @@ session_start (session * s)
 
     strmap_delete(&spawnep_strmap);
 
+#if 0
     /* measure cost of signal propagation */
     signal_from_root(s);
     if (!nodeid) { tid = begin_delta("signal costs x1000 **"); }
@@ -4561,6 +4562,7 @@ session_start (session * s)
         signal_from_root(s);
     }
     if (!nodeid) { end_delta(tid); }
+#endif
 
     /**********************
      * Create app procs
