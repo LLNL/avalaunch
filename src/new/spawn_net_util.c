@@ -27,13 +27,17 @@ void spawn_net_write_str(const spawn_net_channel* ch, const char* str)
     uint64_t size64 = (uint64_t) size;
     ptr += spawn_pack_uint64(ptr, size64);
 
+    /* send size */
+    spawn_net_write(ch, buf, 8);
+
     /* copy the string */
     if (size > 0) {
         memcpy(ptr, str, size);
     }
 
     /* send message */
-    spawn_net_write(ch, buf, bufsize);
+    //spawn_net_write(ch, buf, bufsize);
+    spawn_net_write(ch, (char*)buf + 8, size);
 
     /* free buffer */
     spawn_free(&buf);
@@ -82,11 +86,15 @@ void spawn_net_write_strmap(const spawn_net_channel* ch, const strmap* map)
     uint64_t size64 = (uint64_t) size;
     ptr += spawn_pack_uint64(ptr, size64);
   
+    /* send size */
+    spawn_net_write(ch, buf, 8);
+
     /* pack strmap into buffer */
     ptr += strmap_pack(ptr, map);
 
     /* send map */
-    spawn_net_write(ch, buf, bufsize);
+    //spawn_net_write(ch, buf, bufsize);
+    spawn_net_write(ch, (char*)buf + 8, size);
 
     /* free buffer */
     spawn_free(&buf);
