@@ -202,21 +202,6 @@ struct ibv_wr_descriptor
 /* ibverbs reserves the first 40 bytes of each UD packet, this may
  * sometimes contain valid data for a Global Routine Header */
 #define MV2_UD_GRH_LEN (40)
-
-#define PKT_TRANSPORT_OFFSET(_v) (MV2_UD_GRH_LEN)
-
-#define SET_PKT_LEN_HEADER(_v, _wc) {                                       \
-    (_v)->content_size = (_wc).byte_len - MV2_UD_GRH_LEN ;              \
-}
-
-#define SET_PKT_HEADER_OFFSET(_v) {                                         \
-    (_v)->pheader = (_v)->buffer + PKT_TRANSPORT_OFFSET(_v);                \
-}
-
-#define PKT_DATA_OFFSET(_v, _header_size) (_v)->pheader + _header_size;
-
-#define PKT_DATA_SIZE(_v, _header_size) (_v)->content_size - _header_size;
-
 #define MRAIL_MAX_UD_SIZE (RDMA_DEFAULT_UD_MTU - MV2_UD_GRH_LEN)
 
 typedef struct link
@@ -227,19 +212,14 @@ typedef struct link
 
 typedef struct vbuf
 {
-    struct ibv_wr_descriptor desc;
-    void* pheader;
-    struct vbuf_region* region;
-    void* vc;
-    int padding;
-    VBUF_FLAG_TYPE* head_flag;
-    unsigned char* buffer;
-
-    int content_size;
-
+    struct vbuf_region* region;    /* pointer to memory region containing this vbuf */
+    struct ibv_wr_descriptor desc; /* descriptors used for IB calls */
+    unsigned char* buffer; /* start of data buffer (pinned memory) */
+    char* content_buf;     /* pointer to start of user data */
+    int content_size;      /* size of user data in bytes */
+    void* vc;              /* pointer to virtual channel to which vbuf message corresponds */
     uint16_t seqnum;
     uint16_t retry_count;
-    uint16_t pending_send_polls;
     uint8_t flags;
     double timestamp;
     uint8_t in_sendwin;
@@ -247,7 +227,7 @@ typedef struct vbuf
     LINK sendwin_msg;    /* tracks outstanding sends */
     LINK recvwin_msg;    /* tracks received packets, either control msgs or out-of-order app msgs */
     LINK extwin_msg;     /* tracks messages to be sent when credits are availble */
-    LINK unack_msg;
+    LINK unack_msg;      /* tracks a list of sends yet to sent */
 } vbuf;
 
 /* packet types: must fit within uint8_t, set highest order bit to

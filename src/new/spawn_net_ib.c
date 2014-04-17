@@ -24,6 +24,8 @@
  *
  */
 
+#include <limits.h>
+
 #include "spawn_internal.h"
 #include "spawn_net_ib_internal.h"
 
@@ -36,11 +38,11 @@
 /* TODO: bury all of these globals in allocated memory */
 static int64_t g_count_open = 0; /* number of active endpoint opens (spawn_net_open w/o close) */
 static int64_t g_count_conn = 0; /* number of active VC connections (local + remote) */
-static spawn_net_endpoint* g_ep = SPAWN_NET_ENDPOINT_NULL;
+static uint64_t g_ud_ep_id  = 0; /* next endpoint id to be assigned */
 
 static mv2_proc_info_t proc;
 static mv2_hca_info_t g_hca_info;
-static ud_addr local_ep_info;
+static ud_addr local_ep_info; /* caches lid and qpn of our UDQP */
 
 /* Tracks an array of virtual channels.  With each new channel created,
  * the id is incremented.  Grows channel array as needed. */
@@ -703,9 +705,6 @@ static int vbuf_region_alloc(struct ibv_pd* pdomain, int nvbufs)
         char* ptr = (char *)vbuf_dma_buffer + i * rdma_default_ud_mtu;
         cur->buffer = (void*) ptr;
 
-        /* set pointer to head flag, comes as last bytes of buffer */
-        cur->head_flag = (VBUF_FLAG_TYPE *) (ptr + rdma_default_ud_mtu - sizeof(cur->head_flag));
-
         /* set remaining fields */
         cur->content_size = 0;
     }
@@ -738,19 +737,9 @@ static vbuf* vbuf_get(struct ibv_pd* pd)
     ud_num_free_vbuf--;
     ud_num_vbuf_get++;
 
-    /* need to change this to RPUT_VBUF_FLAG later
-     * if we are doing rput */
-    v->padding     = NORMAL_VBUF_FLAG;
-    v->pheader     = (void *)v->buffer;
-    v->retry_count = 0;
-    v->flags       = 0;
-    v->pending_send_polls = 0;
-
-    /* this is probably not the right place to initialize shandle to NULL.
-     * Do it here for now because it will make sure it is always initialized.
-     * Otherwise we would need to very carefully add the initialization in
-     * a dozen other places, and probably miss one. */
     v->content_size = 0;
+    v->retry_count  = 0;
+    v->flags        = 0;
 
     pthread_spin_unlock(&vbuf_lock);
 
@@ -782,14 +771,7 @@ static void vbuf_release(vbuf* v)
     ud_num_free_vbuf++;
     ud_num_vbuf_freed++;
 
-    if (v->padding != NORMAL_VBUF_FLAG) {
-        SPAWN_ERR("Invalid vbuf type detected");
-        spawn_exit(-1);
-    }
-
     /* clear out fields to prepare vbuf for next use */
-    *v->head_flag   = 0;
-    v->pheader      = NULL;
     v->content_size = 0;
     v->vc           = NULL;
 
@@ -803,28 +785,48 @@ static inline void vbuf_prepare_recv(vbuf* v, unsigned long len)
 {
     assert(v != NULL);
 
+    /* describe recv buffer */
+    v->desc.sg_entry.addr   = (uint64_t) v->buffer;
+    v->desc.sg_entry.length = (uint32_t) len;
+    v->desc.sg_entry.lkey   = (uint32_t) v->region->mem_handle->lkey;
+
+    /* put together our work request */
+
+    /* record address of vbuf as a tag */
+    v->desc.u.rr.wr_id = (uint64_t) v;
+
+    /* we just have this single request */
     v->desc.u.rr.next = NULL;
-    v->desc.u.rr.wr_id = (uintptr_t) v;
-    v->desc.u.rr.num_sge = 1;
+
+    /* our request contains a single scatter/gather entry */
     v->desc.u.rr.sg_list = &(v->desc.sg_entry);
-    v->desc.sg_entry.length = len;
-    v->desc.sg_entry.lkey = v->region->mem_handle->lkey;
-    v->desc.sg_entry.addr = (uintptr_t)(v->buffer);
-    v->padding = NORMAL_VBUF_FLAG;
+    v->desc.u.rr.num_sge = 1;
+
+    return;
 }
 
 static inline void vbuf_prepare_send(vbuf* v, unsigned long len)
 {
+    /* describe data to be sent */
+    v->desc.sg_entry.addr   = (uint64_t) v->buffer;
+    v->desc.sg_entry.length = (uint32_t) len;
+    v->desc.sg_entry.lkey   = (uint32_t) v->region->mem_handle->lkey;
+
+    /* put together our work request */
+
+    /* record address of vbuf as a tag */
+    v->desc.u.sr.wr_id = (uint64_t) v;
+
+    /* we just have this single request */
     v->desc.u.sr.next = NULL;
-    v->desc.u.sr.send_flags = IBV_SEND_SIGNALED;
-    v->desc.u.sr.opcode = IBV_WR_SEND;
-    v->desc.u.sr.wr_id = (uintptr_t) v;
-    v->desc.u.sr.num_sge = 1;
+
+    /* our request contains a single scatter/gather entry */
     v->desc.u.sr.sg_list = &(v->desc.sg_entry);
-    v->desc.sg_entry.length = len;
-    v->desc.sg_entry.lkey = v->region->mem_handle->lkey;
-    v->desc.sg_entry.addr = (uintptr_t)(v->buffer);
-    v->padding = NORMAL_VBUF_FLAG;
+    v->desc.u.sr.num_sge = 1;
+
+    /* set up the IB flags */
+    v->desc.u.sr.opcode     = IBV_WR_SEND;
+    v->desc.u.sr.send_flags = IBV_SEND_SIGNALED;
 
     return;
 }
@@ -836,9 +838,12 @@ static inline void vbuf_prepare_send(vbuf* v, unsigned long len)
 /* this queue tracks a list of pending connect messages,
  * the accept function pulls items from this list */
 typedef struct connect_list_t {
-    vbuf* v;      /* pointer to vbuf for this message */
-    uint32_t lid; /* source lid */
-    uint32_t qpn; /* source queue pair number */
+    vbuf* v;       /* pointer to vbuf for this message */
+    uint32_t lid;  /* source lid */
+    uint32_t qpn;  /* source queue pair number */
+    uint64_t id;   /* write id to use when sending */
+    uint64_t epid; /* endpoint id */
+    char* name;    /* remote hostname */
     struct connect_list_t* next;
 } connect_list;
 
@@ -851,7 +856,7 @@ typedef struct connected_list_t {
     unsigned int lid; /* remote LID */
     unsigned int qpn; /* remote Queue Pair Number */
     unsigned int id;  /* write id we use to write to remote side */
-    vc_t*  vc;  /* open vc to remote side */
+    vc_t*  vc;        /* open vc to remote side */
     struct connected_list_t* next;
 } connected_list;
 
@@ -862,23 +867,14 @@ static void MPIDI_CH3I_MRAIL_Release_vbuf(vbuf * v)
 {
     /* clear some fields */
     v->content_size = 0;
-
-    if (v->padding == NORMAL_VBUF_FLAG) {
-        vbuf_release(v);
-    }
+    vbuf_release(v);
 }
 
 /* given a vbuf used for a send, release vbuf back to pool if we can */
 static int MRAILI_Process_send(void *vbuf_addr)
 {
     vbuf *v = vbuf_addr;
-
-    if (v->padding == NORMAL_VBUF_FLAG) {
-        vbuf_release(v);
-    } else {
-        printf("Couldn't release VBUF; v->padding = %d\n", v->padding);
-    }
-
+    vbuf_release(v);
     return 0;
 }
 
@@ -920,7 +916,7 @@ static int ud_post_send(vc_t* vc, vbuf* v, ud_ctx_t* ud_ctx)
     v->vc = (void *)vc;
 
     /* write send context into packet header */
-    packet_header* p = v->pheader;
+    packet_header* p = (packet_header*) v->buffer;
     p->srcid = vc->writeid;
 
     /* if we have too many outstanding sends, or if we have other items
@@ -1206,7 +1202,7 @@ static void ud_send_ack(vc_t *vc)
     vbuf_prepare_send(v, size);
 
     /* get pointer to packet header */
-    packet_header* p = v->pheader;
+    packet_header* p = (packet_header*) v->buffer;
     memset((void*)p, 0xfc, sizeof(packet_header));
 
     /* write type and send context into packet header */
@@ -1283,7 +1279,7 @@ static void ud_resend(vbuf *v)
     vc_t* vc = v->vc;
 
     /* get pointer to packet header */
-    packet_header* p = v->pheader;
+    packet_header* p = (packet_header*) v->buffer;
 
     /* piggy-back ack on message and mark VC as ack completed */
     p->acknum = vc->seqnum_next_toack;
@@ -1370,7 +1366,7 @@ static void ud_process_recv(vbuf *v)
     vc_t* vc = v->vc;
 
     /* get pointer to packet header */
-    packet_header* p = v->pheader;
+    packet_header* p = (packet_header*) v->content_buf;
 
     /* read ack seq number from incoming packet and clear packets
      * up to and including this number from send and unack'd queues */
@@ -1416,6 +1412,105 @@ static void ud_process_recv(vbuf *v)
     mv2_ud_place_recvwin(v); 
 
 fn_exit:
+    return;
+}
+
+/* given a connection request packet, append entry to our queue
+ * of connection requests */
+static void ud_process_connreq(vbuf* v, const struct ibv_wc* wc)
+{
+    /* get pointer to payload in vbuf */
+    size_t header_size = sizeof(packet_header);
+    char* connect_payload = v->content_buf + header_size;
+
+    /* make a copy of name that we can modify */
+    char* name_copy = SPAWN_STRDUP(connect_payload);
+    char* ptr = name_copy;
+
+    /* pick out length of remote hostname */
+    char* host_len_str = ptr;
+    while (*ptr != ':') {
+        ptr++;
+    }
+    *ptr = '\0';
+    ptr++;
+
+    /* set remote hostname and skip to IBUD address */
+    char* host_str = ptr;
+    int host_len = atoi(host_len_str);
+    ptr += host_len;
+    *ptr = '\0';
+    ptr++;
+
+    /* extract lid, queue pair number, and endpoint id from
+     * endpoint name */
+    unsigned int epid, writeid, lid, qpn;
+    int parsed = sscanf(ptr, "%06x:%06x:%04x:%06x", &epid, &writeid, &lid, &qpn);
+    if (parsed != 4) {
+        SPAWN_ERR("Couldn't parse ep info from %s", connect_payload);
+        spawn_free(&name_copy);
+        vbuf_release(v);
+        return;
+    }
+
+    /* TODO: read lid/qpn from vbuf and not payload to avoid
+     * spoofing */
+
+    /* check that we don't already have an existing connection
+     * that matches the remote info for this request */
+    connected_list* elem = connected_head;
+    while (elem != NULL) {
+        /* check whether this connect request matches one we're
+         * already connected to */
+        if (elem->lid == lid &&
+            elem->qpn == qpn &&
+            elem->id  == writeid)
+        {
+            /* we're already connected to this process,
+             * drop this request */
+            spawn_free(&name_copy);
+            vbuf_release(v);
+            return;
+        }
+
+        /* no match so far, try the next item in connected list */
+        elem = elem->next;
+    }
+
+    /* TODO: we should put a time out on connection request
+     * entries once added to the queue so that we can delete
+     * them, this matters because we may accept a connection
+     * and then get several more requests before the remote
+     * end learns that we have accepted. */
+
+    /* allocate and initialize new element for connect queue */
+    connect_list* req = (connect_list*) SPAWN_MALLOC(sizeof(connect_list));
+    req->v    = v;          /* record pointer to vbuf */
+    req->lid  = wc->slid;   /* record source lid */
+    req->qpn  = wc->src_qp; /* record source qpn */
+    req->id   = writeid;    /* record write id we should use to send to remote process */
+    req->epid = epid;       /* record endpoint id request is trying to connect to */
+    req->name = SPAWN_STRDUP(host_str); /* record remote hostname */
+    req->next = NULL;
+
+    /* append req to connect queue */
+    if (connect_head == NULL) {
+        connect_head = req;
+    }
+    if (connect_tail != NULL) {
+        connect_tail->next = req;
+    }
+    connect_tail = req;
+
+    /* free our copy of the packet payload */
+    spawn_free(&name_copy);
+
+    /* TODO: better to free the vbuf here? */
+
+    /* if we append to the queue, we don't free the vbuf,
+     * we've got a pointer to it, and we'll free it when
+     * we process the request */
+
     return;
 }
 
@@ -1611,15 +1706,9 @@ static int cq_poll(int* got_recv)
         /* get vbuf associated with this work request */
         vbuf* v = (vbuf *) ((uintptr_t) wc->wr_id);
 
-        /* get pointer to packet header in vbuf */
-        SET_PKT_LEN_HEADER(v, wcs[i]);
-        SET_PKT_HEADER_OFFSET(v);
-        packet_header* p = v->pheader;
-
+        packet_header* p;
         switch (wc->opcode) {
             case IBV_WC_SEND:
-//            case IBV_WC_RDMA_READ:
-//            case IBV_WC_RDMA_WRITE:
                 /* remember that a send completed to issue more sends later */
                 sendcnt++;
 
@@ -1638,6 +1727,14 @@ static int cq_poll(int* got_recv)
                 v = NULL;
                 break;
             case IBV_WC_RECV:
+                /* IBUD reserves the first 40 bytes of the user buffer
+                 * for the Global Routing Header (GRH) if one exists */
+                v->content_buf  = v->buffer + MV2_UD_GRH_LEN;
+                v->content_size = wc->byte_len - MV2_UD_GRH_LEN;
+
+                /* get pointer to packet header in vbuf */
+                p = (packet_header*) v->content_buf;
+
                 /* we don't have a source id for connect messages */
                 if (p->type != PKT_UD_CONNECT) {
                     /* this is not a connect msg, so source id is valid,
@@ -1683,22 +1780,7 @@ static int cq_poll(int* got_recv)
                     /* a connect message does not have a valid src id field,
                      * so we can't associate msg with a vc yet, we stick this
                      * on the queue that accept looks to later */
-
-                    /* allocate and initialize new element for connect queue */
-                    connect_list* elem = (connect_list*) SPAWN_MALLOC(sizeof(connect_list));
-                    elem->v    = v;          /* record pointer to vbuf */
-                    elem->lid  = wc->slid;   /* record source lid */
-                    elem->qpn  = wc->src_qp; /* record source qpn */
-                    elem->next = NULL;
-
-                    /* append elem to connect queue */
-                    if (connect_head == NULL) {
-                        connect_head = elem;
-                    }
-                    if (connect_tail != NULL) {
-                        connect_tail->next = elem;
-                    }
-                    connect_tail = elem;
+                    ud_process_connreq(v, wc);
 
                     /* For now, we also count a connect message as a
                      * receive.  An optimization would be count
@@ -1899,13 +1981,13 @@ static inline int packet_send(
     assert((MRAIL_MAX_UD_SIZE - header_size) >= payload_size);
 
     /* set packet header fields */
-    packet_header* p = v->pheader;
+    packet_header* p = (packet_header*) v->buffer;
     memset((void*)p, 0xfc, sizeof(packet_header));
     p->type = type;
 
     /* copy in payload */
     if (payload_size > 0) {
-        char* ptr = (char*)v->buffer + header_size;
+        char* ptr = v->buffer + header_size;
         memcpy(ptr, payload, payload_size);
     }
 
@@ -1958,7 +2040,7 @@ static vbuf* packet_read(vc_t* vc)
 
 /* blocks until element arrives on connect queue,
  * extracts element and returns its vbuf */
-static vbuf* recv_connect_message()
+static connect_list* recv_connect_message(uint64_t epid)
 {
     /* if we don't have a receive thread,
      * eagerly pull all events from completion queue */
@@ -1966,8 +2048,28 @@ static vbuf* recv_connect_message()
         cq_drain();
     }
 
-    /* wait until we see at item at head of connect queue */
-    while (connect_head == NULL) {
+    /* wait until we find a matching item in the connect queue */
+    connect_list* prev = NULL;
+    connect_list* elem;
+    while (1) {
+        /* walk connect list looking for matching request */
+        elem = connect_head;
+        while (elem != NULL) {
+            /* stop walking the list if we find a matching element */
+            if (elem->epid == epid) {
+                break;
+            }
+
+            /* otherwise, look at the next element */
+            prev = elem;
+            elem = elem->next;
+        }
+
+        /* if we found something, break the outer loop */
+        if (elem != NULL) {
+            break;
+        }
+
         /* determine whether we should poll or wait for a new message */
         if (g_recv_busy_spin) {
             /* polling, release the lock for some time to let
@@ -1986,23 +2088,24 @@ static vbuf* recv_connect_message()
         }
     }
 
-    /* get pointer to element */
-    connect_list* elem = connect_head;
-
     /* extract element from queue */
-    connect_head = elem->next;
-    if (connect_head == NULL) {
-        connect_tail = NULL;
+    if (prev != NULL) {
+      /* update previous item to point to item past this one */
+      prev->next = elem->next;
+    } else {
+      /* there is no item in front of this one,
+       * update the head to point to the next item */
+      connect_head = elem->next;
     }
 
-    /* get pointer to vbuf */
-    vbuf* v = elem->v;
+    /* if item is last on the list, update tail to point
+     * to previous item, which is either real or NULL */
+    if (elem->next == NULL) {
+        connect_tail = prev;
+    }
 
-    /* free element */
-    spawn_free(&elem);
-
-    /* return vbuf */
-    return v;
+    /* return item */
+    return elem;
 }
 
 static int recv_accept_message(vc_t* vc)
@@ -2012,7 +2115,7 @@ static int recv_accept_message(vc_t* vc)
 
     /* message payload is write id we should use when sending */
     size_t header_size = sizeof(packet_header);
-    char* payload = PKT_DATA_OFFSET(v, header_size);
+    char* payload = v->content_buf + header_size;
 
     /* extract write id from payload */
     int id;
@@ -2249,7 +2352,7 @@ static struct ibv_qp* qp_create(ud_qp_info_t *qp_info)
 }
 
 /* Initialize UD Context */
-static spawn_net_endpoint* ud_ctx_create()
+static ud_ctx_t* ud_ctx_create()
 {
     /* init vbuf routines */
     vbuf_init();
@@ -2269,13 +2372,13 @@ static spawn_net_endpoint* ud_ctx_create()
     ret = getrlimit(RLIMIT_MEMLOCK, &limit);
     if (ret != 0) {
         SPAWN_ERR("Failed to read MEMLOCK limit (getrlimit errno=%d %s)", errno, strerror(errno));
-        return SPAWN_NET_ENDPOINT_NULL;
+        return NULL;
     }
     limit.rlim_cur = limit.rlim_max;
     ret = setrlimit(RLIMIT_MEMLOCK, &limit);
     if (ret != 0) {
         SPAWN_ERR("Failed to increase MEMLOCK limit (setrlimit errno=%d %s)", errno, strerror(errno));
-        return SPAWN_NET_ENDPOINT_NULL;
+        return NULL;
     }
 
     /* allocate UD context structure */
@@ -2307,7 +2410,7 @@ static spawn_net_endpoint* ud_ctx_create()
     ud_ctx->qp = qp_create(&qp_info);
     if (ud_ctx->qp == NULL) {
         SPAWN_ERR("Error in creating UD QP");
-        return SPAWN_NET_ENDPOINT_NULL;
+        return NULL;
     }
 
     /* post initial UD recv requests */
@@ -2321,28 +2424,22 @@ static spawn_net_endpoint* ud_ctx_create()
     /* initialize global unack'd queue */
     MESSAGE_QUEUE_INIT(&proc.unack_queue);
 
-    /* create end point */
+    /* record our lid and qpn */
     local_ep_info.lid = g_hca_info.port_attr[0].lid;
     local_ep_info.qpn = proc.ud_ctx->qp->qp_num;
-
-    /* allocate new endpoint and fill in its fields */
-    spawn_net_endpoint* ep = SPAWN_MALLOC(sizeof(spawn_net_endpoint));
-    ep->type = SPAWN_NET_TYPE_IBUD;
-    ep->name = SPAWN_STRDUPF("IBUD:%04x:%06x", local_ep_info.lid, local_ep_info.qpn);
-    ep->data = NULL;
 
     /* initialize attributes to create comm thread */
     pthread_attr_t attr;
     if (pthread_attr_init(&attr)) {
         SPAWN_ERR("Unable to init thread attr");
-        return SPAWN_NET_ENDPOINT_NULL;
+        return NULL;
     }
 
     /* set stack size for comm thred */
     ret = pthread_attr_setstacksize(&attr, DEFAULT_CM_THREAD_STACKSIZE);
     if (ret && ret != EINVAL) {
         SPAWN_ERR("Unable to set stack size");
-        return SPAWN_NET_ENDPOINT_NULL;
+        return NULL;
     }
 
     /* disable SIGCHLD while we start comm thread */
@@ -2375,7 +2472,7 @@ static spawn_net_endpoint* ud_ctx_create()
         SPAWN_ERR("Failed to unblock SIGCHLD (pthread_sigmask rc=%d %s)", ret, strerror(ret));
     }
 
-    return ep;
+    return ud_ctx;
 }
 
 /* Destroy UD Context */
@@ -2439,51 +2536,138 @@ static void ud_ctx_destroy(spawn_net_endpoint** pep)
 
 spawn_net_endpoint* spawn_net_open_ib()
 {
-    /* open endpoint if we need to */
+    /* open HCA context and UD QP if we haven't already */
     if (g_count_open == 0) {
-        /* Open HCA for communication */
+        /* open HCA for communication */
         memset(&g_hca_info, 0, sizeof(mv2_hca_info_t));
-        if (hca_open(0, &g_hca_info) != 0){
+        if (hca_open(0, &g_hca_info) != 0) {
             SPAWN_ERR("Failed to initialize HCA");
             return SPAWN_NET_ENDPOINT_NULL;
         }
 
-        g_ep = ud_ctx_create();
+        /* create our UD QP and data structures to manage it */
+        ud_ctx_t* ctx = ud_ctx_create();
+        if (ctx == NULL) {
+            SPAWN_ERR("Failed to create UDQP context");
+            return SPAWN_NET_ENDPOINT_NULL;
+        }
     }
 
+    /* increase runing count of open endpoints */
     g_count_open++;
 
-    return g_ep;
+    /* Since we share one UDQP amongst all connections on this process,
+     * we assign a unique id to each one so that each open produces an
+     * enpoint with a unique name.  This way connect/accept can
+     * refer to a particular context. */
+    uint64_t epid = g_ud_ep_id;
+    g_ud_ep_id++;
+
+    /* get our hostname, we encode this in our endpoint name
+     * for better human readability */
+    char hostname[HOST_NAME_MAX];
+    if (gethostname(hostname, sizeof(hostname)) < 0) {
+        SPAWN_ERR("Failed gethostname()");
+        return SPAWN_NET_CHANNEL_NULL;
+    }
+    int hostname_len = (int) strlen(hostname);
+
+    /* allocate new endpoint and fill in its fields */
+    spawn_net_endpoint* ep = SPAWN_MALLOC(sizeof(spawn_net_endpoint));
+    ep->type = SPAWN_NET_TYPE_IBUD;
+    ep->name = SPAWN_STRDUPF("IBUD:%d:%s:%04x:%06x:%06x",
+        hostname_len, hostname, local_ep_info.lid, local_ep_info.qpn, epid
+    );
+    ep->data = (void*) epid; /* cache epid with endpoint (needed in accept) */
+
+    return ep;
 }
 
 int spawn_net_close_ib(spawn_net_endpoint** pep)
 {
+    /* get pointer to endpoint */
+    spawn_net_endpoint* ep = *pep;
+
+    /* free the endpoint name */
+    spawn_free(&ep->name);
+
+    /* free the endpoint data structure */
+    spawn_free(&ep);
+
+    /* set caller's endpoint to NULL */
+    *pep = SPAWN_NET_CHANNEL_NULL;
+
+    /* decrement our count of open endpoints */
     g_count_open--;
+
+    /* free the UD QP data structures and release the hca
+     * context if we've hit 0 */
     if (g_count_open == 0) {
         /* TODO: while g_count_conn > 0 spin */
         /* TODO: need to ensure comm thread is done */
         /* close down UD endpoint */
 //        ud_ctx_destroy(pep);
     }
+
     return SPAWN_SUCCESS;
 }
 
 spawn_net_channel* spawn_net_connect_ib(const char* name)
 {
-    comm_lock();
-
-    /* extract lid and queue pair address from endpoint name */
-    unsigned int lid, qpn;
-    int parsed = sscanf(name, "IBUD:%04x:%06x", &lid, &qpn);
-    if (parsed != 2) {
-        SPAWN_ERR("Couldn't parse ep info from %s", name);
+    /* verify that the address string starts with correct prefix */
+    if (strncmp(name, "IBUD:", 5) != 0) {
+        SPAWN_ERR("Endpoint name is not IBUD format %s", name);
         return SPAWN_NET_CHANNEL_NULL;
     }
+
+    /* get our hostname, we encode this in our channel name,
+     * because it's useful when debugging */
+    char hostname[HOST_NAME_MAX];
+    if (gethostname(hostname, sizeof(hostname)) < 0) {
+        SPAWN_ERR("Failed gethostname()");
+        return SPAWN_NET_CHANNEL_NULL;
+    }
+    int hostname_len = (int) strlen(hostname);
+
+    /* make a copy of name that we can modify */
+    char* name_copy = SPAWN_STRDUP(name);
+
+    /* advance past IBUD: */
+    char* ptr = name_copy;
+    ptr += 5;
+
+    /* pick out length of remote hostname */
+    char* host_len_str = ptr;
+    while (*ptr != ':') {
+        ptr++;
+    }
+    *ptr = '\0';
+    ptr++;
+
+    /* set remote hostname and skip to IBUD address */
+    char* host_str = ptr;
+    int host_len = atoi(host_len_str);
+    ptr += host_len;
+    *ptr = '\0';
+    ptr++;
+
+    /* extract lid, queue pair number, and endpoint id from
+     * endpoint name */
+    unsigned int lid, qpn, epid;
+    int parsed = sscanf(ptr, "%04x:%06x:%06x", &lid, &qpn, &epid);
+    if (parsed != 3) {
+        SPAWN_ERR("Couldn't parse ep info from %s", name);
+        spawn_free(&name_copy);
+        return SPAWN_NET_CHANNEL_NULL;
+    }
+
+    /* if we move this higher, be sure to unlock before returning */
+    comm_lock();
 
     /* allocate and initialize a new virtual channel */
     vc_t* vc = vc_alloc();
 
-    /* store lid and queue pair */
+    /* store remote lid and queue pair */
     ud_addr ep_info;
     ep_info.lid = lid;
     ep_info.qpn = qpn;
@@ -2491,10 +2675,14 @@ spawn_net_channel* spawn_net_connect_ib(const char* name)
     /* point channel to remote endpoint */
     vc_set_addr(vc, &ep_info, RDMA_DEFAULT_PORT);
 
-    /* build payload for connect message, specify id we want remote
-     * side to use when sending to us followed by our lid/qp */
-    char* payload = SPAWN_STRDUPF("%06x:%04x:%06x",
-        vc->readid, local_ep_info.lid, local_ep_info.qpn
+    /* build payload for connect message, first record epid
+     * of remote endpoint that we're connecting to, remote
+     * end uses this to associate our request with a
+     * particular endpoint context, then specify our hostname,
+     * followed by the id we want remote side to use when
+     * sending to us and our lid/qp */
+    char* payload = SPAWN_STRDUPF("%d:%s:%06x:%06x:%04x:%06x",
+        hostname_len, hostname, epid, vc->readid, local_ep_info.lid, local_ep_info.qpn
     );
     size_t payload_size = strlen(payload) + 1;
 
@@ -2514,17 +2702,20 @@ spawn_net_channel* spawn_net_connect_ib(const char* name)
     spawn_net_channel* ch = SPAWN_MALLOC(sizeof(spawn_net_channel));
     ch->type = SPAWN_NET_TYPE_IBUD;
 
-    /* TODO: include hostname here */
+    /* TODO: include local and remote hostnames, with readid/writeid */
     /* Fill in channel name */
-    ch->name = SPAWN_STRDUPF("IBUD:%04x:%06x", ep_info.lid, ep_info.qpn);
+    ch->name = SPAWN_STRDUPF("IBUD:%s:%04x:%06x", host_str, ep_info.lid, ep_info.qpn);
 
     /* record address of vc in channel data field */
     ch->data = (void*) vc;
 
-    comm_unlock();
-
     /* increase our connection count */
     g_count_conn++;
+
+    /* free temporary copy of name */
+    spawn_free(&name_copy);
+
+    comm_unlock();
 
     return ch;
 }
@@ -2533,54 +2724,24 @@ spawn_net_channel* spawn_net_accept_ib(const spawn_net_endpoint* ep)
 {
     comm_lock();
 
-    /* NOTE: If we're slow to connect, the process that sent us the
+    /* NOTE: If we're slow to accept, the process that sent us the
      * connect packet may have timed out and sent a duplicate request.
      * Both packets may be in our connection request queue, and we
-     * want to ignore any duplicates.  To do this, we keep track of
+     * need to ignore any duplicates.  To do this, we keep track of
      * current connections by recording remote lid/qpn/writeid and
      * then silently drop extras. */
 
+    /* get our endpoint context id, we need to filter connection
+     * requests by this id */
+    uint64_t local_epid = (uint64_t) ep->data;
+
     /* wait for connect message */
-    vbuf* v = NULL;
-    unsigned int id, lid, qpn;
-    while (v == NULL) {
-        /* get next vbuf from connection request queue */
-        v = recv_connect_message();
-
-        /* get pointer to payload */
-        size_t header_size = sizeof(packet_header);
-        char* connect_payload = PKT_DATA_OFFSET(v, header_size);
-
-        /* TODO: read lid/qpn from vbuf and not payload to avoid
-         * spoofing */
-
-        /* get id and endpoint name from message payload */
-        int parsed = sscanf(connect_payload, "%06x:%04x:%06x", &id, &lid, &qpn);
-        if (parsed != 3) {
-            SPAWN_ERR("Couldn't parse ep info from %s", connect_payload);
-            return SPAWN_NET_CHANNEL_NULL;
-        }
-
-        /* check that we don't already have a matching connection */
-        connected_list* elem = connected_head;
-        while (elem != NULL) {
-            /* check whether this connect request matches one we're
-             * already connected to */
-            if (elem->lid == lid &&
-                elem->qpn == qpn &&
-                elem->id  == id)
-            {
-                /* we're already connected to this process, free the
-                 * vbuf and look for another request message */
-                vbuf_release(v);
-                v = NULL;
-                break;
-            }
-
-            /* no match so far, try the next item in connected list */
-            elem = elem->next;
-        }
-    }
+    connect_list* req = recv_connect_message(local_epid);
+    vbuf* v           = req->v;
+    unsigned int lid  = req->lid;
+    unsigned int qpn  = req->qpn;
+    unsigned int id   = req->id;
+    unsigned int epid = req->epid;
 
     /* allocate new vc */
     vc_t* vc = vc_alloc();
@@ -2641,11 +2802,16 @@ spawn_net_channel* spawn_net_accept_ib(const spawn_net_endpoint* ep)
     spawn_net_channel* ch = SPAWN_MALLOC(sizeof(spawn_net_channel));
     ch->type = SPAWN_NET_TYPE_IBUD;
 
+    /* TODO: include local/remote hostnames and readid/writeid */
     /* record name */
-    ch->name = SPAWN_STRDUPF("IBUD:%04x:%06x", ep_info.lid, ep_info.qpn);
+    ch->name = SPAWN_STRDUPF("IBUD:%s:%04x:%06x", req->name, ep_info.lid, ep_info.qpn);
 
     /* record address of vc in channel data field */
     ch->data = (void*) vc;
+
+    /* free connection request item */
+    spawn_free(&req->name);
+    spawn_free(&req);
 
     comm_unlock();
 
@@ -2716,11 +2882,11 @@ int spawn_net_read_ib(const spawn_net_channel* ch, void* buf, size_t size)
         vbuf* v = packet_read(vc);
 
         /* copy data to user's buffer */
-        size_t payload_size = PKT_DATA_SIZE(v, header_size);
+        size_t payload_size = v->content_size - header_size;
         if (payload_size > 0) {
             /* get pointer to message payload */
             char* ptr  = (char*)buf + nread;
-            char* data = PKT_DATA_OFFSET(v, header_size);
+            char* data = v->content_buf + header_size;
             memcpy(ptr, data, payload_size);
         }
 
