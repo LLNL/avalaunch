@@ -36,8 +36,11 @@ void spawn_net_write_str(const spawn_net_channel* ch, const char* str)
     }
 
     /* send message */
-    //spawn_net_write(ch, buf, bufsize);
     spawn_net_write(ch, (char*)buf + 8, size);
+
+/* to issue a single write instead of two,
+ * uncomment this line and comment the two writes above */
+//    spawn_net_write(ch, buf, bufsize);
 
     /* free buffer */
     spawn_free(&buf);
@@ -93,8 +96,11 @@ void spawn_net_write_strmap(const spawn_net_channel* ch, const strmap* map)
     ptr += strmap_pack(ptr, map);
 
     /* send map */
-    //spawn_net_write(ch, buf, bufsize);
     spawn_net_write(ch, (char*)buf + 8, size);
+
+/* to issue a single write instead of two,
+ * uncomment this line and comment the two writes above */
+//    spawn_net_write(ch, buf, bufsize);
 
     /* free buffer */
     spawn_free(&buf);

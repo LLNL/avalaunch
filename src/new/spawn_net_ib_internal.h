@@ -349,6 +349,7 @@ typedef struct vc_struct
     message_queue_t ext_window;   /* VC extended send window */
     message_queue_t recv_window;  /* VC out-of-order receive window */
     message_queue_t app_recv_window; /* in-order receive window */
+    int nread;                    /* number of bytes already read from leading vbuf in recv_window */
 
     /* profiling counters */
     uint64_t cntl_acks;          /* number of explicit ACK messages sent */

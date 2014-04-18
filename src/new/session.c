@@ -4533,6 +4533,7 @@ session_start (session * s)
         printf("\n");
     }
 
+#if 1
     /* measure pack/unpack cost of strmap */
     if (nodeid == 0) {
         if (!nodeid) { tid = begin_delta("pack/unpack strmap x1000 **"); }
@@ -4550,10 +4551,11 @@ session_start (session * s)
         }
         if (!nodeid) { end_delta(tid); }
     }
+#endif
 
     strmap_delete(&spawnep_strmap);
 
-#if 0
+#if 1
     /* measure cost of signal propagation */
     signal_from_root(s);
     if (!nodeid) { tid = begin_delta("signal costs x1000 **"); }

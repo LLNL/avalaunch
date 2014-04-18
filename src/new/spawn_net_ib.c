@@ -62,9 +62,9 @@ static uint32_t rdma_default_ud_recvwin_size = 2501; /* Max number of buffered o
 static long rdma_ud_progress_timeout  = 25000; /* Time (usec) until ACK status is checked (and ACKs sent) */
 static long rdma_ud_retry_timeout     = 50000; /* Time (usec) until a message is resent */
 static long rdma_ud_max_retry_timeout = 20000000;
-static long rdma_ud_last_check;
-static uint16_t rdma_ud_max_retry_count = 1000;
-static uint16_t rdma_ud_max_ack_pending;
+static long rdma_ud_last_check;                  /* time at which we last checked for retries */
+static uint16_t rdma_ud_max_retry_count = 1000;  /* max number of resends before tossing packet */
+static uint16_t rdma_ud_max_ack_pending;         /* max number of recieves before forcing an ack */
 
 static struct timespec cm_remain;
 static struct timespec cm_timeout;
@@ -409,6 +409,9 @@ static vc_t* vc_alloc()
      * messages with this id when sending to us (our readid is their
      * writeid) */
     vc->readid = id;
+
+    /* initialize our read count to 0 */
+    vc->nread = 0;
 
     /* return vc to caller */
     return vc;
@@ -870,14 +873,6 @@ static void MPIDI_CH3I_MRAIL_Release_vbuf(vbuf * v)
     vbuf_release(v);
 }
 
-/* given a vbuf used for a send, release vbuf back to pool if we can */
-static int MRAILI_Process_send(void *vbuf_addr)
-{
-    vbuf *v = vbuf_addr;
-    vbuf_release(v);
-    return 0;
-}
-
 static inline void ibv_ud_post_sr(
     vbuf* v,
     vc_t* vc,
@@ -1029,7 +1024,7 @@ static inline void ud_process_ack(vc_t *vc, uint16_t acknum)
         unack_queue_remove(&proc.unack_queue, cur);
 
         /* release vbuf */
-        MRAILI_Process_send(cur);
+        vbuf_release(cur);
 
         /* get next packet in send window */
         cur = sendwin->head;
@@ -1176,8 +1171,9 @@ static inline void mv2_ud_place_recvwin(vbuf *v)
          * just throw it away */
         MPIDI_CH3I_MRAIL_Release_vbuf(v);
 
-        /* TODO: why? */
-        /* mark VC that we need to send an ack message */
+        /* the most likely cause for this is that we got a duplicate
+         * because the sender hasn't gotten an ack from us yet, so
+         * we'll force an ack to clear this up */
         vc->ack_need_tosend = 1;
     }
 
@@ -1251,6 +1247,19 @@ static inline void ud_check_acks()
     return;
 }
 
+static void ud_toss_packet(vbuf* v)
+{
+    /* TODO: remove this from send queue (see process_ack) */
+
+    /* drop packet from unack queue */
+    unack_queue_remove(&proc.unack_queue, v);
+
+    /* release vbuf */
+    vbuf_release(v);
+
+    return;
+}
+
 static void ud_resend(vbuf *v)
 {
     /* if vbuf is marked as send-in-progress, don't send again,
@@ -1264,8 +1273,35 @@ static void ud_resend(vbuf *v)
     /* increment our retry count */
     v->retry_count++;
 
-    /* give up with fatal error if we exceed the retry count */
+    /* get pointer to packet header */
+    packet_header* p = (packet_header*) v->buffer;
+
+    /* Disconnecting an unreliable connections is equivalent
+     * to the Two Generals problem, which is unsolvable, meaning
+     * there is no finite number of acks we can send before
+     * we're sure that it's safe to tear down the connection.
+     * In a mostly reliable network, the most likely cause to
+     * exceed our retries is if we fail to get an ack for our
+     * final DISCONNECT packet (because the remote end already
+     * got it and tore down, but its ack failed to get to us.) */
+
+    /* we throw away disconnect packets earlier than normal
+     * packets */
+    if (p->type == PKT_UD_DISCONNECT && v->retry_count > 5) {
+//SPAWN_ERR("Tossing disconnect\n");
+        ud_toss_packet(v);
+        return;
+    }
+
+    /* if we exceed our limit, just toss the packet,
+     * in a true lossy environment, this will cause the app
+     * to hang */
     if (v->retry_count > rdma_ud_max_retry_count) {
+        SPAWN_ERR("Tossing normal packet\n");
+        ud_toss_packet(v);
+        return;
+
+#if 0
         SPAWN_ERR("UD reliability error. Exeeced max retries(%d) "
                 "in resending the message(%p). current retry timeout(us): %lu. "
                 "This Error may happen on clusters based on the InfiniBand "
@@ -1273,13 +1309,11 @@ static void ud_resend(vbuf *v)
                 "timeout using MV2_UD_RETRY_TIMEOUT\n", 
                 v->retry_count, v, rdma_ud_retry_timeout);
         exit(EXIT_FAILURE);
+#endif
     }
 
     /* get VC to send vbuf on */
     vc_t* vc = v->vc;
-
-    /* get pointer to packet header */
-    packet_header* p = (packet_header*) v->buffer;
 
     /* piggy-back ack on message and mark VC as ack completed */
     p->acknum = vc->seqnum_next_toack;
@@ -1295,6 +1329,7 @@ static void ud_resend(vbuf *v)
 
     /* send vbuf (or add to extended UD send queue if we don't have credits) */
     if (ud_ctx->send_wqes_avail > 0) {
+//SPAWN_ERR("resending payload of size %d at %p\n", v->content_size, v);
         ud_ctx->send_wqes_avail--;
         int ret = ibv_post_send(ud_ctx->qp, &(v->desc.u.sr), &(v->desc.y.bad_sr));
         if (ret != 0) {
@@ -1395,10 +1430,24 @@ static void ud_process_recv(vbuf *v)
 
         /* no need to send ack or add packet to receive queues,
          * except that we do process ACCEPT messages */
-        if (p->type != PKT_UD_ACCEPT) {
+        if (p->type == PKT_UD_ACCEPT) {
+            /* don't ACK accept messages, but we do add these
+             * messages to the receive queue */
+
+            /* we don't ACK an accept message, because it hasn't been
+             * processed yet, so that we have stored the write id
+             * to use in the ACK message */
+
+            /* TODO: we could ACK accept messages, but we need to
+             * process it here and record the writeid on the vc */
+            mv2_ud_place_recvwin(v); 
+        } else {
+            /* no need to send ack or add packet to receive queues */
             vbuf_release(v);
-            goto fn_exit;
         }
+
+        /* skip the ACK logic */
+        goto fn_exit;
     }
 
     /* send an explicit ack if we've exceeded our pending ack count */
@@ -1423,6 +1472,7 @@ static void ud_process_connreq(vbuf* v, const struct ibv_wc* wc)
     size_t header_size = sizeof(packet_header);
     char* connect_payload = v->content_buf + header_size;
 
+//printf("req: %s\n", connect_payload);
     /* make a copy of name that we can modify */
     char* name_copy = SPAWN_STRDUP(connect_payload);
     char* ptr = name_copy;
@@ -1510,6 +1560,9 @@ static void ud_process_connreq(vbuf* v, const struct ibv_wc* wc)
     /* if we append to the queue, we don't free the vbuf,
      * we've got a pointer to it, and we'll free it when
      * we process the request */
+
+    /* TODO: send ack back to requestor to prevent a flood
+     * of requests coming in if we're slow to accept */
 
     return;
 }
@@ -1743,7 +1796,7 @@ static int cq_poll(int* got_recv)
 
                     /* check that the vc index is within range */
                     if (index >= g_ud_vc_info_id) {
-                        SPAWN_ERR("Packet conext invalid");
+                        SPAWN_ERR("Packet conext invalid %d", index);
                         vbuf_release(v);
                         v = NULL;
                         break;
@@ -2003,8 +2056,9 @@ static inline int packet_send(
     return SPAWN_SUCCESS;
 }
 
-/* blocks until packet comes in on specified VC */
-static vbuf* packet_read(vc_t* vc)
+/* blocks until packet comes in on specified VC,
+ * returns a pointer to the packet */
+static vbuf* packet_wait(vc_t* vc)
 {
     /* if we don't have a receive thread,
      * eagerly pull all events from completion queue */
@@ -2012,9 +2066,11 @@ static vbuf* packet_read(vc_t* vc)
         cq_drain();
     }
 
-    /* look for entry in apprecv queue */
-    vbuf* v = apprecv_window_retrieve_and_remove(&vc->app_recv_window);
-    while (v == NULL) {
+    /* get pointer to recv queue */
+    message_queue_t* q = &vc->app_recv_window;
+
+    /* wait until we have an entry */
+    while (q->head == NULL) {
         /* determine whether we should poll or wait for a new message */
         if (g_recv_busy_spin) {
             /* polling, release the lock for some time to let
@@ -2031,10 +2087,11 @@ static vbuf* packet_read(vc_t* vc)
             g_recv_flag = 1;
             pthread_cond_wait(&g_recv_cond, &comm_lock_object);
         }
-
-        /* look for entry in apprecv queue */
-        v = apprecv_window_retrieve_and_remove(&vc->app_recv_window);
     }
+
+    /* we've got a vbuf on the recv queue once we get here */
+    vbuf* v = q->head;
+
     return v;
 }
 
@@ -2111,7 +2168,10 @@ static connect_list* recv_connect_message(uint64_t epid)
 static int recv_accept_message(vc_t* vc)
 {
     /* first incoming packet should be accept */
-    vbuf* v = packet_read(vc);
+    packet_wait(vc);
+
+    /* extract packet from queue */
+    vbuf* v = apprecv_window_retrieve_and_remove(&vc->app_recv_window);
 
     /* message payload is write id we should use when sending */
     size_t header_size = sizeof(packet_header);
@@ -2366,6 +2426,7 @@ static ud_ctx_t* ud_ctx_create()
     }   
 
     rdma_ud_max_ack_pending = rdma_default_ud_sendwin_size / 4;
+//    rdma_ud_max_ack_pending = 0;
 
     /* increase memory locked limit */
     struct rlimit limit;
@@ -2778,8 +2839,12 @@ spawn_net_channel* spawn_net_accept_ib(const spawn_net_endpoint* ep)
     /* record pointer to VC in vbuf (needed by Process_recv) */
     v->vc = vc;
 
+    /* NOTE: it's tempting to call ud_process_recv here, but that may
+     * send and ACK, and we don't want to do that until we first send
+     * the ACCEPT packet so that process */
+
     /* put vbuf back on free list */
-    ud_process_recv(v);
+    vbuf_release(v);
 
     /* Increment the next expected seq num */
     vc->seqnum_next_torecv++;
@@ -2878,23 +2943,44 @@ int spawn_net_read_ib(const spawn_net_channel* ch, void* buf, size_t size)
     int ret = SPAWN_SUCCESS;
     size_t nread = 0;
     while (nread < size) {
-        /* read a packet from this vc */
-        vbuf* v = packet_read(vc);
+        /* wait for a packet from this vc */
+        vbuf* v = packet_wait(vc);
 
-        /* copy data to user's buffer */
+        /* determine number of bytes in packet payload */
         size_t payload_size = v->content_size - header_size;
-        if (payload_size > 0) {
-            /* get pointer to message payload */
-            char* ptr  = (char*)buf + nread;
-            char* data = v->content_buf + header_size;
-            memcpy(ptr, data, payload_size);
+
+        /* determine number of bytes left to read from packet */
+        size_t payload_remaining = payload_size - (size_t) vc->nread;
+
+        /* determine number of bytes left in user buffer */
+        size_t remaining = size - nread;
+
+        /* compute pointers into user and packet buffers */
+        char* ptr  = (char*)buf + nread;
+        char* data = v->content_buf + header_size + vc->nread;
+
+        /* copy data to user's buffer and process packet */
+        if (remaining < payload_remaining) {
+            /* the remaining payload in the packet is strictly more
+             * than what we need to fill the user buffer, so just
+             * read what we need and advance the vc pointer */
+            memcpy(ptr, data, remaining);
+            nread     += remaining;
+            vc->nread += (int) remaining;
+        } else {
+            /* in this case, we'll read every byte in the packet */
+            memcpy(ptr, data, payload_remaining);
+            nread += payload_remaining;
+
+            /* extract the packet from the receive queue,
+             * and place it back on free list */
+            v = apprecv_window_retrieve_and_remove(&vc->app_recv_window);
+            vbuf_release(v);
+
+            /* we'll be pointing to a brand new packet,
+             * so reset the vc pointer */
+            vc->nread = 0;
         }
-
-        /* put vbuf back on free list */
-        vbuf_release(v);
-
-        /* go on to next part of message */
-        nread += payload_size;
     }
 
     comm_unlock();
