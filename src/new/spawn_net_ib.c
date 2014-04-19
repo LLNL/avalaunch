@@ -888,25 +888,25 @@ static inline void vbuf_prepare_send(vbuf* v, unsigned long len)
  * the accept function pulls items from this list */
 typedef struct connect_list_t {
     vbuf* v;       /* pointer to vbuf for this message */
-    uint32_t lid;  /* source lid */
-    uint32_t qpn;  /* source queue pair number */
-    uint64_t id;   /* write id to use when sending */
-    uint64_t epid; /* endpoint id */
-    char* name;    /* remote hostname */
-    struct connect_list_t* next;
+    uint64_t epid; /* local endpoint id */
+    uint32_t lid;  /* requestor lid */
+    uint32_t qpn;  /* requestor queue pair number */
+    uint64_t id;   /* requestor write id to use when sending */
+    char* name;    /* requestor hostname */
+    struct connect_list_t* next; /* pointer to next item in list */
 } connect_list;
 
 static connect_list* connect_head = NULL;
 static connect_list* connect_tail = NULL;
 
 /* tracks list of accepted connection requests, which is used to
- * filter duplicate connection requests */
+ * filter duplicate connection requests and track active channels */
 typedef struct connected_list_t {
     unsigned int lid; /* remote LID */
     unsigned int qpn; /* remote Queue Pair Number */
-    unsigned int id;  /* write id we use to write to remote side */
+    unsigned int id;  /* write id to use to send to remote side */
     vc_t*  vc;        /* open vc to remote side */
-    struct connected_list_t* next;
+    struct connected_list_t* next; /* pointer to next item in list */
 } connected_list;
 
 static connected_list* connected_head = NULL;
@@ -1589,6 +1589,27 @@ static void ud_process_connreq(vbuf* v, const struct ibv_wc* wc)
     /* TODO: read lid/qpn from vbuf and not payload to avoid
      * spoofing */
 
+    /* check whether we already have duplicate requests in the
+     * connection request queue */
+    connect_list* req_elem = connect_head;
+    while (req_elem != NULL) {
+        /* check whether this connect request matches one
+         * already in the list */
+        if (req_elem->lid == lid &&
+            req_elem->qpn == qpn &&
+            req_elem->id  == writeid)
+        {
+            /* we've already got an entry in the connection request
+             * queue, this is a duplicate, so just pitch it */
+            spawn_free(&name_copy);
+            vbuf_release(v);
+            return;
+        }
+
+        /* no match so far, try the next item */
+        req_elem = req_elem->next;
+    }
+
     /* check that we don't already have an existing connection
      * that matches the remote info for this request */
     connected_list* elem = connected_head;
@@ -1619,10 +1640,10 @@ static void ud_process_connreq(vbuf* v, const struct ibv_wc* wc)
     /* allocate and initialize new element for connect queue */
     connect_list* req = (connect_list*) SPAWN_MALLOC(sizeof(connect_list));
     req->v    = v;          /* record pointer to vbuf */
-    req->lid  = wc->slid;   /* record source lid */
-    req->qpn  = wc->src_qp; /* record source qpn */
-    req->id   = writeid;    /* record write id we should use to send to remote process */
-    req->epid = epid;       /* record endpoint id request is trying to connect to */
+    req->epid = epid;       /* local endpoint id request is trying to connect to */
+    req->lid  = wc->slid;   /* requestor lid */
+    req->qpn  = wc->src_qp; /* requestor qpn */
+    req->id   = writeid;    /* requestor write id to use to send to remote process */
     req->name = SPAWN_STRDUP(host_str); /* record remote hostname */
     req->next = NULL;
 
@@ -2886,10 +2907,10 @@ spawn_net_channel* spawn_net_accept_ib(const spawn_net_endpoint* ep)
     /* wait for connect message */
     connect_list* req = recv_connect_message(local_epid);
     vbuf* v           = req->v;
+    unsigned int epid = req->epid;
     unsigned int lid  = req->lid;
     unsigned int qpn  = req->qpn;
     unsigned int id   = req->id;
-    unsigned int epid = req->epid;
 
     /* allocate new vc */
     vc_t* vc = vc_alloc();
