@@ -66,10 +66,10 @@
  * list and resends any packets that have exceeded their timeout.
  *
  * When a process sends a message to another process, it also records
- * the sequence number for the latest packet it has received from the
- * destination.  Upon receipt of the message, the destination will
- * clear any packets from its send window and unack'd queue up to and
- * including that sequence number.  After removing packets from the
+ * the sequence number for the latest (in order) packet it has received
+ * from the destination.  Upon receipt of the message, the destination
+ * will clear any packets from its send window and unack'd queue up to
+ * and including that sequence number.  After removing packets from the
  * send window, more packets can be queued by taking them from the
  * VC extended send window.
  *
@@ -92,15 +92,43 @@
  * has not been sent for a certain amount of time.
  *
  * An explicit ACK is also sent if the number of received packets exceeds
- * a threshold since the last ACK was sent. */
-
-/*
-** We should check if the ackno had been handled before.
-** We process this only if ackno had advanced.
-** There are 2 cases to consider:
-** 1. ackno_handled < seqnolast (normal case)
-** 2. ackno_handled > seqnolast (wraparound case)
-*/
+ * a threshold since the last ACK was sent, or if a process receives a
+ * packet that falls outside of the current sliding window, most likely
+ * a duplicate copy of a message it's already received.
+ *
+ * In spawn_net, a single UD QP is multiplexed to handle all traffic.
+ * Each endpoint is assigned a unique context id when it is opened,
+ * and the endpoint name includes this id.  This enables a process
+ * to open multiple endpoints and have unique contexts for each.
+ *
+ * Each spawn_net_channel has two contexts associated with it.
+ * One is called the "readid", and packets destined for this
+ * channel specify the readid in the packet header.  Upon
+ * receipt of a message the readid is used to select the corresponding
+ * "virtual connection".  Similarly, each channel has a "writeid"
+ * which is written to the readid field in the packet header of
+ * every outgoing packet.
+ *
+ * To establish a connection, a process sends a PKT_UD_CONNECT packet
+ * to the process.  The payload includes info on the endpoint the
+ * requestor is trying to connect to.  It also includes the writeid
+ * context that the remote end should use when sending a message
+ * after accepting the connection.
+ *
+ * The info from a connection request packet is appended to a
+ * "connect list", where a process will look to whenever it tries
+ * to accept a new connection.  Another list tracks "connected"
+ * processes.  This list is used to filter and discard duplicate
+ * connection requests.  It's also traversed to check pending
+ * acks on all open connections.
+ *
+ * To accept a connection, a process sends a PKT_UD_ACCEPT packet
+ * back to the requestor.  The payload includes the writeid the
+ * requestor should use when sending messages to the acceptor.
+ *
+ * When a process closes a channel, a PKT_UD_DISCONNECT message
+ * is sent.  Upon receiving such a packet, the remote end
+ * will reply with a like message. */
 
 #include <netdb.h>
 #include <errno.h>
@@ -206,27 +234,35 @@ struct ibv_wr_descriptor
 
 typedef struct link
 {
-    void *next;
-    void *prev;
+    void* next;
+    void* prev;
 } LINK;
 
 typedef struct vbuf
 {
     struct vbuf_region* region;    /* pointer to memory region containing this vbuf */
-    struct ibv_wr_descriptor desc; /* descriptors used for IB calls */
-    unsigned char* buffer; /* start of data buffer (pinned memory) */
+    struct ibv_wr_descriptor desc; /* descriptors used for IB calls (e.g., ibv_post_send) */
+
+    /* data buffer associated with vbuf */
+    unsigned char* buffer; /* start of data buffer (IBUD uses first 40 bytes on recv, not send) */
     char* content_buf;     /* pointer to start of user data */
     int content_size;      /* size of user data in bytes */
+
+    uint8_t flags;         /* records state of vbuf */
+    uint8_t in_sendwin;    /* records whether vbuf is in send window */
+
     void* vc;              /* pointer to virtual channel to which vbuf message corresponds */
     uint16_t seqnum;
-    uint16_t retry_count;
-    uint8_t flags;
-    double timestamp;
-    uint8_t in_sendwin;
-    LINK apprecvwin_msg; /* tracks in-order packets ready to be received by app */
-    LINK sendwin_msg;    /* tracks outstanding sends */
-    LINK recvwin_msg;    /* tracks received packets, either control msgs or out-of-order app msgs */
+
+    /* retry info */
+    uint16_t retry_count; /* number of times packet has been sent */
+    double timestamp;     /* last time packet was sent */
+
+    /* vbuf can be linked in multiple lists at once */
     LINK extwin_msg;     /* tracks messages to be sent when credits are availble */
+    LINK sendwin_msg;    /* tracks outstanding sends */
+    LINK apprecvwin_msg; /* tracks in-order packets ready to be received by app */
+    LINK recvwin_msg;    /* tracks received packets, either control msgs or out-of-order app msgs */
     LINK unack_msg;      /* tracks a list of sends yet to sent */
 } vbuf;
 
@@ -243,15 +279,22 @@ typedef struct vbuf
 
 /* hca_info */
 typedef struct _mv2_hca_info_t {
-    struct ibv_pd *pd;
-    struct ibv_device *device;
-    struct ibv_context *context;
-    struct ibv_cq  *cq_hndl;
-    struct ibv_comp_channel     *comp_channel;
-    union  ibv_gid gid[MAX_NUM_PORTS];
+    struct ibv_pd* pd;
+    struct ibv_device* device;
+    struct ibv_context* context;
+    struct ibv_cq* cq_hndl;
+    struct ibv_comp_channel* comp_channel;
     struct ibv_port_attr port_attr[MAX_NUM_PORTS];
     struct ibv_device_attr device_attr;
 } mv2_hca_info_t;
+
+/*
+** We should check if the ackno had been handled before.
+** We process this only if ackno had advanced.
+** There are 2 cases to consider:
+** 1. ackno_handled < seqnolast (normal case)
+** 2. ackno_handled > seqnolast (wraparound case)
+*/
 
 /* check whether val is within [start, end] */
 #define INCL_BETWEEN(_val, _start, _end)                            \
@@ -270,7 +313,7 @@ typedef struct packet_header_struct {
     uint8_t  type;   /* packet type (see ib_internal.h) */
     uint64_t srcid;  /* source context id to identify sender */
     uint16_t seqnum; /* sequence number from source */
-    uint16_t acknum; /* most recent seq number source has received from us */
+    uint16_t acknum; /* most recent (in order) seq number source has received from us */
 } packet_header;
 
 /* VC state values */
@@ -280,9 +323,9 @@ typedef struct packet_header_struct {
 
 /* tracks a list of vbufs */
 typedef struct message_queue_t {
-    struct vbuf *head;
-    struct vbuf *tail;
-    uint16_t count;
+    struct vbuf* head; /* head of list */
+    struct vbuf* tail; /* tail of list */
+    uint16_t count;    /* number of items in list */
 } message_queue_t;
 
 /* initialize fields of a message queue */
@@ -295,7 +338,7 @@ typedef struct message_queue_t {
 
 /* ud context - tracks access to open UD QP on HCA */
 typedef struct ud_ctx_struct {
-    struct ibv_qp *qp;        /* UD QP */
+    struct ibv_qp* qp;        /* UD QP */
     int hca_num;              /* id of HCA to use, starts at 0 */
     int send_wqes_avail;      /* number of available send work queue elements for UD QP */
     int num_recvs_posted;     /* number of receive elements currently posted */
@@ -306,12 +349,12 @@ typedef struct ud_ctx_struct {
 
 /* structure to pass to mv2_ud_create_qp to create an ibv_qp */
 typedef struct ud_qp_info {
-    struct ibv_cq      *send_cq;
-    struct ibv_cq      *recv_cq;
-    struct ibv_srq     *srq;
-    struct ibv_pd      *pd;
-    struct ibv_qp_cap  cap;
-    uint32_t           sq_psn;
+    struct ibv_cq*    send_cq;
+    struct ibv_cq*    recv_cq;
+    struct ibv_srq*   srq;
+    struct ibv_pd*    pd;
+    struct ibv_qp_cap cap;
+    uint32_t          sq_psn;
 } ud_qp_info_t;
 
 /* IB address info for ud exhange */

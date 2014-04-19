@@ -140,36 +140,70 @@ static inline void ext_window_add(message_queue_t *q, vbuf *v)
     q->count++;
 }
 
-/* adds vbuf to the send queue, which tracks packets we've actually
- * sent but not yet gotten an ack for */
-static inline void send_window_add(message_queue_t *q, vbuf *v)
+/* adds vbuf to the send queue, which tracks packets a VC
+ * has submitted to the UD context */
+static inline void send_window_add(message_queue_t* q, vbuf* v)
 {
-    v->sendwin_msg.next = v->sendwin_msg.prev = NULL;
+    /* record that vbuf is in the send window */
     v->in_sendwin = 1;
 
+    /* set packet as last item */
+    v->sendwin_msg.prev = q->tail;
+    v->sendwin_msg.next = NULL;
+
+    /* place packet at front of queue if it's empty,
+     * otherwise update last item to point to this one */   
     if(q->head == NULL) {
         q->head = v;
     } else {
         (q->tail)->sendwin_msg.next = v;
     }
 
+    /* update the tail to point to this packet,
+     * and increase the count */
     q->tail = v;
     q->count++;
+
+    return;
 }
 
-static inline void send_window_remove(message_queue_t *q, vbuf *v)
+/* removes vbuf from send queue */
+static inline void send_window_remove(message_queue_t* q, vbuf* v)
 {
-    assert (q->head == v);
-    v->in_sendwin = 0;
-    q->head = v->sendwin_msg.next;
-    q->count--;
-    if (q->head == NULL ) {
-        q->tail = NULL;
-        assert(q->count == 0);
+    /* get pointers to elements on either side of this vbuf */
+    vbuf* prev = v->sendwin_msg.prev;
+    vbuf* next = v->sendwin_msg.next;
+
+    /* update head if packet is at start of list */
+    if (q->head == v) {
+        q->head = next;
     }
 
+    /* update tail if packet is at end of list */
+    if (q->tail == v) {
+        q->tail = prev;
+    }
+
+    /* fix up list elements to skip this vbuf */
+    if (prev != NULL) {
+        prev->sendwin_msg.next = next;
+    }
+    if (next != NULL) {
+        next->sendwin_msg.prev = prev;
+    }
+
+    /* decrease the length of the list */
+    q->count--;
+
+    /* cleanup linked list fields in vbuf */
+    v->sendwin_msg.prev = NULL;
     v->sendwin_msg.next = NULL;
-}    
+
+    /* mark that vbuf is no longer in send queue */
+    v->in_sendwin = 0;
+
+    return;
+}
 
 static inline void unack_queue_add(message_queue_t *q, vbuf *v)
 {
@@ -710,6 +744,18 @@ static int vbuf_region_alloc(struct ibv_pd* pdomain, int nvbufs)
 
         /* set remaining fields */
         cur->content_size = 0;
+
+        /* initialize linked list pointers */
+        cur->extwin_msg.prev     = NULL;
+        cur->extwin_msg.next     = NULL;
+        cur->sendwin_msg.prev    = NULL;
+        cur->sendwin_msg.next    = NULL;
+        cur->apprecvwin_msg.prev = NULL;
+        cur->apprecvwin_msg.next = NULL;
+        cur->recvwin_msg.prev    = NULL;
+        cur->recvwin_msg.next    = NULL;
+        cur->unack_msg.prev      = NULL;
+        cur->unack_msg.next      = NULL;
     }
 
     /* insert region into list */
@@ -866,34 +912,44 @@ typedef struct connected_list_t {
 static connected_list* connected_head = NULL;
 static connected_list* connected_tail = NULL;
 
-static void MPIDI_CH3I_MRAIL_Release_vbuf(vbuf * v)
-{
-    /* clear some fields */
-    v->content_size = 0;
-    vbuf_release(v);
-}
-
+/* given a packet, virtual channel, and ud context, append packet
+ * to extended send queue for UD context or send it out on wire */
 static inline void ibv_ud_post_sr(
     vbuf* v,
     vc_t* vc,
     ud_ctx_t* ud_ctx)
 {
+    /* get a pointer to send request structure */
+    struct ibv_send_wr* sr = &v->desc.u.sr;
+
+    /* set the SEND SIGNALED flag and inline data if we can */
     if(v->desc.sg_entry.length <= rdma_max_inline_size) {
-        v->desc.u.sr.send_flags = (enum ibv_send_flags)
-                (IBV_SEND_SIGNALED | IBV_SEND_INLINE);
+        sr->send_flags = (enum ibv_send_flags) (IBV_SEND_SIGNALED | IBV_SEND_INLINE);
     } else {
-        v->desc.u.sr.send_flags = IBV_SEND_SIGNALED;
+        sr->send_flags = IBV_SEND_SIGNALED;
     }
-    v->desc.u.sr.wr.ud.ah = vc->ah;
-    v->desc.u.sr.wr.ud.remote_qpn = vc->qpn;
+
+    /* specify iB address handle and remote queue pair number */
+    sr->wr.ud.ah = vc->ah;
+    sr->wr.ud.remote_qpn = vc->qpn;
+
+    /* place packet on extended queue or send it out */
     if (ud_ctx->send_wqes_avail <= 0 ||
         ud_ctx->ext_send_queue.head != NULL)
     {
+        /* out of send WQEs or there is a packet on the extended queue,
+         * add this packet to the extended queue */
         ext_sendq_add(&ud_ctx->ext_send_queue, v);
     } else {
+        /* we have a WQE and the extended send queue is clear,
+         * send the packet on the wire */
+
+        /* one less send WQE available now */
         ud_ctx->send_wqes_avail--;
-        int ret = ibv_post_send(ud_ctx->qp, &(v->desc.u.sr), &(v->desc.y.bad_sr));
-        if(ret != 0) {
+
+        /* send the packet */
+        int ret = ibv_post_send(ud_ctx->qp, sr, &(v->desc.y.bad_sr));
+        if (ret != 0) {
             SPAWN_ERR("failed to send (ibv_post_send rc=%d %s)", ret, strerror(ret));
             exit(-1);
         }
@@ -902,6 +958,9 @@ static inline void ibv_ud_post_sr(
     return;
 }
 
+/* submit packet to VC to be sent, will submit to UD context if send
+ * window is not full and appends packet to VC extended send queue
+ * otherwise */
 static int ud_post_send(vc_t* vc, vbuf* v, ud_ctx_t* ud_ctx)
 {
     /* check that vbuf is for UD and that data fits within UD packet */
@@ -941,24 +1000,26 @@ static int ud_post_send(vc_t* vc, vbuf* v, ud_ctx_t* ud_ctx)
     /* mark vbuf as send-in-progress */
     v->flags |= UD_VBUF_SEND_INPROGRESS;
 
-    /* send packet */
+    /* submit packet to UD context */
     ibv_ud_post_sr(v, vc, ud_ctx);
 
     /* record packet and time in our send queue */
     rdma_ud_last_check = spawn_clock_time_us();
 
     /* TODO: what's this mean? */
-    /* dont' track messages in this case */
+    /* don't track messages in this case */
     if (v->in_sendwin) {
         return 0;
     }
 
+    /* TODO: should we set this when packet hits wire instead? */
+    /* record time at which packet was submitted to UD context */
     v->timestamp = spawn_clock_time_us();
 
-    /* Add vbuf to the send window */
+    /* add vbuf to the send window */
     send_window_add(&(vc->send_window), v);
 
-    /* Add vbuf to global unack queue */
+    /* add vbuf to global unack queue */
     unack_queue_add(&proc.unack_queue, v);
 
     return 0;
@@ -980,13 +1041,15 @@ static inline void ud_flush_ext_window(vc_t *vc)
         /* get pointer to next element in list */
         vbuf* next = cur->extwin_msg.next;
 
-        /* remove item from head of list */
-        extwin->head = next;
-        extwin->count--;
-
         /* send item, associated vbuf will be released when send
          * completion event is processed */
         ud_post_send(vc, cur, proc.ud_ctx);
+
+        /* remove item from head of list, it's important that we
+         * do this *after* step above, because ud_post_send will
+         * check that this packet is at head of extended queue */
+        extwin->head = next;
+        extwin->count--;
 
         /* track number of sends from extended send queue */
         vc->ext_win_send_count++;
@@ -1020,7 +1083,12 @@ static inline void ud_process_ack(vc_t *vc, uint16_t acknum)
     {
         /* the current vbuf has been ack'd, so remove it from the send
          * window and also the unack'd list */
+
+        /* remove packet from VC send queue (enables VC to submit more
+         * packets to UD context */
         send_window_remove(sendwin, cur);
+
+        /* remove packet from UD context unack'd queue */
         unack_queue_remove(&proc.unack_queue, cur);
 
         /* release vbuf */
@@ -1030,7 +1098,8 @@ static inline void ud_process_ack(vc_t *vc, uint16_t acknum)
         cur = sendwin->head;
     }
 
-    /* see if we can flush from ext window queue */
+    /* see if we can submit move packets from VC extended send
+     * queue to send queue (submitted to UD context) */
     if (extwin->head != NULL &&
         sendwin->count < rdma_default_ud_sendwin_size)
     {
@@ -1102,6 +1171,9 @@ static inline int apprecv_window_test(message_queue_t* q)
     return 1;
 }
 
+/* places packet either in app recieve queue or out-of-order
+ * receive queue (or discards packet if it's outside the sliding
+ * window of sequence numbers) */
 static inline void mv2_ud_place_recvwin(vbuf *v)
 {
     int ret;
@@ -1109,7 +1181,7 @@ static inline void mv2_ud_place_recvwin(vbuf *v)
     /* get VC vbuf is for */
     vc_t* vc = v->vc;
 
-    /* determine bounds of recv window */
+    /* determine bounds of sliding recv window */
     int recv_win_start = vc->seqnum_next_torecv;
     int recv_win_end = recv_win_start + rdma_default_ud_recvwin_size;
     while (recv_win_end > MAX_SEQ_NUM) {
@@ -1118,7 +1190,7 @@ static inline void mv2_ud_place_recvwin(vbuf *v)
 
     /* check if the packet seq num is in the window or not */
     if (INCL_BETWEEN(v->seqnum, recv_win_start, recv_win_end)) {
-        /* get pointer to recv window */
+        /* get pointer to out-of-order recv queue */
         message_queue_t* recvwin = &vc->recv_window;
 
         /* got a packet within range, now check whether its in order or not */
@@ -1141,10 +1213,13 @@ static inline void mv2_ud_place_recvwin(vbuf *v)
             ret = recv_window_add(recvwin, v, vc->seqnum_next_torecv);
             if (ret == MSG_IN_RECVWIN) {
                 /* release buffer if it is already in queue */
-                MPIDI_CH3I_MRAIL_Release_vbuf(v);
+                v->content_size = 0;
+                vbuf_release(v);
             }
 
-            /* mark VC that we need to send an ack message */
+            /* mark VC that we need to send an ack message,
+             * note that we do not update the value of the
+             * sequence number that we'll ack here */
             vc->ack_need_tosend = 1;
         }
 
@@ -1169,7 +1244,8 @@ static inline void mv2_ud_place_recvwin(vbuf *v)
     } else {
         /* we got a packet that is not within the receive window,
          * just throw it away */
-        MPIDI_CH3I_MRAIL_Release_vbuf(v);
+        v->content_size = 0;
+        vbuf_release(v);
 
         /* the most likely cause for this is that we got a duplicate
          * because the sender hasn't gotten an ack from us yet, so
@@ -1217,7 +1293,7 @@ static void ud_send_ack(vc_t *vc)
     /* get pointer to UD context */
     ud_ctx_t* ud_ctx = proc.ud_ctx;
 
-    /* send packet */
+    /* submit packet to UD context */
     ibv_ud_post_sr(v, vc, ud_ctx);
 
     /* keep track of total number of control messages sent */
@@ -1247,9 +1323,15 @@ static inline void ud_check_acks()
     return;
 }
 
+/* discard send packet (retries exhausted) */
 static void ud_toss_packet(vbuf* v)
 {
-    /* TODO: remove this from send queue (see process_ack) */
+    /* remove this from VC send queue */
+    vc_t* vc = v->vc;
+    if (vc != NULL) {
+        message_queue_t* sendwin = &vc->send_window;
+        send_window_remove(sendwin, v);
+    }
 
     /* drop packet from unack queue */
     unack_queue_remove(&proc.unack_queue, v);
@@ -1260,6 +1342,7 @@ static void ud_toss_packet(vbuf* v)
     return;
 }
 
+/* resend specified packet and update its retry state */
 static void ud_resend(vbuf *v)
 {
     /* if vbuf is marked as send-in-progress, don't send again,
@@ -1273,31 +1356,31 @@ static void ud_resend(vbuf *v)
     /* increment our retry count */
     v->retry_count++;
 
-    /* get pointer to packet header */
+    /* get packet header (since this is a send packet,
+     * the header is at the start of the buffer) */
     packet_header* p = (packet_header*) v->buffer;
 
-    /* Disconnecting an unreliable connections is equivalent
+    /* Disconnecting an unreliable connection is equivalent
      * to the Two Generals problem, which is unsolvable, meaning
      * there is no finite number of acks we can send before
      * we're sure that it's safe to tear down the connection.
      * In a mostly reliable network, the most likely cause to
      * exceed our retries is if we fail to get an ack for our
-     * final DISCONNECT packet (because the remote end already
-     * got it and tore down, but its ack failed to get to us.) */
+     * final DISCONNECT packet (because the remote end got it
+     * sent an ack and tore down, but the ack failed to reach us.) */
 
     /* we throw away disconnect packets earlier than normal
      * packets */
     if (p->type == PKT_UD_DISCONNECT && v->retry_count > 5) {
-//SPAWN_ERR("Tossing disconnect\n");
         ud_toss_packet(v);
         return;
     }
 
     /* if we exceed our limit, just toss the packet,
      * in a true lossy environment, this will cause the app
-     * to hang */
+     * to hang, so print a message to warn user */
     if (v->retry_count > rdma_ud_max_retry_count) {
-        SPAWN_ERR("Tossing normal packet\n");
+        SPAWN_ERR("Tossing normal packet, job will hang\n");
         ud_toss_packet(v);
         return;
 
@@ -1312,7 +1395,7 @@ static void ud_resend(vbuf *v)
 #endif
     }
 
-    /* get VC to send vbuf on */
+    /* get VC associated with packet */
     vc_t* vc = v->vc;
 
     /* piggy-back ack on message and mark VC as ack completed */
@@ -2165,6 +2248,10 @@ static connect_list* recv_connect_message(uint64_t epid)
     return elem;
 }
 
+/* after sending a connect packet, we'll wait to receive an incoming
+ * accept packet, which is sent when the remote end calls accept,
+ * this packet includes the writeid we should use when sending packets
+ * on this VC */
 static int recv_accept_message(vc_t* vc)
 {
     /* first incoming packet should be accept */
