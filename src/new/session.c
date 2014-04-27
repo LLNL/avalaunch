@@ -1426,20 +1426,13 @@ static char TMPDIR[] = "/tmp/mpilaunch";
 
 /* given full path of executable, copy it to memory */
 static char *
-write_to_ramdisk (const char * src, const char * buf, ssize_t size)
+write_to_ramdisk (const char* dir, const char * src, const char * buf, ssize_t size)
 {
     /* create name for destination */
     char* src_copy = SPAWN_STRDUP(src);
     char* base = basename(src_copy);
 
-    if (mkdir(TMPDIR, S_IRWXU|S_IRGRP|S_IXGRP)) {
-        if (errno != EEXIST) {
-            perror("mkdir");
-            exit(EXIT_FAILURE);
-        }
-    }
-
-    char* dst = SPAWN_STRDUPF("%s/%s", TMPDIR, base);
+    char* dst = SPAWN_STRDUPF("%s/%s", dir, base);
     spawn_free(&src_copy);
 
     /* open destination file for writing */
@@ -1516,12 +1509,12 @@ read_to_mem (const char * src, ssize_t bufsize , char * buf)
 
 /* given full path of executable, copy to tmp and return new name */
 static char *
-copy_to_tmp (const char * src)
+copy_to_tmp (const char* dir, const char * src)
 {
     /* create name for destination */
     char* src_copy = SPAWN_STRDUP(src);
     char* base = basename(src_copy);
-    char* dst = SPAWN_STRDUPF("/tmp/%s", base);
+    char* dst = SPAWN_STRDUPF("%s/%s", dir, base);
     spawn_free(&src_copy);
 
     /* open source file for reading */
@@ -1915,7 +1908,7 @@ allgather_strmap (strmap * map, const spawn_tree * t)
 /* broadcast file from file system to /tmp using spawn tree,
  * returns name of file in /tmp (caller should free name) */
 static char *
-bcast_file (const char * file, const spawn_tree * t, process_group* pg)
+bcast_file (const char* dir, const char * file, const spawn_tree * t, process_group* pg)
 {
     /* root spawn process reads file size */
     ssize_t bcast_size = 0;
@@ -1956,7 +1949,7 @@ bcast_file (const char * file, const spawn_tree * t, process_group* pg)
     }
                 
     /* write file to ramdisk and get name of new file */
-    char* newfile = write_to_ramdisk(file, (char*)buf, bufsize);
+    char* newfile = write_to_ramdisk(dir, file, (char*)buf, bufsize);
 
     /* record name of ramdisk file in process group,
      * so we can delete it later */
@@ -2911,6 +2904,9 @@ static void handle_pmi_barrier(
                  pg->states[i] = PMI_STATE_NORMAL;
             }
 
+//strmap_print(pg->commit_map);
+//printf("\n");
+
             /* merge key/values into our global map */
             strmap_merge(pg->global_map, pg->commit_map);
 
@@ -3680,6 +3676,26 @@ process_group_start (session * s, const strmap * params)
     const char* use_lib_bcast_str = strmap_get(params, "BCAST_LIB");
     int use_lib_bcast = atoi(use_lib_bcast_str);
 
+    /* get directory for bcasting files */
+    const char* bcast_dir = strmap_get(params, "BCAST_DIR");
+    if (bcast_dir != NULL) {
+        /* TODO: move this somewhere else */
+        if (mkdir(TMPDIR, S_IRWXU|S_IRGRP|S_IXGRP)) {
+            if (errno != EEXIST) {
+                SPAWN_ERR("Failed to create directory: `%s' (%s)", TMPDIR, strerror(errno));
+                exit(EXIT_FAILURE);
+            }
+        }
+
+        /* got a bcast directory, create it */
+        if (mkdir(bcast_dir, S_IRWXU|S_IRGRP|S_IXGRP)) {
+            if (errno != EEXIST) {
+                SPAWN_ERR("Failed to create directory: `%s' (%s)", bcast_dir, strerror(errno));
+                exit(EXIT_FAILURE);
+            }
+        }
+    }
+
     /* create endpoint for children to connect to */
     if (!rank) { tid = begin_delta("open init endpoint"); }
     signal_from_root(s);
@@ -3702,7 +3718,7 @@ process_group_start (session * s, const strmap * params)
         for (i = 0; i < num_libs; i++) {
             const char* libname = strmap_getf(params, "LIB%d", i);
             if (libname != NULL) {
-                const char* newlib = bcast_file(libname, s->tree, pg);
+                const char* newlib = bcast_file(TMPDIR, libname, s->tree, pg);
                 spawn_free(&newlib);
             }
         }
@@ -3740,7 +3756,7 @@ process_group_start (session * s, const strmap * params)
     if (use_bin_bcast) {
         if (!rank) { tid = begin_delta("bcast app binary"); }
         signal_from_root(s);
-        bcastname = bcast_file(app_exe, s->tree, pg);
+        bcastname = bcast_file(TMPDIR, app_exe, s->tree, pg);
         signal_to_root(s);
         if (!rank) { end_delta(tid); }
 
@@ -4070,7 +4086,7 @@ session_init (int argc, char * argv[])
 
         if (copy_launcher) {
             /* copy launcher executable to /tmp */
-            char* spawn_path_tmp = copy_to_tmp(spawn_path);
+            char* spawn_path_tmp = copy_to_tmp("/tmp", spawn_path);
             strmap_set(s->params, "EXE", spawn_path_tmp);
             spawn_free(&spawn_path_tmp);
         } else {
@@ -4576,7 +4592,8 @@ session_start (session * s)
     /* for now, have the root fill in the parameters */
     if (s->spawn_parent == NULL) {
         /* create a name for this process group (unique to session) */
-        strmap_set(appmap, "NAME", "GROUP_0");
+        char group_name[] = "GROUP_0";
+        strmap_set(appmap, "NAME", group_name);
 
         /* set executable path */
         char* value = getenv("MV2_SPAWN_EXE");
@@ -4635,6 +4652,10 @@ session_start (session * s)
         } else {
             strmap_set(appmap, "BCAST_BIN_CHUNK_SZ", "0");
         }
+
+        /* define bcast directory */
+        char* bcast_dir = SPAWN_STRDUPF("%s/%s", TMPDIR, group_name);
+        strmap_set(appmap, "BCAST_DIR", bcast_dir);
 
         /* detect whether we should bcast app binary */
         value = getenv("MV2_SPAWN_BCAST_BIN");
