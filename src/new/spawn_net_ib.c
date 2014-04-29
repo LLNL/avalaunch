@@ -24,6 +24,7 @@
  *
  */
 
+#include <pthread.h>
 #include <limits.h>
 
 #include "spawn_internal.h"
@@ -59,9 +60,9 @@ static uint32_t rdma_default_max_ud_send_wqe = RDMA_DEFAULT_MAX_UD_SEND_WQE;
 static uint32_t rdma_default_max_ud_recv_wqe = RDMA_DEFAULT_MAX_UD_RECV_WQE;
 static uint32_t rdma_default_ud_sendwin_size = 400; /* Max number of outstanding buffers (waiting for ACK)*/
 static uint32_t rdma_default_ud_recvwin_size = 2501; /* Max number of buffered out-of-order messages */
-static long rdma_ud_progress_timeout  = 25000; /* Time (usec) until ACK status is checked (and ACKs sent) */
-static long rdma_ud_retry_timeout     = 50000; /* Time (usec) until a message is resent */
-static long rdma_ud_max_retry_timeout = 20000000;
+static long rdma_ud_progress_timeout  =   25000; /* Time (usec) until ACK status is checked (and ACKs sent) */
+static long rdma_ud_min_retry_timeout =   50000; /* Min time (usec) to wait before resending */
+static long rdma_ud_max_retry_timeout = 2000000; /* Max time (usec) to wait before resending */
 static long rdma_ud_last_check;                  /* time at which we last checked for retries */
 static uint16_t rdma_ud_max_retry_count = 1000;  /* max number of resends before tossing packet */
 static uint16_t rdma_ud_max_ack_pending;         /* max number of recieves before forcing an ack */
@@ -71,6 +72,7 @@ static struct timespec cm_timeout;
 
 static pthread_t recv_thread;    /* thread that handles CQ events */
 static pthread_t timeout_thread; /* thread that resends packets if timeout expires */
+static int force_shutdown = 0;   /* flag indicating caller is in spawn_net_close_ib */
 
 static int g_recv_busy_spin = 0;   /* whether we should busy spin or yield CPU while waiting */
 static int g_recv_flag;            /* flag indicating whether main thread is waiting */
@@ -85,7 +87,7 @@ static pthread_cond_t g_recv_cond; /* condition variable to wait on incoming msg
 
 static pthread_mutex_t comm_lock_object;
 
-static void comm_lock(void)
+static inline void comm_lock(void)
 {           
     int rc = pthread_mutex_lock(&comm_lock_object);
     if (rc != 0) {
@@ -94,7 +96,7 @@ static void comm_lock(void)
     return;
 }
             
-static void comm_unlock(void)
+static inline void comm_unlock(void)
 {           
     int rc = pthread_mutex_unlock(&comm_lock_object);
     if (rc != 0) {
@@ -561,11 +563,11 @@ typedef struct vbuf_region {
 static vbuf_region* vbuf_region_head = NULL;
 
 /* track vbufs stats */
-static vbuf* ud_free_vbuf_head = NULL; /* list of free vbufs */
-static int ud_vbuf_n_allocated = 0;    /* total number allocated */
-static long ud_num_free_vbuf   = 0;    /* number currently free */
-static long ud_num_vbuf_get    = 0;    /* number of times vbufs taken from free list */
-static long ud_num_vbuf_freed  = 0;    /* number of times vbufs added to free list */
+static vbuf* ud_vbuf_free_head     = NULL; /* list of free vbufs */
+static int   ud_vbuf_num_allocated = 0;    /* total number allocated */
+static long  ud_vbuf_num_free      = 0;    /* number currently free */
+static long  ud_vbuf_num_get       = 0;    /* number of times vbufs taken from free list */
+static long  ud_vbuf_num_freed     = 0;    /* number of times vbufs added to free list */
 
 /* lock vbuf get/release calls */
 static pthread_spinlock_t vbuf_lock;
@@ -584,7 +586,46 @@ static int vbuf_init(void)
 
 static int vbuf_finalize()
 {
-  /* TODO: free regions */
+  /* free regions */
+  vbuf_region* reg = vbuf_region_head;
+  while (reg != NULL) {
+      /* record pointer to next region element
+       * (we'll delete the current one) */
+      vbuf_region* next = reg->next;
+
+      /* deregister the memmory with the card */
+      if (reg->mem_handle != NULL) {
+          int dereg_rc = ibv_dereg_mr(reg->mem_handle);
+          if (dereg_rc != 0) {
+              SPAWN_ERR("Failed to deregister memory rc=%d %s", dereg_rc, strerror(dereg_rc));
+          }
+      }
+
+      /* free DMA buffers */
+      if (reg->shmid == -1) {
+          /* we allocated buffers with posix_memalign */
+          free(reg->malloc_buf_start);
+      } else {
+          /* we allocated buffers in huge pages using shmget/shmat */
+          if (shmdt(reg->malloc_buf_start) != 0) {
+              SPAWN_ERR("Failed to detach (shmdt errno=%d %s)", errno, strerror(errno));
+          }
+      }
+
+      /* free vbuf data structures (allocated w/ posix_memalign) */
+      free(reg->malloc_start);
+
+      /* delete the region data structure elem (allocated w/ SPAWN_MALLOC) */
+      spawn_free(&reg);
+
+      /* go on to next element in list */
+      reg = next;
+  }
+
+  /* update globals tracking vbufs */
+  ud_vbuf_free_head     = NULL;
+  ud_vbuf_num_allocated = 0;
+  ud_vbuf_num_free      = 0;
 
   /* destroy pthread spin lock */
   int rc = pthread_spin_destroy(&vbuf_lock);
@@ -603,8 +644,7 @@ static int alloc_hugepage_region(int *shmid, void **buffer, int *nvbufs, int buf
     MRAILI_ALIGN_LEN(size, HUGEPAGE_ALIGN);
 
     /* create hugepage shared region */
-    *shmid = shmget(IPC_PRIVATE, size, 
-                        SHM_HUGETLB | IPC_CREAT | SHM_R | SHM_W);
+    *shmid = shmget(IPC_PRIVATE, size, SHM_HUGETLB | IPC_CREAT | SHM_R | SHM_W);
     if (*shmid < 0) {
         if (rdma_enable_hugepage >= 2) {
             SPAWN_ERR("Failed to get shared memory id (shmget errno=%d %s)", errno, strerror(errno));
@@ -613,13 +653,19 @@ static int alloc_hugepage_region(int *shmid, void **buffer, int *nvbufs, int buf
     }
 
     /* attach shared memory */
-    *buffer = (void *) shmat(*shmid, SHMAT_ADDR, SHMAT_FLAGS);
-    if (*buffer == (void *) -1) {
+    *buffer = (void*) shmat(*shmid, SHMAT_ADDR, SHMAT_FLAGS);
+    if (*buffer == (void*) -1) {
         SPAWN_ERR("Failed to attach shared memory (shmat errno=%d %s)", errno, strerror(errno));
+
+        /* destroy huge page segment that we created above */
+        if (shmctl(*shmid, IPC_RMID, 0) != 0) {
+            SPAWN_ERR("Failed to mark shared memory for removal (shmctl errno=%d %s)", errno, strerror(errno));
+        }
+
         goto fn_fail;
     }
     
-    /* Mark shmem for removal */
+    /* Mark shmem for removal (will be deleted will last process calls shmdt) */
     if (shmctl(*shmid, IPC_RMID, 0) != 0) {
         SPAWN_ERR("Failed to mark shared memory for removal (shmctl errno=%d %s)", errno, strerror(errno));
     }
@@ -642,82 +688,78 @@ fn_fail:
 
 static int vbuf_region_alloc(struct ibv_pd* pdomain, int nvbufs)
 {
-    int i;
     int result;
 
     /* specify alignment parameters */
     int alignment_vbuf = 64;
     int alignment_dma = getpagesize();
 
-    if (ud_free_vbuf_head != NULL) {
+    if (ud_vbuf_free_head != NULL) {
         SPAWN_ERR("Free vbufs available but trying to allocation more");
         spawn_exit(-1);
     }
 
-    struct vbuf_region* reg = (struct vbuf_region*) SPAWN_MALLOC(sizeof(struct vbuf_region));
-    
-    void* vbuf_dma_buffer = NULL;
-
+    /* NOTE: this could change the value of nvbufs depending on
+     * how many we can fit in the huge page region */
     /* get memory from huge pages if enabled */
+    int shmid = -1;
+    void* dmabuf = NULL;
     if (rdma_enable_hugepage) {
         result = alloc_hugepage_region(
-            &reg->shmid, &vbuf_dma_buffer, &nvbufs, rdma_default_ud_mtu
+            &shmid, &dmabuf, &nvbufs, rdma_default_ud_mtu
         );
     }
 
+    /* compute sizes of buffers we need to allocate */
+    size_t vbufs_size  = nvbufs * sizeof(vbuf);
+    size_t dmabuf_size = nvbufs * rdma_default_ud_mtu;
+
     /* do posix_memalign if enable hugepage disabled or failed */
     if (rdma_enable_hugepage == 0 || result != 0)  {
-        reg->shmid = -1;
-        result = posix_memalign(
-            &vbuf_dma_buffer, alignment_dma, nvbufs * rdma_default_ud_mtu
-        );
+        shmid = -1;
+        result = posix_memalign(&dmabuf, alignment_dma, dmabuf_size);
         if (result != 0) {
             SPAWN_ERR("Cannot allocate vbuf region (posix_memalign rc=%d %s)", result, strerror(result));
         }
     }
 
-    /* check that we got the dma buffer */
-    if ((result != 0) || (NULL == vbuf_dma_buffer)) {
-        SPAWN_ERR("Failed to allocate vbufs");
-        spawn_exit(-1);
-    }
-    
     /* allocate memory for vbuf data structures */
-    void* mem;
-    result = posix_memalign(
-        (void**) &mem, alignment_vbuf, nvbufs * sizeof(vbuf)
-    );
+    void* vbufs;
+    result = posix_memalign((void**) &vbufs, alignment_vbuf, vbufs_size);
     if (result != 0) {
         SPAWN_ERR("Cannot allocate vbuf region (posix_memalign rc=%d %s)", result, strerror(result));
-        /* TODO: free vbuf_dma_buffer */
-        spawn_free(&reg);
         return -1;
     }
 
+    /* check that we got the dma buffer */
+    if (result != 0 || NULL == dmabuf) {
+        SPAWN_ERR("Failed to allocate vbufs");
+        /* TODO: free above memory on failure (and shmid) */
+        free(vbufs);
+        spawn_exit(-1);
+    }
+    
     /* clear memory regions */
-    memset(mem,             0, nvbufs * sizeof(vbuf));
-    memset(vbuf_dma_buffer, 0, nvbufs * rdma_default_ud_mtu);
+    memset(vbufs,             0, vbufs_size);
+    memset(dmabuf, 0, dmabuf_size);
 
     /* update global vbuf variables */
-    ud_vbuf_n_allocated += nvbufs;
-    ud_num_free_vbuf    += nvbufs;
-    ud_free_vbuf_head    = mem;
+    ud_vbuf_free_head      = vbufs;
+    ud_vbuf_num_allocated += nvbufs;
+    ud_vbuf_num_free      += nvbufs;
 
     /* fill in fields of vbuf_region structure */
-    reg->malloc_start     = mem;
-    reg->malloc_buf_start = vbuf_dma_buffer;
-    reg->malloc_end       = (void *) ((char *) mem + nvbufs * sizeof(vbuf));
-    reg->malloc_buf_end   = (void *) ((char *) vbuf_dma_buffer + nvbufs * rdma_default_ud_mtu);
+    struct vbuf_region* reg = (struct vbuf_region*) SPAWN_MALLOC(sizeof(struct vbuf_region));
+    reg->shmid            = shmid;
+    reg->malloc_start     = vbufs;
+    reg->malloc_end       = (void *) ((char *) vbufs + vbufs_size);
+    reg->malloc_buf_start = dmabuf;
+    reg->malloc_buf_end   = (void *) ((char *) dmabuf + dmabuf_size);
     reg->count            = nvbufs;
-    reg->vbuf_head        = ud_free_vbuf_head;
+    reg->vbuf_head        = ud_vbuf_free_head;
 
     /* register memory region with HCA */
-    reg->mem_handle = ibv_reg_mr(
-        pdomain,
-        vbuf_dma_buffer,
-        nvbufs * rdma_default_ud_mtu,
-        IBV_ACCESS_LOCAL_WRITE
-    );
+    reg->mem_handle = ibv_reg_mr(pdomain, dmabuf, dmabuf_size, IBV_ACCESS_LOCAL_WRITE);
     if (reg->mem_handle == NULL) {
         SPAWN_ERR("Cannot register vbuf region (ibv_reg_mr errno=%d %s)", errno, strerror(errno)); 
         /* TODO: need to free memory / unregister with some cards? */
@@ -725,12 +767,13 @@ static int vbuf_region_alloc(struct ibv_pd* pdomain, int nvbufs)
     }
 
     /* init the vbuf structures */
+    int i;
     for (i = 0; i < nvbufs; ++i) {
         /* get a pointer to the vbuf */
-        vbuf* cur = ud_free_vbuf_head + i;
+        vbuf* cur = ud_vbuf_free_head + i;
 
         /* set next pointer */
-        cur->desc.next = ud_free_vbuf_head + i + 1;
+        cur->desc.next = ud_vbuf_free_head + i + 1;
         if (i == (nvbufs - 1)) {
             cur->desc.next = NULL;
         }
@@ -739,7 +782,7 @@ static int vbuf_region_alloc(struct ibv_pd* pdomain, int nvbufs)
         cur->region = reg;
 
         /* set pointer to data buffer */
-        char* ptr = (char *)vbuf_dma_buffer + i * rdma_default_ud_mtu;
+        char* ptr = (char *)dmabuf + i * rdma_default_ud_mtu;
         cur->buffer = (void*) ptr;
 
         /* set remaining fields */
@@ -772,19 +815,19 @@ static vbuf* vbuf_get(struct ibv_pd* pd)
     pthread_spin_lock(&vbuf_lock);
 
     /* if we don't have any free vufs left, try to allocate more */
-    if (ud_free_vbuf_head == NULL) {
+    if (ud_vbuf_free_head == NULL) {
         if (vbuf_region_alloc(pd, rdma_vbuf_secondary_pool_size) != 0) {
-            SPAWN_ERR("UD VBUF reagion allocation failed. Pool size %d", ud_vbuf_n_allocated);
+            SPAWN_ERR("UD VBUF reagion allocation failed. Pool size %d", ud_vbuf_num_allocated);
             spawn_exit(-1);
         }
     }
 
     /* pick item from head of list */
     /* this correctly handles removing from single entry free list */
-    v = ud_free_vbuf_head;
-    ud_free_vbuf_head = ud_free_vbuf_head->desc.next;
-    ud_num_free_vbuf--;
-    ud_num_vbuf_get++;
+    v = ud_vbuf_free_head;
+    ud_vbuf_free_head = ud_vbuf_free_head->desc.next;
+    ud_vbuf_num_free--;
+    ud_vbuf_num_get++;
 
     v->content_size = 0;
     v->retry_count  = 0;
@@ -814,11 +857,11 @@ static void vbuf_release(vbuf* v)
     pthread_spin_lock(&vbuf_lock);
 
     /* add vbuf to front of UD free list */
-    assert(v != ud_free_vbuf_head);
-    v->desc.next = ud_free_vbuf_head;
-    ud_free_vbuf_head = v;
-    ud_num_free_vbuf++;
-    ud_num_vbuf_freed++;
+    assert(v != ud_vbuf_free_head);
+    v->desc.next = ud_vbuf_free_head;
+    ud_vbuf_free_head = v;
+    ud_vbuf_num_free++;
+    ud_vbuf_num_freed++;
 
     /* clear out fields to prepare vbuf for next use */
     v->content_size = 0;
@@ -1264,10 +1307,10 @@ static inline void mv2_ud_place_recvwin(vbuf *v)
 static void ud_send_ack(vc_t *vc)
 {
     /* get a vbuf to build our packet */
-    vbuf *v = vbuf_get(g_hca_info.pd);
+    vbuf* v = vbuf_get(g_hca_info.pd);
 
     /* record pointer to VC in vbuf */
-    v->vc = (void *)vc;
+    v->vc = (void*)vc;
 
     /* prepare vbuf for sending */
     unsigned long size = sizeof(packet_header);
@@ -1383,16 +1426,6 @@ static void ud_resend(vbuf *v)
         SPAWN_ERR("Tossing normal packet, job will hang\n");
         ud_toss_packet(v);
         return;
-
-#if 0
-        SPAWN_ERR("UD reliability error. Exeeced max retries(%d) "
-                "in resending the message(%p). current retry timeout(us): %lu. "
-                "This Error may happen on clusters based on the InfiniBand "
-                "topology and traffic patterns. Please try with increased "
-                "timeout using MV2_UD_RETRY_TIMEOUT\n", 
-                v->retry_count, v, rdma_ud_retry_timeout);
-        exit(EXIT_FAILURE);
-#endif
     }
 
     /* get VC associated with packet */
@@ -1431,10 +1464,15 @@ static void ud_resend(vbuf *v)
 
 /* iterates over all items on unack queue, checks time since last send,
  * and resends if timer has expired */
-static void ud_check_resend()
+static int ud_check_resend()
 {
     /* get pointer to unack queue */
     message_queue_t* q = &proc.unack_queue;
+
+    /* if our queue is empty, return 1 */
+    if (q->head == NULL) {
+        return 1;
+    }
 
     /* get current time */
     double timestamp = spawn_clock_time_us();
@@ -1455,9 +1493,8 @@ static void ud_check_resend()
         /* compute time this packet has been waiting since we
          * last sent (or resent) it */
         long delay = timestamp - cur->timestamp;
-        if ((delay > (rdma_ud_retry_timeout * r)) ||
-            (delay > rdma_ud_max_retry_timeout))
-        {
+        long waittime = rdma_ud_min_retry_timeout * r;
+        if (delay > waittime || delay > rdma_ud_max_retry_timeout) {
             /* we've waited long enough, try again and update
              * its send timestamp */
             ud_resend(cur);
@@ -1472,7 +1509,8 @@ static void ud_check_resend()
         cur = cur->unack_msg.next;
     }
 
-    return;
+    /* return 0 to indicate we have at least one item on the queue */
+    return 0;
 }
 
 static void ud_process_recv(vbuf *v) 
@@ -2011,6 +2049,13 @@ static void* cm_timeout_handler(void *arg)
     cm_timeout.tv_sec = rdma_ud_progress_timeout / 1000000;
     cm_timeout.tv_nsec = (rdma_ud_progress_timeout - cm_timeout.tv_sec * 1000000) * 1000;
 
+    /* we'll start a timer when we see the force_shutdown flag set,
+     * and we'll bail out when all packets have been acked or the
+     * shutdown timer expires, which ever is first */
+    int shutdown_timer = 0;
+    double shutdown_timeout = (double) (rdma_ud_progress_timeout * 10);
+    double end;
+
     while(1) {
         /* sleep for some time before we look, release lock while
          * sleeping */
@@ -2035,15 +2080,51 @@ static void* cm_timeout_handler(void *arg)
             cq_drain();
 
             /* resend any unack'd packets whose timeout has expired */
-            ud_check_resend();
+            int unack_empty = ud_check_resend();
 
             /* done sending messages, release lock */
             comm_unlock();
+
+            /* if spawn_net_close has been called:
+             *   if unack queue is empty, break
+             *   otherwise if timer is not set, set timer
+             *   otherwise if timer has expired, break */
+            if (force_shutdown) {
+                if (unack_empty) {
+                    /* all sent packets have been acked,
+                     * and since we're in close no more
+                     * will be sent, we can stop now */
+                    break;
+                } else if (! shutdown_timer) {
+                    /* start the timer */
+                    shutdown_timer = 1;
+                    end = spawn_clock_time_us();
+                    end += shutdown_timeout;
+                } else {
+                    /* break if the timer has expired */
+                    double now = spawn_clock_time_us();
+                    if (now > end) {
+                        break;
+                    }
+                }
+            }
 
             /* record the last time we checked acks */
 //            rdma_ud_last_check = spawn_clock_time_us();
 //        }
     }
+
+    comm_lock();
+
+    /* process any last acks that came in */
+    cq_drain();
+
+    /* send acks several times, in a last attempt */
+    ud_check_acks();
+
+    /* TODO: throw out all packets on unack queue */
+
+    comm_unlock();
 
     return NULL;
 }
@@ -2647,6 +2728,8 @@ static ud_ctx_t* ud_ctx_create()
 /* Destroy UD Context */
 static void ud_ctx_destroy(spawn_net_endpoint** pep)
 {
+    int rc;
+
     /* get pointer to end point */
     spawn_net_endpoint* ep = *pep;
 
@@ -2657,44 +2740,108 @@ static void ud_ctx_destroy(spawn_net_endpoint** pep)
      * to get an event and thus wake up, then call pthread_join
      * here instead */
 
-    /* shut down our threads */
-    pthread_cancel(timeout_thread);
+    /* signal our threads that we need to shut down */
+    force_shutdown = 1;
+
+    /* wait for resend thread to return */
+    pthread_join(timeout_thread, NULL);
+    if (rc != 0) {
+        SPAWN_ERR("Failed to join resend timeout event thread (pthread_join rc=%d %s)", rc, strerror(rc));
+    }
 
     /* shut down receive thread if we have one */
     if (! g_recv_busy_spin) {
         /* shut down the receive thread */
         pthread_cancel(recv_thread);
+        if (rc != 0) {
+            SPAWN_ERR("Failed to cancel completion event thread (pthread_cancel rc=%d %s)", rc, strerror(rc));
+        }
+
+        /* shut down the receive thread */
+        rc = pthread_join(recv_thread, NULL);
+        if (rc != 0) {
+            SPAWN_ERR("Failed to join completion event thread (pthread_join rc=%d %s)", rc, strerror(rc));
+        }
 
         /* delete the condition variable */
         pthread_cond_destroy(&g_recv_cond);
+        if (rc == 0) {
+            //g_recv_cond = PTHREAD_COND_INITIALIZER;
+        } else {
+            SPAWN_ERR("Failed to destroy receive condition variable (pthread_cond_destroy rc=%d %s)", rc, strerror(rc));
+        }
     }
 
     /* destroy the lock */
-    pthread_mutex_destroy(&comm_lock_object);
+    rc = pthread_mutex_destroy(&comm_lock_object);
+    if (rc == 0) {
+        //comm_lock_object = PTHREAD_MUTEX_INITIALIZER;
+    } else {
+        SPAWN_ERR("Failed to destroy pthread mutex (pthread_mutex_destroy rc=%d %s)", rc, strerror(rc));
+    }
+
+    /* deregister and free memory for vbufs */
+    vbuf_finalize();
 
     /* destroy UD QP if we have one */
     if (ud_ctx->qp) {
-        ibv_destroy_qp(ud_ctx->qp);
+        rc = ibv_destroy_qp(ud_ctx->qp);
+        if (rc == 0) {
+            ud_ctx->qp = NULL;
+        } else {
+            SPAWN_ERR("Failed to destroy UDQP (ibv_destroy_qp rc=%d %s)", rc, strerror(rc));
+        }
     }
 
-//    mv2_hca_info_t* hca_info = &g_hca_info;
-//    ibv_destroy_cq(hca_info->cq_hndl);
-//    ibv_destroy_comp_channel(hca_info->comp_channel);
-//    ibv_dealloc_pd(hca_info->pd);
-//    ibv_close_device(hca_info->context);
+    /* free off HCA resources */
+    mv2_hca_info_t* hca_info = &g_hca_info;
+
+    /* destroy our completion queue */
+    if (hca_info->cq_hndl != NULL) {
+        rc = ibv_destroy_cq(hca_info->cq_hndl);
+        if (rc == 0) {
+            hca_info->cq_hndl = NULL;
+        } else {
+            SPAWN_ERR("Failed to destroy completion queue (ibv_destroy_cq rc=%d %s)", rc, strerror(rc));
+        }
+    }
+
+    /* destroy the completion channel */
+    if (hca_info->comp_channel != NULL) {
+        ibv_destroy_comp_channel(hca_info->comp_channel);
+        if (rc == 0) {
+            hca_info->comp_channel = NULL;
+        } else {
+            SPAWN_ERR("Failed to destroy completion channel (ibv_destroy_comp_channel rc=%d %s)", rc, strerror(rc));
+        }
+    }
+
+    /* free our protection domain */
+    if (hca_info->pd != NULL) {
+        ibv_dealloc_pd(hca_info->pd);
+        if (rc == 0) {
+            hca_info->pd = NULL;
+        } else {
+            SPAWN_ERR("Failed to deallocate protection domain (ibv_dealloc_pd rc=%d %s)", rc, strerror(rc));
+        }
+    }
+
+    /* close our device context */
+    if (hca_info->context != NULL) {
+        ibv_close_device(hca_info->context);
+        if (rc == 0) {
+            /* when we close the context, we also lose the associated device */
+            hca_info->device  = NULL;
+            hca_info->context = NULL;
+        } else {
+            SPAWN_ERR("Failed to close HCA device (ibv_close_device rc=%d %s)", errno, strerror(errno));
+        }
+    }
 
     /* now free context data structure */
     spawn_free(&ud_ctx);
 
-    /* free endpoint name */
-    spawn_free(&ep->name);
-
-    /* free endpoint */
-    spawn_free(pep);
-
     spawn_free(&g_ud_vc_info);
-
-    //vbuf_finalize();
 
     return;
 }
@@ -2754,6 +2901,19 @@ spawn_net_endpoint* spawn_net_open_ib()
 
 int spawn_net_close_ib(spawn_net_endpoint** pep)
 {
+    /* decrement our count of open endpoints */
+    g_count_open--;
+
+    /* free the UD QP data structures and release the hca
+     * context if we've hit 0 */
+    if (g_count_open == 0) {
+        /* TODO: while g_count_conn > 0 spin */
+        /* TODO: need to ensure comm thread is done */
+
+        /* close down UD endpoint */
+        ud_ctx_destroy(pep);
+    }
+
     /* get pointer to endpoint */
     spawn_net_endpoint* ep = *pep;
 
@@ -2765,18 +2925,6 @@ int spawn_net_close_ib(spawn_net_endpoint** pep)
 
     /* set caller's endpoint to NULL */
     *pep = SPAWN_NET_CHANNEL_NULL;
-
-    /* decrement our count of open endpoints */
-    g_count_open--;
-
-    /* free the UD QP data structures and release the hca
-     * context if we've hit 0 */
-    if (g_count_open == 0) {
-        /* TODO: while g_count_conn > 0 spin */
-        /* TODO: need to ensure comm thread is done */
-        /* close down UD endpoint */
-//        ud_ctx_destroy(pep);
-    }
 
     return SPAWN_SUCCESS;
 }
