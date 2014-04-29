@@ -1,37 +1,18 @@
-FLAGS= -DHAVE_SPAWN_NET_IBUD
-OBJS= \
-  lwgrp.o \
-  strmap.o \
-  spawn_util.o \
-  spawn_clock.o \
-  spawn_net_util.o \
-  spawn_net_tcp.o \
-  spawn_net_fifo.o \
-  spawn_net_ib.o \
-  spawn_net.o
-
 LIBS= \
   -libverbs \
   -lpthread \
-  -lrt
+  -lrt \
+  -L../../../install/lib \
+  -lspawn
 
 all: clean
-	gcc -g -O0 -o spawn_util.o -c ../spawn_util.c $(FLAGS)
-	gcc -g -O0 -o spawn_clock.o -c ../spawn_clock.c -I ../. $(FLAGS)
-	gcc -g -O0 -o spawn_net.o -c ../spawn_net.c $(FLAGS)
-	gcc -g -O0 -o spawn_net_tcp.o -c ../spawn_net_tcp.c $(FLAGS)
-	gcc -g -O0 -o spawn_net_fifo.o -c ../spawn_net_fifo.c $(FLAGS)
-	gcc -g -O0 -o spawn_net_ib.o -c ../spawn_net_ib.c -I../. $(FLAGS)
-	gcc -g -O0 -o spawn_net_util.o -c ../spawn_net_util.c -I../. $(FLAGS)
-	gcc -g -O0 -o strmap.o -c ../strmap.c $(FLAGS)
-	gcc -g -O0 -o lwgrp.o -c ../lwgrp.c $(FLAGS)
-	gcc -g -O0 -o strmap_test strmap_test.c $(OBJS) -I../. $(FLAGS) $(LIBS)
-	gcc -g -O0 -o pmi_test pmi_test.c $(OBJS) -I../../../install/include $(FLAGS) ../../../install/lib/libpmi.a $(LIBS)
-	gcc -g -O0 -o ring_test ring_test.c $(OBJS) -I../. -I../../../install/include $(FLAGS) ../../../install/lib/libpmi.a $(LIBS)
-	mpicc -g -O0 -o connect_test connect_test.c $(OBJS) -I../. $(FLAGS) $(LIBS)
-#	mpicc -g -O0 -o connect_test2 connect_test2.c $(OBJS) -I../. $(FLAGS) $(LIBS)
-	mpicc -g -O0 -o fifo_test fifo_test.c $(OBJS) -I../. $(FLAGS) $(LIBS)
-	mpicc -g -O0 -o ibud_test ibud_test.c $(OBJS) -I../. $(FLAGS) $(LIBS)
+	gcc -g -O0 -o strmap_test strmap_test.c -I../. $(FLAGS) $(LIBS)
+	gcc -g -O0 -o pmi_test pmi_test.c -I../../../install/include $(FLAGS) ../../../install/lib/libpmi.a $(LIBS)
+	gcc -g -O0 -o ring_test ring_test.c -I../. -I../../../install/include $(FLAGS) ../../../install/lib/libpmi.a $(LIBS)
+	mpicc -g -O0 -o connect_test connect_test.c -I../. $(FLAGS) $(LIBS)
+#	mpicc -g -O0 -o connect_test2 connect_test2.c -I../. $(FLAGS) $(LIBS)
+	mpicc -g -O0 -o fifo_test fifo_test.c -I../. $(FLAGS) $(LIBS)
+	mpicc -g -O0 -o ibud_test ibud_test.c -I../. $(FLAGS) $(LIBS)
 #	gcc -g -O0 -o binary_size-1g binary_size-1g.c
 #	gcc -g -O0 -o binary_size-512m binary_size-512m.c
 #	gcc -g -O0 -o binary_size-256m binary_size-256m.c
