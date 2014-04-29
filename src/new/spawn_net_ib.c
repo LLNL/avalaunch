@@ -2043,7 +2043,7 @@ static inline void cq_drain()
  ******************************************/
 
 /* this is the function executed by the communication progress thread */
-static void* cm_timeout_handler(void *arg)
+static void* timeout_thread_fn(void *arg)
 {
     /* define sleep time between waking and checking for events */
     cm_timeout.tv_sec = rdma_ud_progress_timeout / 1000000;
@@ -2130,7 +2130,7 @@ static void* cm_timeout_handler(void *arg)
 }
 
 /* this is the function executed by the communication progress thread */
-static void* cm_recv_handler(void *arg)
+static void* recv_thread_fn(void *arg)
 {
     /* get pointer to our HCA info structure */
     mv2_hca_info_t* hca_info = &g_hca_info;
@@ -2710,11 +2710,11 @@ static ud_ctx_t* ud_ctx_create()
         pthread_cond_init(&g_recv_cond, NULL);
 
         /* start the receive thread */
-        pthread_create(&recv_thread, &attr, cm_recv_handler, NULL);
+        pthread_create(&recv_thread, &attr, recv_thread_fn, NULL);
     }
 
     /* start receive and resend timeout threads */
-    pthread_create(&timeout_thread, &attr, cm_timeout_handler, NULL);
+    pthread_create(&timeout_thread, &attr, timeout_thread_fn, NULL);
 
     /* reenable SIGCHLD in main thread */
     ret = pthread_sigmask(SIG_UNBLOCK, &sigmask, NULL);
