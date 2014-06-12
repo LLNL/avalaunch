@@ -4743,11 +4743,12 @@ session_start (session * s)
 void
 session_destroy (session * s)
 {
+    tree_delete(&(s->tree));
     spawn_free(&(s->spawn_id));
     spawn_free(&(s->spawn_parent));
     spawn_net_close(&(s->ep));
+
     strmap_delete(&(s->params));
-    tree_delete(&(s->tree));
     strmap_delete(&(s->name2group));
     strmap_delete(&(s->pid2name));
 

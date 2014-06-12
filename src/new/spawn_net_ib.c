@@ -51,6 +51,10 @@ static vc_t** g_ud_vc_info       = NULL; /* VC array */
 static uint64_t g_ud_vc_infos    = 0;    /* capacity of VC array */
 static uint64_t g_ud_vc_info_id  = 0;    /* next id to be assigned */
 
+/* we create a vc to ourself just to send SHUTDOWN packet to recv thread */
+static vc_t* g_vc_self = NULL;
+static int g_shutdown = 0; /* recv thread will set this flag to one upon handling a shutdown message */
+
 static int rdma_enable_hugepage = 1;
 static int rdma_vbuf_secondary_pool_size = RDMA_VBUF_SECONDARY_POOL_SIZE;
 static int rdma_max_inline_size = RDMA_DEFAULT_MAX_INLINE_SIZE;
@@ -1549,6 +1553,12 @@ static void ud_process_recv(vbuf *v)
             goto fn_exit;
         }
 
+        /* set flag to shutdown if we received a shutdown message
+         * (from ourself) */
+        if (p->type == PKT_UD_SHUTDOWN) {
+            g_shutdown = 1;
+        }
+
         /* no need to send ack or add packet to receive queues,
          * except that we do process ACCEPT messages */
         if (p->type == PKT_UD_ACCEPT) {
@@ -1930,7 +1940,6 @@ static int cq_poll(int* got_recv)
                 /* get pointer to packet header in vbuf */
                 p = (packet_header*) v->content_buf;
 
-                /* we don't have a source id for connect messages */
                 if (p->type != PKT_UD_CONNECT) {
                     /* this is not a connect msg, so source id is valid,
                      * we use the src id to lookup vc */
@@ -2043,7 +2052,7 @@ static inline void cq_drain()
  ******************************************/
 
 /* this is the function executed by the communication progress thread */
-static void* cm_timeout_handler(void *arg)
+static void* timeout_thread_fn(void *arg)
 {
     /* define sleep time between waking and checking for events */
     cm_timeout.tv_sec = rdma_ud_progress_timeout / 1000000;
@@ -2130,7 +2139,7 @@ static void* cm_timeout_handler(void *arg)
 }
 
 /* this is the function executed by the communication progress thread */
-static void* cm_recv_handler(void *arg)
+static void* recv_thread_fn(void *arg)
 {
     /* get pointer to our HCA info structure */
     mv2_hca_info_t* hca_info = &g_hca_info;
@@ -2184,7 +2193,9 @@ static void* cm_recv_handler(void *arg)
         cq_drain();
 
         /* if the shutdown signal is set, bail out */
-        // break;
+        if (g_shutdown) {
+            break;
+        }
     }
 
     /* release the lock before we exit */
@@ -2727,11 +2738,19 @@ static ud_ctx_t* ud_ctx_create()
         pthread_cond_init(&g_recv_cond, NULL);
 
         /* start the receive thread */
-        pthread_create(&recv_thread, &attr, cm_recv_handler, NULL);
+        pthread_create(&recv_thread, &attr, recv_thread_fn, NULL);
+
+        /* when using recv thread, create a VC to ourself in order
+         * to send SHUTDOWN message to thread later, need to do this
+         * to exit from ibv_get_cq_event / ibv_destroy_cq cleanly */
+        g_vc_self = vc_alloc();
+        g_vc_self->writeid = g_vc_self->readid;
+        vc_set_addr(g_vc_self, &local_ep_info, RDMA_DEFAULT_PORT);
+        g_vc_self->state = VC_STATE_CONNECTED;
     }
 
-    /* start receive and resend timeout threads */
-    pthread_create(&timeout_thread, &attr, cm_timeout_handler, NULL);
+    /* start resend timeout threads */
+    pthread_create(&timeout_thread, &attr, timeout_thread_fn, NULL);
 
     /* reenable SIGCHLD in main thread */
     ret = pthread_sigmask(SIG_UNBLOCK, &sigmask, NULL);
@@ -2753,26 +2772,30 @@ static void ud_ctx_destroy(spawn_net_endpoint** pep)
     /* extract context from endpoint */
     ud_ctx_t* ud_ctx = proc.ud_ctx;
 
-    /* TODO: send a shutdown message to force the recv_thread
-     * to get an event and thus wake up, then call pthread_join
-     * here instead */
-
     /* signal our threads that we need to shut down */
     force_shutdown = 1;
 
     /* wait for resend thread to return */
-    pthread_join(timeout_thread, NULL);
+    rc = pthread_join(timeout_thread, NULL);
     if (rc != 0) {
         SPAWN_ERR("Failed to join resend timeout event thread (pthread_join rc=%d %s)", rc, strerror(rc));
     }
 
     /* shut down receive thread if we have one */
     if (! g_recv_busy_spin) {
+        /* TODO: send a shutdown message to force the recv_thread
+         * to get an event and thus wake up, then call pthread_join
+         * here instead */
+        /* send a message to ourself to shutdown recv thread */
+        packet_send(g_vc_self, PKT_UD_SHUTDOWN, NULL, 0);
+
+#if 0
         /* shut down the receive thread */
-        pthread_cancel(recv_thread);
+        rc = pthread_cancel(recv_thread);
         if (rc != 0) {
             SPAWN_ERR("Failed to cancel completion event thread (pthread_cancel rc=%d %s)", rc, strerror(rc));
         }
+#endif
 
         /* shut down the receive thread */
         rc = pthread_join(recv_thread, NULL);
@@ -2780,8 +2803,14 @@ static void ud_ctx_destroy(spawn_net_endpoint** pep)
             SPAWN_ERR("Failed to join completion event thread (pthread_join rc=%d %s)", rc, strerror(rc));
         }
 
+        /* after recv thread finishes, free the VC to ourself */
+        g_vc_self->local_closed  = 1;
+        g_vc_self->remote_closed = 1;
+        vc_free(g_vc_self);
+        g_vc_self = NULL;
+
         /* delete the condition variable */
-        pthread_cond_destroy(&g_recv_cond);
+        rc = pthread_cond_destroy(&g_recv_cond);
         if (rc == 0) {
             //g_recv_cond = PTHREAD_COND_INITIALIZER;
         } else {
@@ -2825,7 +2854,7 @@ static void ud_ctx_destroy(spawn_net_endpoint** pep)
 
     /* destroy the completion channel */
     if (hca_info->comp_channel != NULL) {
-        ibv_destroy_comp_channel(hca_info->comp_channel);
+        rc = ibv_destroy_comp_channel(hca_info->comp_channel);
         if (rc == 0) {
             hca_info->comp_channel = NULL;
         } else {
@@ -2835,17 +2864,20 @@ static void ud_ctx_destroy(spawn_net_endpoint** pep)
 
     /* free our protection domain */
     if (hca_info->pd != NULL) {
-        ibv_dealloc_pd(hca_info->pd);
+        rc = ibv_dealloc_pd(hca_info->pd);
         if (rc == 0) {
             hca_info->pd = NULL;
         } else {
-            SPAWN_ERR("Failed to deallocate protection domain (ibv_dealloc_pd rc=%d %s)", rc, strerror(rc));
+            /* TODO: silence this error message for now,
+             * something is still holding a ref to this pd,
+             * perhaps ibv_destroy_ah for each vc? */
+            //SPAWN_ERR("Failed to deallocate protection domain (ibv_dealloc_pd rc=%d %s)", rc, strerror(rc));
         }
     }
 
     /* close our device context */
     if (hca_info->context != NULL) {
-        ibv_close_device(hca_info->context);
+        rc = ibv_close_device(hca_info->context);
         if (rc == 0) {
             /* when we close the context, we also lose the associated device */
             hca_info->device  = NULL;
