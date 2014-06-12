@@ -2744,7 +2744,7 @@ static void ud_ctx_destroy(spawn_net_endpoint** pep)
     force_shutdown = 1;
 
     /* wait for resend thread to return */
-    pthread_join(timeout_thread, NULL);
+    rc = pthread_join(timeout_thread, NULL);
     if (rc != 0) {
         SPAWN_ERR("Failed to join resend timeout event thread (pthread_join rc=%d %s)", rc, strerror(rc));
     }
@@ -2752,7 +2752,7 @@ static void ud_ctx_destroy(spawn_net_endpoint** pep)
     /* shut down receive thread if we have one */
     if (! g_recv_busy_spin) {
         /* shut down the receive thread */
-        pthread_cancel(recv_thread);
+        rc = pthread_cancel(recv_thread);
         if (rc != 0) {
             SPAWN_ERR("Failed to cancel completion event thread (pthread_cancel rc=%d %s)", rc, strerror(rc));
         }
@@ -2764,7 +2764,7 @@ static void ud_ctx_destroy(spawn_net_endpoint** pep)
         }
 
         /* delete the condition variable */
-        pthread_cond_destroy(&g_recv_cond);
+        rc = pthread_cond_destroy(&g_recv_cond);
         if (rc == 0) {
             //g_recv_cond = PTHREAD_COND_INITIALIZER;
         } else {
@@ -2808,7 +2808,7 @@ static void ud_ctx_destroy(spawn_net_endpoint** pep)
 
     /* destroy the completion channel */
     if (hca_info->comp_channel != NULL) {
-        ibv_destroy_comp_channel(hca_info->comp_channel);
+        rc = ibv_destroy_comp_channel(hca_info->comp_channel);
         if (rc == 0) {
             hca_info->comp_channel = NULL;
         } else {
@@ -2818,7 +2818,7 @@ static void ud_ctx_destroy(spawn_net_endpoint** pep)
 
     /* free our protection domain */
     if (hca_info->pd != NULL) {
-        ibv_dealloc_pd(hca_info->pd);
+        rc = ibv_dealloc_pd(hca_info->pd);
         if (rc == 0) {
             hca_info->pd = NULL;
         } else {
@@ -2828,7 +2828,7 @@ static void ud_ctx_destroy(spawn_net_endpoint** pep)
 
     /* close our device context */
     if (hca_info->context != NULL) {
-        ibv_close_device(hca_info->context);
+        rc = ibv_close_device(hca_info->context);
         if (rc == 0) {
             /* when we close the context, we also lose the associated device */
             hca_info->device  = NULL;
