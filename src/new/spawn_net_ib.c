@@ -2280,6 +2280,23 @@ static vbuf* packet_wait(vc_t* vc)
     return v;
 }
 
+static connect_list* scan_connect_message(uint64_t epid)
+{
+    /* walk connect list looking for matching request */
+    connect_list* elem = connect_head;
+    while (elem != NULL) {
+        /* stop walking the list if we find a matching element */
+        if (elem->epid == epid) {
+            break;
+        }
+
+        /* otherwise, look at the next element */
+        elem = elem->next;
+    }
+
+    return elem;
+}
+
 /* blocks until element arrives on connect queue,
  * extracts element and returns its vbuf */
 static connect_list* recv_connect_message(uint64_t epid)
@@ -3291,23 +3308,63 @@ int spawn_net_write_ib(const spawn_net_channel* ch, const void* buf, size_t size
 /* this waits until one of the specified channels has a message
  * pending, and then it sets index to the index of that channel,
  * index is set to -1 if none of the channels are valid */
-int spawn_net_waitany_ib(int num, const spawn_net_channel** chs, int* index)
+int spawn_net_wait_ib(
+  int neps,
+  const spawn_net_endpoint** eps,
+  int nchs,
+  const spawn_net_channel** chs,
+  int* index)
 {
     /* bail out if channel array is empty */
-    if (chs == NULL) {
+    if (eps == NULL && chs == NULL) {
         return SPAWN_FAILURE;
     }
 
     comm_lock();
 
-    /* loop until a message is available */
+    /* loop until a message is available on a channel
+     * or a connection request comes in on an endpoint */
     while (1) {
         /* set flag to indicate that all channels are NULL */
         int valid = 0;
 
-        /* cycle over every channel and check whether a message is ready */
+        /* cycle over every endpoint and look for connreq */
         int i;
-        for (i = 0; i < num; i++) {
+        for (i = 0; i < neps; i++) {
+            /* get pointer to endpoint */
+            const spawn_net_endpoint* ep = eps[i];
+
+            /* skip NULL endpoints */
+            if (ep == SPAWN_NET_ENDPOINT_NULL) {
+                continue;
+            }
+
+            /* get our endpoint context id, we need to filter connection
+             * requests by this id */
+            uint64_t epid = (uint64_t) ep->data;
+
+            /* we found at least one non-NULL channel */
+            valid = 1;
+
+            /* walk connect list looking for matching request */
+            connect_list* elem = connect_head;
+            while (elem != NULL) {
+                /* stop walking the list if we find a matching element */
+                if (elem->epid == epid) {
+                    /* we found an endpoint with a pending connreq,
+                     * set output parameter and exit */
+                    *index = i;
+                    comm_unlock();
+                    return SPAWN_SUCCESS;
+                }
+
+                /* otherwise, look at the next element */
+                elem = elem->next;
+            }
+        }
+
+        /* cycle over every channel and check whether a message is ready */
+        for (i = 0; i < nchs; i++) {
             /* get pointer to channel */
             const spawn_net_channel* ch = chs[i];
 
@@ -3330,13 +3387,14 @@ int spawn_net_waitany_ib(int num, const spawn_net_channel** chs, int* index)
             if (pending) {
                 /* we found a channel with a pending message,
                  * set output parameter and exit */
-                *index = i;
+                *index = i + neps;
                 comm_unlock();
                 return SPAWN_SUCCESS;
             }
         }
 
-        /* if all channels are NULL, we can't wait on any of them */
+        /* if all endpoints and channels are NULL,
+         * we can't wait on any of them */
         if (! valid) {
             *index = -1;
             comm_unlock();

@@ -2176,7 +2176,7 @@ ring_exchange (session * s, const process_group * pg,
         //spawn_net_read_strmap(chs[i], maps[i]);
 
         int child_index;
-        spawn_net_waitany(children, chs, &child_index);
+        spawn_net_wait(0, NULL, children, chs, &child_index);
         spawn_net_read_strmap(chs[child_index], maps[child_index]);
     }
     signal_to_root(s);
@@ -3462,7 +3462,7 @@ pmi_exchange2(
     /* we loop until we receive all CLOSE_ASYNC messages */
     while(1) {
         /* wait for incoming message */
-        spawn_net_waitany(channels, chs, &index);
+        spawn_net_wait(0, NULL, channels, chs, &index);
 
         /* bail out if we got a bad index */
         if (index < 0) {

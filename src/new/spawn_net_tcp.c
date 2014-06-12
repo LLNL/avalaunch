@@ -530,10 +530,15 @@ int spawn_net_write_tcp(const spawn_net_channel* ch, const void* buf, size_t siz
   return SPAWN_SUCCESS;
 }
 
-int spawn_net_waitany_tcp(int num, const spawn_net_channel** chs, int* index)
+int spawn_net_wait_tcp(
+  int neps,
+  const spawn_net_endpoint** eps,
+  int nchs,
+  const spawn_net_channel** chs,
+  int* index)
 {
-  /* bail out if channel array is empty */
-  if (chs == NULL) {
+  /* bail out if endpoint and channel arrays are empty */
+  if (eps == NULL && chs == NULL) {
       return SPAWN_FAILURE;
   }
 
@@ -547,9 +552,39 @@ int spawn_net_waitany_tcp(int num, const spawn_net_channel** chs, int* index)
   /* we'll set this to the highest socket number which is active */
   int highest_fd;
 
-  /* add each active file descriptor to the set */
+  /* add file descriptors for active endpoints */
   int i;
-  for (i = 0; i < num; i++) {
+  for (i = 0; i < neps; i++) {
+    /* get pointer to channel */
+    const spawn_net_endpoint* ep = eps[i];
+
+    /* skip NULL endpoints */
+    if (ep == SPAWN_NET_ENDPOINT_NULL) {
+        continue;
+    }
+
+    /* get pointer to TCP-specific endpoint data */
+    spawn_epdata* epdata = (spawn_epdata*) ep->data;
+
+    /* get the file descriptor */
+    int fd = epdata->fd;
+
+    /* add the descriptor to the read set */
+    FD_SET(fd, &readfds);
+
+    /* if count is 0, initialize highest_fd,
+     * otherwise check whether this fd is higher in value,
+     * we need to track the highest fd for use in select */
+    if (count == 0 || fd > highest_fd) {
+      highest_fd = fd;
+    }
+
+    /* increase our count of active file descriptors */
+    count++;
+  }
+
+  /* add file descriptors for active channels */
+  for (i = 0; i < nchs; i++) {
     /* get pointer to channel */
     const spawn_net_channel* ch = chs[i];
 
@@ -592,8 +627,32 @@ int spawn_net_waitany_tcp(int num, const spawn_net_channel** chs, int* index)
     return SPAWN_FAILURE;
   }
 
-  /* select succeeded, find the matching file descriptor */
-  for (i = 0; i < num; i++) {
+  /* select succeeded, find the matching file descriptor,
+   * start with the endpoints */
+  for (i = 0; i < neps; i++) {
+    /* get pointer to endpoint */
+    const spawn_net_endpoint* ep = eps[i];
+
+    /* skip NULL endpoints */
+    if (ep == SPAWN_NET_ENDPOINT_NULL) {
+        continue;
+    }
+
+    /* get pointer to TCP-specific endpoint data */
+    spawn_epdata* epdata = (spawn_epdata*) ep->data;
+
+    /* get the file descriptor */
+    int fd = epdata->fd;
+
+    /* check whether fd is ready, set index and break if so */
+    if (FD_ISSET(fd, &readfds)) {
+        *index = i;
+        break;
+    }
+  }
+
+  /* now check channel descriptors */
+  for (i = 0; i < nchs; i++) {
     /* get pointer to channel */
     const spawn_net_channel* ch = chs[i];
 
@@ -610,7 +669,7 @@ int spawn_net_waitany_tcp(int num, const spawn_net_channel** chs, int* index)
 
     /* check whether fd is ready, set index and break if so */
     if (FD_ISSET(fd, &readfds)) {
-        *index = i;
+        *index = i + neps;
         break;
     }
   }

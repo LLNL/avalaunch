@@ -58,8 +58,16 @@ int spawn_net_read(const spawn_net_channel* ch, void* buf, size_t size);
 /* write size bytes from buffer into connection */
 int spawn_net_write(const spawn_net_channel* ch, const void* buf, size_t size);
 
-/* wait for data on list of connections, return index of pending conn  */
-int spawn_net_waitany(int num, const spawn_net_channel** chs, int* index);
+/* wait for data on list of connections, return index of pending comm,
+ * if index < neps, it points to an endpoint, otherwise it points to
+ * the channel at (index - neps)  */
+int spawn_net_wait(
+  int neps,                       /* number of endpoints in eps array */
+  const spawn_net_endpoint** eps, /* array of endpoints to wait for event */
+  int nchs,                       /* number of channels in chs array */
+  const spawn_net_channel** chs,  /* array of channels to wait for event */
+  int* index                      /* returns index of active item */
+);
 
 /* TODO: isend/irecv/waitall */
 
