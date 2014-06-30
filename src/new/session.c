@@ -16,6 +16,7 @@
 #include <errno.h>
 #include <sys/utsname.h>
 #include <limits.h>
+#include <getopt.h>
 
 #include <time.h>
 
@@ -132,7 +133,23 @@ typedef struct session_t {
     strmap* name2group;       /* maps a group name to a process group pointer */
     strmap* pid2name;         /* maps a pid to a process group name */
     session_options options;
+    strmap* appmap;           /* application exe and args extracted from command line */
 } session;
+
+/* We define a set of states to track valid PMI protocol usage for
+ * each client of a process group.
+ *
+ * initial state: PMI_STATE_INIT
+ *
+ * PMI_STATE_INIT --> PMI_STATE_NORMAL when client sends PMI_INIT message
+ *
+ * PMI_STATE_NORMAL --> PMI_STATE_BARRIER when client sends PMI_BARRIER message
+ * PMI_STATE_BARRIER --> PMI_STATE_NORMAL when send PMI_BARRIER to client
+ *
+ * PMI_STATE_NORMAL --> PMI_STATE_RING when client sends PMI_RING_IN message
+ * PMI_STATE_RING --> PMI_STATE_NORMAL when send PMI_RING_OUT message to client
+ *
+ * PMI_STATE_NORMAL --> PMI_STATE_INIT when client sends PMI_FINALIZE message */
 
 typedef enum pmi_states {
     PMI_STATE_INIT = 0,
@@ -154,6 +171,7 @@ typedef struct process_group_struct {
     uint64_t* ranks; /* group rank of each child */
     spawn_net_channel** chs; /* channels to children */
     strmap* file_map; /* list of files stored in ramdisk */
+    uint64_t nconnected; /* hack: record number of connected children, used to assign ids */
 
     /* PMI-specific things */
     pmi_state* states;   /* records PMI state of each child */
@@ -293,7 +311,7 @@ spawn_path_search (const char * command)
  ******************************/
 
 /* return number of arguments set in map */
-static int args_num(strmap* map)
+static int args_num(const strmap* map)
 {
     int num = 0;
     const char* count = strmap_get(map, "ARGS");
@@ -358,7 +376,7 @@ static void args_merge(strmap* dst, const strmap* src)
 extern char** environ;
 
 /* return number of ENV variables set in map */
-static int environ_num(strmap* map)
+static int environ_num(const strmap* map)
 {
     int num = 0;
     const char* count = strmap_get(map, "ENVS");
@@ -2275,354 +2293,6 @@ ring_exchange (session * s, const process_group * pg,
 /* TODO: support versioning info in case app procs use an older
  * PMI protocol */
 
-/* This is hard-coded to expect that each process contributes zero or
- * more key/value pairs with PMI_Put and PMI_Commit, calls PMI_Barrier,
- * and then executes two PMI_Get calls each before calling PMI_Finalize.
- *
- * At the PMI_Barrier, a global allgather of key/value pairs is
- * executed and the full map is stored at each spawn process.
- *
- * Protocol between spawn and application procs:
- *   1) App proc connects to spawn_net_endpoint of spawn process
- *   2) Spawn process accepts connection
- *   3) Spawn process sends strmap of RANK/RANKS/JOBID info needed for
- *      output in PMI_Init
- *   4) App proc sends "BARRIER" string (spawn_net_read_str/write_str)
- *   5) App proc sends strmap of its committed key/value pairs
- *   6) Spawn procs execute allgather of strmaps
- *   7) Spawn proc sends "BARRIER" string back to app proc
- *   8) For each child:
- *        Spawn proc waits on "GET" string
- *        Spawn proc waits on key string
- *        Spawn proc looks up key in strmap
- *        Spawn proc sends value string back to app proc
- *   9) Repeat above step again to handle 2nd "GET" from each proc
- *  10) App proc sends "FINALIZE" string to spawn proc
- *  11) Spawn proc disconnects from each child */
-static void
-pmi_exchange(session * s, const process_group * pg,
-        const spawn_net_endpoint * ep)
-{
-    int i, tid, tid_pmi;
-
-    /* get our rank within spawn tree */
-    int rank = s->tree->rank;
-
-    /* wait for signal from root before we start PMI exchange */
-    if (!rank) { tid_pmi = begin_delta("pmi exchange"); }
-    signal_from_root(s);
-
-    /* allocate strmap */
-    strmap* pmi_strmap = strmap_new();
-
-    /* get number of procs we should here from */
-    int numprocs = (int) pg->num;
-
-    /* TODO: extract ranks and jobid from process group */
-
-    /* get total number of procs in job */
-    int ranks = s->tree->ranks * numprocs;
-
-    /* get global jobid */
-    int jobid = 0;
-
-    /* allocate a channel for each child */
-    spawn_net_channel** chs = (spawn_net_channel**) SPAWN_MALLOC(numprocs * sizeof(spawn_net_channel*));
-
-    /* wait for children to connect */
-    if (!rank) { tid = begin_delta("pmi accept"); }
-    signal_from_root(s);
-    for (i = 0; i < numprocs; i++) {
-        chs[i] = spawn_net_accept(ep);
-    }
-    signal_to_root(s);
-    if (!rank) { end_delta(tid); }
-
-    /* send init data to children */
-    if (!rank) { tid = begin_delta("pmi init info"); }
-    signal_from_root(s);
-    for (i = 0; i < numprocs; i++) {
-        /* since each spawn proc is creating the same number of tasks,
-         * we can hardcode a child rank relative to the spawn rank */
-        int child_rank = rank * numprocs + i;
-
-        /* send init info */
-        strmap* init = strmap_new();
-        strmap_setf(init, "RANK=%d",  child_rank);
-        strmap_setf(init, "RANKS=%d", ranks);
-        strmap_setf(init, "JOBID=%d", jobid);
-        spawn_net_write_strmap(chs[i], init);
-        strmap_delete(&init);
-    }
-    signal_to_root(s);
-    if (!rank) { end_delta(tid); }
-
-    /* wait for BARRIER messages */
-    if (!rank) { tid = begin_delta("pmi read children"); }
-    signal_from_root(s);
-    for (i = 0; i < numprocs; i++) {
-        spawn_net_channel* ch = chs[i];
-        char* cmd = spawn_net_read_str(ch);
-        //printf("spawn %d received cmd %s from child %d\n", rank, cmd, i);
-        spawn_net_read_strmap(ch, pmi_strmap);
-        spawn_free(&cmd);
-    }
-    signal_to_root(s);
-    if (!rank) { end_delta(tid); }
-
-    /* allgather strmaps across spawn processes */
-    if (!rank) { tid = begin_delta("pmi allgather"); }
-    signal_from_root(s);
-    allgather_strmap(pmi_strmap, s->tree);
-    signal_to_root(s);
-    if (!rank) { end_delta(tid); }
-
-    /* wait for signal before starting next phase */
-    if (!rank) { tid = begin_delta("pmi write children"); }
-    signal_from_root(s);
-
-    /* send BARRIER message back to child app procs */
-    char cmd_barrier[] = "BARRIER";
-    for (i = 0; i < numprocs; i++) {
-        spawn_net_channel* ch = chs[i];
-        spawn_net_write_str(ch, cmd_barrier);
-    }
-
-    /* handle first GET request */
-    for (i = 0; i < numprocs; i++) {
-        spawn_net_channel* ch = chs[i];
-        char* cmd = spawn_net_read_str(ch);
-        char* key = spawn_net_read_str(ch);
-        const char* val = strmap_get(pmi_strmap, key);
-        //printf("cmd=%s key=%s val=%s\n", cmd, key, val);
-        spawn_net_write_str(ch, val);
-        spawn_free(&key);
-        spawn_free(&cmd);
-    }
-
-    /* handle second GET request */
-    for (i = 0; i < numprocs; i++) {
-        spawn_net_channel* ch = chs[i];
-        char* cmd = spawn_net_read_str(ch);
-        char* key = spawn_net_read_str(ch);
-        const char* val = strmap_get(pmi_strmap, key);
-        //printf("cmd=%s key=%s val=%s\n", cmd, key, val);
-        spawn_net_write_str(ch, val);
-        spawn_free(&key);
-        spawn_free(&cmd);
-    }
-
-    /* signal root to let it know PMI write has completed */
-    signal_to_root(s);
-    if (!rank) { end_delta(tid); }
-
-    /* wait for FINALIZE */
-    if (!rank) { tid = begin_delta("pmi finalize"); }
-    signal_from_root(s);
-    for (i = 0; i < numprocs; i++) {
-        spawn_net_channel* ch = chs[i];
-        char* cmd = spawn_net_read_str(ch);
-        //printf("spawn %d received cmd %s from child %d\n", rank, cmd, i);
-        spawn_net_disconnect(&chs[i]);
-        spawn_free(&cmd);
-    }
-    signal_to_root(s);
-    if (!rank) { end_delta(tid); }
-
-    spawn_free(&chs);
-
-    /* signal root to let it know PMI bcast has completed */
-    signal_to_root(s);
-    if (!rank) { end_delta(tid_pmi); }
-
-    if (rank == 0) {
-        printf("PMI map:\n");
-        strmap_print(pmi_strmap);
-        printf("\n");
-    }
-
-    strmap_delete(&pmi_strmap);
-
-    return;
-}
-
-static void
-pmi_exchange3(session * s, const process_group * pg,
-        const spawn_net_endpoint * ep)
-{
-    int i, tid, tid_pmi;
-
-    /* get our rank within spawn tree */
-    int rank = s->tree->rank;
-
-    /* wait for signal from root before we start PMI exchange */
-    if (!rank) { tid_pmi = begin_delta("pmi exchange"); }
-    signal_from_root(s);
-
-    /* allocate strmap */
-    strmap* pmi_strmap = strmap_new();
-
-    /* get number of procs we should here from */
-    int numprocs = (int) pg->num;
-
-    /* TODO: extract ranks and jobid from process group */
-
-    /* get total number of procs in job */
-    int ranks = s->tree->ranks * numprocs;
-
-    /* get global jobid */
-    int jobid = 0;
-
-    /* allocate a channel for each child */
-    spawn_net_channel** chs = (spawn_net_channel**) SPAWN_MALLOC(numprocs * sizeof(spawn_net_channel*));
-
-    /* wait for children to connect */
-    if (!rank) { tid = begin_delta("pmi accept"); }
-    signal_from_root(s);
-    for (i = 0; i < numprocs; i++) {
-        chs[i] = spawn_net_accept(ep);
-    }
-    signal_to_root(s);
-    if (!rank) { end_delta(tid); }
-
-    /* send init data to children */
-    if (!rank) { tid = begin_delta("pmi init info"); }
-    signal_from_root(s);
-    for (i = 0; i < numprocs; i++) {
-        strmap* tmp = strmap_new();
-        spawn_net_read_strmap(chs[i], tmp);
-        strmap_delete(&tmp);
-
-        /* since each spawn proc is creating the same number of tasks,
-         * we can hardcode a child rank relative to the spawn rank */
-        int child_rank = rank * numprocs + i;
-
-        /* send init info */
-        strmap* init = strmap_new();
-        strmap_setf(init, "RANK=%d",  child_rank);
-        strmap_setf(init, "RANKS=%d", ranks);
-        strmap_setf(init, "JOBID=%d", jobid);
-        spawn_net_write_strmap(chs[i], init);
-        strmap_delete(&init);
-    }
-    signal_to_root(s);
-    if (!rank) { end_delta(tid); }
-
-    /* wait for BARRIER messages */
-    if (!rank) { tid = begin_delta("pmi read children"); }
-    signal_from_root(s);
-    for (i = 0; i < numprocs; i++) {
-        spawn_net_channel* ch = chs[i];
-
-        strmap* tmp = strmap_new();
-        spawn_net_read_strmap(ch, tmp);
-        strmap_delete(&tmp);
-
-        spawn_net_read_strmap(ch, pmi_strmap);
-    }
-    signal_to_root(s);
-    if (!rank) { end_delta(tid); }
-
-    /* allgather strmaps across spawn processes */
-    if (!rank) { tid = begin_delta("pmi allgather"); }
-    signal_from_root(s);
-    allgather_strmap(pmi_strmap, s->tree);
-    signal_to_root(s);
-    if (!rank) { end_delta(tid); }
-
-    /* wait for signal before starting next phase */
-    if (!rank) { tid = begin_delta("pmi write children"); }
-    signal_from_root(s);
-
-    /* send BARRIER message back to child app procs */
-    for (i = 0; i < numprocs; i++) {
-        spawn_net_channel* ch = chs[i];
-
-        strmap* tmp = strmap_new();
-        strmap_set(tmp, "MSG", "PMI_BCAST");
-        spawn_net_write_strmap(ch, tmp);
-        strmap_delete(&tmp);
-    }
-
-    /* handle first GET request */
-    for (i = 0; i < numprocs; i++) {
-        spawn_net_channel* ch = chs[i];
-
-        strmap* tmp = strmap_new();
-        spawn_net_read_strmap(ch, tmp);
-        const char* key = strmap_get(tmp, "KEY");
-
-        const char* val = strmap_get(pmi_strmap, key);
-
-        strmap* retmap = strmap_new();
-        strmap_set(retmap, "KEY", key);
-        if (val != NULL) {
-            strmap_set(retmap, "VAL", val);
-        }
-        spawn_net_write_strmap(ch, retmap);
-        strmap_delete(&retmap);
-
-        strmap_delete(&tmp);
-    }
-
-    /* handle second GET request */
-    for (i = 0; i < numprocs; i++) {
-        spawn_net_channel* ch = chs[i];
-
-        strmap* tmp = strmap_new();
-        spawn_net_read_strmap(ch, tmp);
-        const char* key = strmap_get(tmp, "KEY");
-
-        const char* val = strmap_get(pmi_strmap, key);
-
-        strmap* retmap = strmap_new();
-        strmap_set(retmap, "KEY", key);
-        if (val != NULL) {
-            strmap_set(retmap, "VAL", val);
-        }
-        spawn_net_write_strmap(ch, retmap);
-        strmap_delete(&retmap);
-
-        strmap_delete(&tmp);
-    }
-
-    /* signal root to let it know PMI write has completed */
-    signal_to_root(s);
-    if (!rank) { end_delta(tid); }
-
-    /* wait for FINALIZE */
-    if (!rank) { tid = begin_delta("pmi finalize"); }
-    signal_from_root(s);
-    for (i = 0; i < numprocs; i++) {
-        spawn_net_channel* ch = chs[i];
-
-        strmap* tmp = strmap_new();
-        spawn_net_read_strmap(ch, tmp);
-        strmap_delete(&tmp);
-
-        spawn_net_disconnect(&chs[i]);
-    }
-    signal_to_root(s);
-    if (!rank) { end_delta(tid); }
-
-    spawn_free(&chs);
-
-    /* signal root to let it know PMI bcast has completed */
-    signal_to_root(s);
-    if (!rank) { end_delta(tid_pmi); }
-
-    if (rank == 0) {
-        printf("PMI map:\n");
-        strmap_print(pmi_strmap);
-        printf("\n");
-    }
-
-    strmap_delete(&pmi_strmap);
-
-    return;
-}
-
-
 /*******************************
  * Process groups
  ******************************/
@@ -2639,6 +2309,7 @@ process_group_new()
     pg->pids   = NULL;
     pg->ranks  = NULL;
     pg->chs    = NULL;
+    pg->nconnected = 0;
     pg->file_map   = strmap_new();
     pg->commit_map = strmap_new();
     pg->global_map = strmap_new();
@@ -3368,10 +3039,33 @@ static int send_close_async(const session* s)
     return;
 }
 
+static void authenticate_connection(const spawn_net_endpoint* ep, process_group* pg, int* child_id)
+{
+    /* accept the connection */
+    spawn_net_channel* ch = spawn_net_accept(ep);
+
+    /* assume a child is connecting to us, and pick an id for this child */
+    int idx = pg->nconnected;
+    pg->nconnected++;
+
+    pg->chs[idx] = ch;
+
+    /* TODO: need to authenticate connection */
+
+    /* TODO: pick process group by name from incoming message */
+
+    /* TODO: pick child id from value of incoming message */
+
+    /* record id of connecting child */
+    *child_id = idx;
+
+    return;
+}
+
 /* accepts connections from process group and processes
  * PMI messages */
 static void
-pmi_exchange2(
+pmi_exchange(
     session * s,
     process_group * pg,
     const spawn_net_endpoint * ep)
@@ -3392,7 +3086,7 @@ pmi_exchange2(
     /* get number of application procs we should here from */
     uint64_t children = pg->num;
 
-    /* allocate a channel for each child */
+    /* allocate a state variable for each child */
     pg->states = (pmi_state*) SPAWN_MALLOC(children * sizeof(pmi_state));
 
     /* initailize states */
@@ -3408,8 +3102,12 @@ pmi_exchange2(
 
     /* allocate a channel for each child */
     pg->chs = (spawn_net_channel**) SPAWN_MALLOC(children * sizeof(spawn_net_channel*));
+    for (i = 0; i < children; i++) {
+        pg->chs[i] = SPAWN_NET_CHANNEL_NULL;
+    }
 
     /* wait for children to connect */
+#if 0
     if (!rank) { tid = begin_delta("app accept"); }
     signal_from_root(s);
     for (i = 0; i < children; i++) {
@@ -3417,6 +3115,7 @@ pmi_exchange2(
     }
     signal_to_root(s);
     if (!rank) { end_delta(tid); }
+#endif
 
     signal_from_root(s);
     if (!rank) { tid = begin_delta("app exchange"); }
@@ -3461,15 +3160,33 @@ pmi_exchange2(
 
     /* we loop until we receive all CLOSE_ASYNC messages */
     while(1) {
-        /* wait for incoming message */
-        spawn_net_wait(0, NULL, channels, chs, &index);
+        /* wait for incoming message or connection request */
+        spawn_net_wait(1, &ep, channels, chs, &index);
 
         /* bail out if we got a bad index */
         if (index < 0) {
             break;
         }
 
-        /* grab unlock */
+        /* grab lock */
+
+        /* if index points to endpoint, process incoming connection request */
+        if (index == 0) {
+            /* TODO: acquire process group and child id from incoming message */
+
+            /* accept the connection for this process group */
+            int child_id;
+            authenticate_connection(ep, pg, &child_id);
+
+            /* initialize channel for this child */
+            chs[child_id] = pg->chs[child_id];
+
+            continue;
+        }
+
+        /* otherwise, we got a message on a channel,
+         * shift index to point into chs array */
+        index--;
 
         /* get pointer to channel */
         spawn_net_channel* ch = chs[index];
@@ -3610,8 +3327,8 @@ pmi_exchange2(
 }
 
 /* launch app process group witih the session according to params */
-static process_group *
-process_group_start (session * s, const strmap * params)
+static process_group*
+process_group_start (session* s, strmap* params)
 {
     int i, tid;
 
@@ -3912,9 +3629,7 @@ process_group_start (session * s, const strmap * params)
 
     /* execute PMI exchange */
     if (use_pmi) {
-        //pmi_exchange(s, pg, ep);
-        pmi_exchange2(s, pg, ep);
-        //pmi_exchange3(s, pg, ep);
+        pmi_exchange(s, pg, ep);
     }
     if (use_ring) {
         ring_exchange(s, pg, ep);
@@ -3958,37 +3673,84 @@ find_command (strmap * map, const char * cmd)
     return;
 }
 
-static session_options
-process_options (int argc, char * argv[])
+static void
+process_options (session* s, int argc, char * argv[])
 {
-    extern char * optarg;
-    extern int optind, opterr, optopt;
     session_options so = { .hostfile = NULL, .error = 0 };
-    int code;
+
+    extern char* optarg;
+    extern int optind, opterr, optopt;
 
     optind = 1;
     opterr = 0;
 
-    do {
-        code = getopt(argc, argv, ":h:");
-        switch (code) {
-            case '?': /* Unrecognized option */
+    int option_index = 0;
+    static struct option long_options[] = {
+        {"hostfile", 1, 0, 'h'},
+        {0, 0, 0, 0}
+    };
+
+    while (1) {
+        int c = getopt_long(
+                    argc, argv, "h:",
+                    long_options, &option_index
+                );
+
+        if (c == -1) {
+            break;
+        }
+
+        switch (c) {
+            case 'h':
+                so.hostfile = SPAWN_STRDUP(optarg);
+                break;
+            default:
                 so.error = -1;
                 so.error_option = optopt;
-                return so;
-
-            case ':': /* Missing option argument */
-                so.error = -2;
-                so.error_option = optopt;
-                return so;
-
-            case 'h': /* hostfile */
-                so.hostfile = strdup(optarg);
                 break;
         }
-    } while (-1 != code);
+    }
 
-    return so;
+    /* extract non-option values from command line */
+    int numitems = argc - optind;
+    if (numitems > 0) {
+        /* we take the first item after options to be executable */
+        const char* exename = argv[optind];
+        optind++;
+
+        /* do the path search once in root */
+        char* app_path = spawn_path_search(exename);
+        if (app_path != NULL) {
+            /* record full path to executable */
+            strmap_setf(s->appmap, "EXE=%s", app_path);
+
+            /* lookup libs and record them */
+            lib_capture(s->appmap, app_path);
+        } else {
+            so.error = -3;
+        }
+        spawn_free(&app_path);
+
+        /* record all other items as args to executable */
+
+        /* initialize our id to current number of args */
+        int num = args_num(s->appmap);
+    
+        /* add each token as a new argument */
+        int i;
+        for (i = optind; i < argc; i++) {
+            /* add argument */
+            strmap_setf(s->appmap, "ARG%d=%s", num, argv[i]);
+            num++;
+        }
+    
+        /* record the count */
+        strmap_setf(s->appmap, "ARGS=%d", num);
+    }
+
+    s->options = so;
+
+    return;
 }
 
 session *
@@ -4005,6 +3767,7 @@ session_init (int argc, char * argv[])
     s->params       = NULL;
     s->name2group   = NULL;
     s->pid2name     = NULL;
+    s->appmap       = NULL;
 
     /* initialize tree */
     s->tree = tree_new();
@@ -4017,6 +3780,9 @@ session_init (int argc, char * argv[])
 
     /* create empty pid-to-process group name map */
     s->pid2name   = strmap_new();
+
+    /* create empty map to hold application name and arguments */
+    s->appmap = strmap_new();
 
     const char* value;
 
@@ -4031,7 +3797,7 @@ session_init (int argc, char * argv[])
         s->ep_name = spawn_net_name(s->ep);
     } else {
         strmap * hostmap = strmap_new();
-        s->options = process_options(argc, argv);
+        process_options(s, argc, argv);
 
         switch (s->options.error) {
             case -1:
@@ -4041,6 +3807,9 @@ session_init (int argc, char * argv[])
             case -2:
                 SPAWN_ERR("process_options detected an option with missing "
                         "argument [-%c]", s->options.error_option);
+                _exit(EXIT_FAILURE);
+            case -3:
+                SPAWN_ERR("Failed to find executable");
                 _exit(EXIT_FAILURE);
             default:
                 SPAWN_DBG("process_options exited successfully "
@@ -4116,8 +3885,8 @@ session_init (int argc, char * argv[])
         s->ep_name = spawn_net_name(s->ep);
 
         /* then copy in each host from the command line */
-        char * ptr_string = NULL;
-        strmap * entrymap = NULL;
+        const char* ptr_string = NULL;
+        strmap* entrymap = NULL;
         size_t i, n = 1;
 
         for (i = 0; NULL != (ptr_string = strmap_getf(hostmap, "%d", i)); i++) {
@@ -4591,12 +4360,17 @@ session_start (session * s)
 
     /* for now, have the root fill in the parameters */
     if (s->spawn_parent == NULL) {
+        /* copy values recorded in session map */
+        strmap_merge(appmap, s->appmap);
+
         /* create a name for this process group (unique to session) */
         char group_name[] = "GROUP_0";
         strmap_set(appmap, "NAME", group_name);
 
+        char* value = NULL;
+#if 0
         /* set executable path */
-        char* value = getenv("MV2_SPAWN_EXE");
+        value = getenv("MV2_SPAWN_EXE");
         if (value != NULL) {
             /* do the path search once in root */
             char* app_path = spawn_path_search(value);
@@ -4607,6 +4381,7 @@ session_start (session * s)
 
             spawn_free(&app_path);
         }
+#endif
 
         /* set current working directory */
         char* appcwd = spawn_getcwd();
@@ -4675,11 +4450,13 @@ session_start (session * s)
 
         /* TODO: get args from argv or hostfile */
 
+#if 0
         /* set command line arguments to be passed to app procs */
         value = getenv("MV2_SPAWN_ARGS");
         if (value != NULL) {
             args_capture(appmap, value);
         }
+#endif
 
         /* set environment variables for app procs */
         environ_capture(appmap);
@@ -4751,6 +4528,9 @@ session_destroy (session * s)
     strmap_delete(&(s->params));
     strmap_delete(&(s->name2group));
     strmap_delete(&(s->pid2name));
+    strmap_delete(&(s->appmap));
+
+    spawn_free(&(s->options.hostfile));
 
     spawn_free(&s);
 
