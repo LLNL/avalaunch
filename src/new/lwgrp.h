@@ -49,6 +49,14 @@ lwgrp* lwgrp_split_str(
   const char* str    /* string on which to split procs (color), can't be NULL */
 );
 
+/* split a group into groups consisting of all procs with the same color,
+ * order by key and rank in comm */
+lwgrp* lwgrp_split(
+  const lwgrp* comm, /* input group */
+  int64_t color,     /* color value */
+  int64_t key        /* key value */
+);
+
 /* free a group and drop connections */
 int lwgrp_free(lwgrp** pgroup);
 

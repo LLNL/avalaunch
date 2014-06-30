@@ -1176,12 +1176,10 @@ static lwgrp* lwgrp_split_sorted(
   return newgroup;
 }
 
-#if 0
-int lwgrp_split(
+lwgrp* lwgrp_split(
   const lwgrp* comm,
   int64_t color,
-  int64_t key,
-  lwgrp* newcomm)
+  int64_t key)
 {
   /* TODO: for small groups, fastest to do an allgather and
    * local sort */
@@ -1193,58 +1191,48 @@ int lwgrp_split(
   /* TODO: prepare input data (need allreduce on ep lengths),
    * convert color/key to 64-bit values */
 
+  /* determine maximum length of endpoint names */
+  uint64_t length = (uint64_t) (strlen(comm->name) + 1);
+  lwgrp_allreduce_uint64_max(&length, 1, comm);
+  size_t max_name = length;
+
   /* allocate memory to hold item for sorting (color,key,rank) tuple
    * and prepare input -- O(1) local */
-  size_t max_ep_len = strlen(comm->ep) + 1;
-  size_t item_size = 3 * sizeof(int64_t) + max_ep_len;
-  char* item = SPAWN_MALLOC(item_size);
-  item[0] = color;
-  item[1] = key;
-  item[2] = comm->rank;
-  item[3] = comm->ep;
+  size_t buf_size = 3 * sizeof(int64_t) + max_name;
+  char* buf = SPAWN_MALLOC(buf_size);
 
-  /* compute offset to address */
-  size_t offset = 3 * sizeof(int64_t);
+  /* TODO: we should pack these to be network order */
+
+  /* copy in our color, key, and rank tuple */
+  int64_t* ptr = (int64_t*) buf;
+  ptr[0] = color;
+  ptr[1] = key;
+  ptr[2] = comm->rank;
+
+  /* copy in endpoint name */
+  char* ptr_ep = buf + 3 * sizeof(int64_t);
+  strcpy(ptr_ep, comm->name);
 
   /* sort our values using bitonic sort algorithm -- 
    * O(log^2 N) communication */
   lwgrp_sort_bitonic(
-    item, item_size, offset, cmp_three_ints, comm
+    buf, buf_size, 0, cmp_three_ints, comm
   );
 
   /* now split our sorted values by comparing our value with our
    * left and right neighbors to determine group boundaries --
-   * O(log N) communication */
-  int recv_ints[7];
-  lwgrp_split_sorted(
-    item, item_size, offset, cmp_int, comm, recv_ints
+   * O(log N) communication, need offset to skip color and key
+   * and point to rank (of type int64_t) followed by endpoint name */
+  size_t offset = 2 * sizeof(int64_t);
+  lwgrp* newgroup = lwgrp_split_sorted(
+    buf, buf_size, offset, cmp_int, comm
   );
 
-  /* fill in info for our group */
-  lwgrp_chain newchain;
-  newchain.comm       = chain.comm;
-  newchain.comm_rank  = chain.comm_rank;
-  newchain.comm_left  = recv_ints[CHAIN_LEFT];
-  newchain.comm_right = recv_ints[CHAIN_RIGHT];
-  newchain.group_rank = recv_ints[CHAIN_RANK];
-  newchain.group_size = recv_ints[CHAIN_SIZE];
+  /* free memory allocated for buffer */
+  spawn_free(&buf);
 
-#if 0
-  /* if color is undefined, at this point we have the group of
-   * processes that all set color == MPI_UNDEFINED, but we
-   * really want the empty group -- O(1) local */
-  if (color == -1) {
-    lwgrp_chain_set_null(&newchain);
-  }
-#endif
-
-  /* build comm from newly created chain */
-  lwgrp* tmpgrp = lwgrp_create(newranks, newrank, ep_name, newleft, newright, ep);
-  *newgroup = tmpgrp;
-
-  return LWGRP_SUCCESS;
+  return newgroup;
 }
-#endif
 
 /* int lwgrp_split_str(MPI_Comm comm, const void* str, int* groups, int* groupid)
  *   IN  comm    - input communicator (handle)
@@ -1279,7 +1267,7 @@ lwgrp* lwgrp_split_str(const lwgrp* comm, const char* str)
     /* TODO: error */
   }
 
-  /* get max lengtsh of string and endpoint names */
+  /* get max length of string and endpoint names */
   uint64_t lengths[2];
   lengths[0] = (uint64_t) (strlen(str) + 1);
   lengths[1] = (uint64_t) (strlen(comm->name) + 1);
