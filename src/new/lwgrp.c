@@ -6,9 +6,7 @@
 #include <unistd.h>
 
 #include "lwgrp.h"
-#include "strmap.h"
-#include "spawn_net.h"
-#include "spawn_net_util.h"
+#include "spawn_internal.h"
 
 /* waits for channel in specified round to connect */
 static int lwgrp_accept_left(lwgrp* group, int target_round)

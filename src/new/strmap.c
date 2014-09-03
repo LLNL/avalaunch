@@ -8,8 +8,7 @@
 
 #include <stdint.h>
 
-#include "strmap.h"
-#include "spawn_util.h"
+#include "spawn_internal.h"
 
 #define STRMAP_FAILURE (1)
 
