@@ -1,7 +1,8 @@
 #ifndef SPAWN_NET_UTIL_H
 #define SPAWN_NET_UTIL_H
 
-#include "spawn_internal.h"
+#include "strmap.h"
+#include "spawn_net.h"
 
 #ifdef __cplusplus
 extern "C" {

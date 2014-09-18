@@ -1,7 +1,7 @@
 ACLOCAL_AMFLAGS = -I m4
 
 SUBDIRS = hostfile .
-include_HEADERS = pmi.h ring.h spawn_net.h lwgrp.h strmap.h
+include_HEADERS = pmi.h ring.h spawn_net.h lwgrp.h strmap.h spawn_net_util.h
 bin_PROGRAMS = launcher
 lib_LTLIBRARIES = libspawn.la libpmi.la
 
