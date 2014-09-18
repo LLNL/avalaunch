@@ -3718,18 +3718,8 @@ process_options (session* s, int argc, char * argv[])
         const char* exename = argv[optind];
         optind++;
 
-        /* do the path search once in root */
-        char* app_path = spawn_path_search(exename);
-        if (app_path != NULL) {
-            /* record full path to executable */
-            strmap_setf(s->appmap, "EXE=%s", app_path);
-
-            /* lookup libs and record them */
-            lib_capture(s->appmap, app_path);
-        } else {
-            so.error = -3;
-        }
-        spawn_free(&app_path);
+        /* record name of executable */
+        strmap_setf(s->appmap, "EXENAME=%s", exename);
 
         /* record all other items as args to executable */
 
@@ -4367,29 +4357,13 @@ session_start (session * s)
         char group_name[] = "GROUP_0";
         strmap_set(appmap, "NAME", group_name);
 
-        char* value = NULL;
-#if 0
-        /* set executable path */
-        value = getenv("MV2_SPAWN_EXE");
-        if (value != NULL) {
-            /* do the path search once in root */
-            char* app_path = spawn_path_search(value);
-            strmap_set(appmap, "EXE", app_path);
-
-            /* lookup libs */
-            lib_capture(appmap, app_path);
-
-            spawn_free(&app_path);
-        }
-#endif
-
         /* set current working directory */
         char* appcwd = spawn_getcwd();
         strmap_set(appmap, "CWD", appcwd);
         spawn_free(&appcwd);
 
         /* set number of procs each spawn should start */
-        value = getenv("MV2_SPAWN_PPN");
+        char* value = getenv("MV2_SPAWN_PPN");
         if (value != NULL) {
             strmap_set(appmap, "PPN", value);
         } else {
@@ -4448,15 +4422,27 @@ session_start (session * s)
             strmap_set(appmap, "BCAST_LIB", "0");
         }
 
-        /* TODO: get args from argv or hostfile */
+        /* read value back out of appmap and interpret it,
+         * need to know whether we're bcasting libs now
+         * so we can determine the full path to each below */
+        const char* use_lib_bcast_str = strmap_get(appmap, "BCAST_LIB");
+        int use_lib_bcast = atoi(use_lib_bcast_str);
 
-#if 0
-        /* set command line arguments to be passed to app procs */
-        value = getenv("MV2_SPAWN_ARGS");
+        /* set executable path */
+        value = strmap_get(s->appmap, "EXENAME");
         if (value != NULL) {
-            args_capture(appmap, value);
+            /* do the path search once in root */
+            char* app_path = spawn_path_search(value);
+            strmap_set(appmap, "EXE", app_path);
+
+            /* if we're bcasting libs,
+             * lookup and set paths to libs */
+            if (use_lib_bcast) {
+                lib_capture(appmap, app_path);
+            }
+
+            spawn_free(&app_path);
         }
-#endif
 
         /* set environment variables for app procs */
         environ_capture(appmap);

@@ -7,11 +7,13 @@ export PATH=`pwd`/autotools/install/bin:$PATH
 export CFLAGS="-g -O0"
 
 #autoreconf --install --force
+#exit 0
 
-#./configure \
-# --prefix=`pwd`/install \
-# LDFLAGS="-libverbs" \
-#  --disable-silent-rules
+./configure \
+  --prefix=`pwd`/install \
+  LDFLAGS="-libverbs" \
+  --disable-silent-rules
+#exit 0
 
 make clean
 
