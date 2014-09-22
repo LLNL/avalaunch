@@ -641,7 +641,74 @@ static void lib_read_strmap(const char* file, int fd, off_t pos, size_t size, st
 
 /* given a pointer to the elf header, lookup string table,
  * read it in, and return it as a newly allocated strmap */
-static strmap* lib_get_strmap(const char* file, int fd, const Elf64_Ehdr* elfhdr)
+static strmap* lib_get_strmap32(const char* file, int fd, const Elf32_Ehdr* elfhdr)
+{
+    /* TODO: can we use e_shstrndx as a shortcut,
+     * lseek to (e_shoff + e_shstrndx * e_shentsize)? */
+
+    /* create an empty map */
+    strmap* map = strmap_new();
+
+    /* lookup number of entries in section table and the size of each entry */
+    Elf32_Half size = elfhdr->e_shentsize;
+    Elf32_Half num  = elfhdr->e_shnum;
+  
+    /* seek to section table */
+    off_t pos = (off_t) elfhdr->e_shoff;
+    off_t newpos = lseek(fd, pos, SEEK_SET);
+    if (newpos == (off_t)-1) {
+        SPAWN_ERR("Failed to seek in file %s to %llu (errno=%d %s)",
+            file, (unsigned long long) pos, errno, strerror(errno)
+        );
+        return map;
+    }
+
+    /* read in the section table */
+    size_t sheader_bufsize = size * num;
+    Elf32_Shdr* sheader_buf = (Elf32_Shdr*) SPAWN_MALLOC(sheader_bufsize);
+    size_t nread = reliable_read(fd, sheader_buf, sheader_bufsize);
+    if (nread != sheader_bufsize) {
+        SPAWN_ERR("Failed to read pheader in file %s (errno=%d %s)",
+            file, errno, strerror(errno)
+        );
+        spawn_free(&sheader_buf);
+        return map;
+    }
+
+    /* iterate through entries in program header until we find SHT_STRTAB */
+    int found = 0;
+    Elf32_Off offset;
+    Elf32_Xword bytes;
+    int i;
+    for (i = 0; i < num; i++) {
+        Elf32_Shdr* ptr = &sheader_buf[i];
+        Elf32_Word type = ptr->sh_type;
+        if (type == SHT_STRTAB) {
+            offset = ptr->sh_offset;
+            bytes  = ptr->sh_size;
+            found  = 1;
+            break;
+        }
+    }
+
+    /* bail out if this file does not have a dynamic section */
+    if (! found) {
+        spawn_free(&sheader_buf);
+        return map;
+    }
+
+    /* record string table in map (offset to string) */
+    lib_read_strmap(file, fd, offset, (size_t) bytes, map);
+
+    /* free the section table */
+    spawn_free(&sheader_buf);
+
+    return map;
+}
+
+/* given a pointer to the elf header, lookup string table,
+ * read it in, and return it as a newly allocated strmap */
+static strmap* lib_get_strmap64(const char* file, int fd, const Elf64_Ehdr* elfhdr)
 {
     /* TODO: can we use e_shstrndx as a shortcut,
      * lseek to (e_shoff + e_shstrndx * e_shentsize)? */
@@ -709,7 +776,154 @@ static strmap* lib_get_strmap(const char* file, int fd, const Elf64_Ehdr* elfhdr
 /* forward declare for recusion */
 static int lib_lookup(const char* file, strmap* lib2file);
 
-static int lib_read_needed(const char* file, int fd, const Elf64_Ehdr* elfhdr, const strmap* map, strmap* lib2file)
+static int lib_read_needed32(const char* file, int fd, const Elf32_Ehdr* elfhdr, const strmap* map, strmap* lib2file)
+{
+    /* lookup number of entries in program header and the size of
+     * each entry */
+    Elf32_Half size = elfhdr->e_phentsize;
+    Elf32_Half num  = elfhdr->e_phnum;
+
+    /* seek to program header */
+    off_t pos = elfhdr->e_phoff;
+    off_t newpos = lseek(fd, pos, SEEK_SET);
+    if (newpos == (off_t)-1) {
+        SPAWN_ERR("Failed to seek in file %s to %llu (errno=%d %s)",
+            file, (unsigned long long) pos, errno, strerror(errno)
+        );
+        return 1;
+    }
+
+    /* read in the program header */
+    size_t pheader_bufsize = size * num;
+    Elf32_Phdr* pheader_buf = (Elf32_Phdr*) SPAWN_MALLOC(pheader_bufsize);
+    ssize_t nread = reliable_read(fd, pheader_buf, pheader_bufsize);
+    if (nread != (ssize_t) pheader_bufsize) {
+        SPAWN_ERR("Failed to read pheader in file %s (errno=%d %s)",
+            file, errno, strerror(errno)
+        );
+        spawn_free(&pheader_buf);
+        return 1;
+    }
+
+    /* iterate through entries in program header until we find PT_DYNAMIC */
+    int dynamic = 0;
+    Elf32_Off dynoff;
+    int i;
+    for (i = 0; i < num; i++) {
+        Elf32_Phdr* ptr = &pheader_buf[i];
+        Elf32_Word type = ptr->p_type;
+        if (type == PT_DYNAMIC) {
+            dynoff = ptr->p_offset;
+            dynamic = 1;
+            break;
+        }
+    }
+
+    /* bail out if this file does not have a dynamic section */
+    if (! dynamic) {
+        spawn_free(&pheader_buf);
+        return 0;
+    }
+
+    /* otherwise seek to start of dynamic section */
+    pos = (off_t) dynoff;
+    newpos = lseek(fd, pos, SEEK_SET);
+    if (newpos == (off_t)-1) {
+        SPAWN_ERR("Failed to seek in file %s to %llu (errno=%d %s)",
+            file, (unsigned long long) pos, errno, strerror(errno)
+        );
+        spawn_free(&pheader_buf);
+        return 1;
+    }
+
+    int libs = 0;
+    strmap* libmap = strmap_new();
+    strmap* paths  = strmap_new();
+
+    /* hard code some ld.so.cache paths */
+    strmap_set(paths, "LDSO", "/usr/lib64:/usr/lib:/lib64:/lib");
+
+    const char* ldlibpath = getenv("LD_LIBRARY_PATH");
+    if (ldlibpath != NULL) {
+        strmap_setf(paths, "LD_LIBRARY_PATH=%s", ldlibpath);
+    }
+
+    /* read entries from the dynamic section until we find a DT_NULL
+     * entry, record details for each DT_NEEDED entry */
+    size_t dyn_bufsize = sizeof(Elf32_Dyn);
+    Elf32_Dyn* dyn_buf = (Elf32_Dyn*) SPAWN_MALLOC(dyn_bufsize);
+    do {
+        /* read the next entry from the dynamic section */
+        nread = reliable_read(fd, dyn_buf, dyn_bufsize);
+        if (nread != (ssize_t) dyn_bufsize) {
+            SPAWN_ERR("Failed to read dyn in file %s (errno=%d %s)",
+                file, errno, strerror(errno)
+            );
+            spawn_free(&dyn_buf);
+            spawn_free(&pheader_buf);
+            return 1;
+        }
+
+        /* set RPATH if we find it */
+        if (dyn_buf->d_tag == DT_RPATH) {
+            Elf32_Addr d_ptr = dyn_buf->d_un.d_ptr;
+            const char* path = strmap_getf(map, "%d", (int) d_ptr);
+            strmap_setf(paths, "RPATH=%s", path);
+        }
+
+        /* set RUNPATH if we find it */
+        if (dyn_buf->d_tag == DT_RUNPATH) {
+            Elf32_Addr d_ptr = dyn_buf->d_un.d_ptr;
+            const char* path = strmap_getf(map, "%d", (int) d_ptr);
+            strmap_setf(paths, "RUNPATH=%s", path);
+        }
+
+        /* if we find a DT_NEEDED entry, print corresponding string */
+        if (dyn_buf->d_tag == DT_NEEDED) {
+            Elf32_Addr d_ptr = dyn_buf->d_un.d_ptr;
+            const char* libname = strmap_getf(map, "%d", (int) d_ptr);
+            strmap_setf(libmap, "%d=%s", libs, libname);
+            libs++;
+        }
+    } while (dyn_buf->d_tag != DT_NULL);
+
+    int newfiles = 0;
+    strmap* newfilemap = strmap_new();
+
+    /* iterate over each library and compute path */
+    for (i = 0; i < libs; i++) {
+        const char* libname = strmap_getf(libmap, "%d", i);
+        const char* existing = strmap_get(lib2file, libname);
+        if (existing == NULL) {
+            const char* pathname = lib_path_search(libname, paths);
+
+            strmap_set(lib2file, libname, pathname);
+
+            /* add entry to recurse on this file */
+            strmap_setf(newfilemap, "%d=%s", newfiles, pathname);
+            newfiles++;
+
+            spawn_free(&pathname);
+        }
+    }
+
+    /* now do breadth-first search */
+    for (i = 0; i < newfiles; i++) {
+        const char* filename = strmap_getf(newfilemap, "%d", i);
+        lib_lookup(filename, lib2file);
+    }
+
+    strmap_delete(&newfilemap);
+    strmap_delete(&libmap);
+
+    /* free memory buffers */
+    spawn_free(&dyn_buf);
+    spawn_free(&pheader_buf);
+
+    return;
+}
+
+static int lib_read_needed64(const char* file, int fd, const Elf64_Ehdr* elfhdr, const strmap* map, strmap* lib2file)
 {
     /* lookup number of entries in program header and the size of
      * each entry */
@@ -869,31 +1083,71 @@ static int lib_lookup(const char* file, strmap* lib2file)
         return 1;
     }
 
-    /* TODO: detect and support 32-bit headers */
+    /* allocate space for ELF header */
+    size_t header_bufsize = (sizeof(Elf32_Ehdr) < sizeof(Elf64_Ehdr)) ? sizeof(Elf64_Ehdr) : sizeof(Elf32_Ehdr);
+    char* header_buf = (char*) SPAWN_MALLOC(header_bufsize);
 
-    /* allocate space to read the elf header */
-    size_t header_bufsize = sizeof(Elf64_Ehdr);
-    Elf64_Ehdr* header_buf = (Elf64_Ehdr*) SPAWN_MALLOC(header_bufsize);
-
-    /* read in the elf header */
-    ssize_t nread = reliable_read(fd, header_buf, header_bufsize);
-    if (nread != (ssize_t) header_bufsize) {
-        SPAWN_ERR("Failed to read header in file %s (errno=%d %s)",
-            file, errno, strerror(errno)
-        );
-        spawn_free(&header_buf);
-        close(fd);
+    /* read in magic number and other fields to determine whether
+     * this is an ELF file and if so whether it's 32 or 64-bit */
+    ssize_t nread = reliable_read(fd, header_buf, EI_NIDENT);
+    if (nread != (ssize_t) EI_NIDENT) {
+        printf("Failed to read magic number info from file %s (errno=%d %s)\n", file, errno, strerror(errno));
         return 1;
     }
 
-    /* read string map from file */
-    strmap* map = lib_get_strmap(file, fd, header_buf);
+    /* check that the magic number matches */
+    if (header_buf[EI_MAG0] != ELFMAG0 ||
+        header_buf[EI_MAG1] != ELFMAG1 ||
+        header_buf[EI_MAG2] != ELFMAG2 ||
+        header_buf[EI_MAG3] != ELFMAG3)
+    {
+        printf("File %s is not ELF\n", file);
+        return 1;
+    }
 
-    /* read and print needed entries */
-    int rc = lib_read_needed(file, fd, header_buf, map, lib2file);
+    /* verify that we can process this elf file type */
+    if (header_buf[EI_CLASS] != ELFCLASS32 &&
+        header_buf[EI_CLASS] != ELFCLASS64)
+    {
+        printf("File %s is not ELF32 or ELF64\n", file);
+        return 1;
+    }
 
-    /* free our string map */
-    strmap_delete(&map);
+    /* now that we know the file type, read in the rest of the header */
+    int rc = 0;
+    if (header_buf[EI_CLASS] == ELFCLASS64) {
+        size_t remainder = sizeof(Elf64_Ehdr) - EI_NIDENT;
+        nread = reliable_read(fd, header_buf + EI_NIDENT, remainder);
+        if (nread != (ssize_t) remainder) {
+          printf("Failed to read magic number info from file %s (errno=%d %s)\n", file, errno, strerror(errno));
+          return 1;
+        }
+
+        /* read string map from file */
+        strmap* map = lib_get_strmap64(file, fd, (Elf64_Ehdr*) header_buf);
+
+        /* read and print needed entries */
+        rc = lib_read_needed64(file, fd, (Elf64_Ehdr*) header_buf, map, lib2file);
+
+        /* free our string map */
+        strmap_delete(&map);
+    } else if (header_buf[EI_CLASS] == ELFCLASS32) {
+        size_t remainder = sizeof(Elf32_Ehdr) - EI_NIDENT;
+        nread = reliable_read(fd, header_buf + EI_NIDENT, remainder);
+        if (nread != (ssize_t) remainder) {
+          printf("Failed to read magic number info from file %s (errno=%d %s)\n", file, errno, strerror(errno));
+          return 1;
+        }
+  
+        /* read string map from file */
+        strmap* map = lib_get_strmap32(file, fd, (Elf32_Ehdr*) header_buf);
+  
+        /* read and print needed entries */
+        rc = lib_read_needed32(file, fd, (Elf32_Ehdr*) header_buf, map, lib2file);
+  
+        /* free our string map */
+        strmap_delete(&map);
+    }
 
     /* free the elf header */
     spawn_free(&header_buf);
