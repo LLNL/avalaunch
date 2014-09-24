@@ -1,11 +1,11 @@
 PMI=../../../install
-SPAWN=../../../spawnnet/install_spawn
+SPAWN=../../../spawnnet/install
 
 LIBS= \
   -libverbs \
   -lpthread \
   -lrt \
-  -L../../../spawnnet/install_spawn/lib \
+  -L../../../spawnnet/install/lib \
   -lspawn
 
 all: clean

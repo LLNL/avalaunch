@@ -13,7 +13,7 @@ autoreconf --install --force
   --prefix=`pwd`/install \
   LDFLAGS="-libverbs" \
   --disable-silent-rules \
-  --with-spawnnet=`pwd`/spawnnet/install_spawn
+  --with-spawnnet=`pwd`/spawnnet/install
 #exit 0
 
 make clean

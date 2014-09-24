@@ -10,7 +10,7 @@ autoreconf --install --force
 #exit 0
 
 ./configure \
-  --prefix=`pwd`/install_spawn \
+  --prefix=`pwd`/install \
   LDFLAGS="-libverbs" \
   --disable-silent-rules
 #exit 0
