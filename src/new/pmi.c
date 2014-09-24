@@ -1,7 +1,10 @@
 /* Implement subset of PMI functionality on top of pmgr_collective calls */
 
 #include "pmi.h"
-#include "spawn_internal.h"
+#include "spawn_util.h"
+#include "strmap.h"
+#include "spawn_net.h"
+#include "spawn_net_util.h"
 
 #include <stdio.h>
 #include <stdlib.h>

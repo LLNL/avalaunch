@@ -11,7 +11,7 @@ print "$hosts\n";
 my $rsh = `pdsh -w $hosts 'ps auxm | grep moody20 | grep rsh | grep -v grep'`;
 my $pmi = `pdsh -w $hosts 'ps auxm | grep moody20 | grep pmi_test | grep -v grep'`;
 my $ring = `pdsh -w $hosts 'ps auxm | grep moody20 | grep ring_test | grep -v grep'`;
-my $launch = `pdsh -w $hosts 'ps auxm | grep moody20 | grep launcher | grep -v grep'`;
+my $launch = `pdsh -w $hosts 'ps auxm | grep moody20 | grep avalaunch | grep -v grep'`;
 
 my @rsh_lines = split("\n", $rsh);
 foreach my $line (@rsh_lines) {

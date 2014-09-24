@@ -66,6 +66,8 @@ pollfds_add (size_t id, struct pollfds_param stdin_param, struct pollfds_param
     return fds_index++;
 }
 
+extern int caught_signal;
+
 extern void
 pollfds_poll (void)
 {
@@ -75,6 +77,10 @@ pollfds_poll (void)
     if (-1 == ppoll(fds_table, fds_index, NULL, &empty_sigmask)) {
         switch (errno) {
             case EINTR:
+                /* we'll get here if a signal interrupts the
+                 * poll call, set this flag so event_thread
+                 * knows about it */
+                caught_signal = 1;
                 break;
             default:
                 print_errmsg("pollfds_poll (ppoll)", errno);

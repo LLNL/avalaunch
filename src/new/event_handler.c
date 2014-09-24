@@ -8,12 +8,17 @@
 #include <print_errmsg.h>
 #include <pollfds.h>
 
+#include <pthread.h>
+
 static sigset_t thread_sigmask;
 
 static pthread_t thread_id;
 static unsigned num_exited = 0;
 
 static volatile sig_atomic_t got_SIGCHLD = 0;
+
+static signal_count = 0;
+int caught_signal;
 
 static void
 child_sig_handler (int sig)
@@ -47,13 +52,22 @@ event_handler (void * arg)
     }
 
     for (;;) {
+        caught_signal = 0;
         pollfds_poll();
         pollfds_process();
 
-        if (got_SIGCHLD) {
-            pid_t waited_pid;
+        /* if we got a signal, it may be because a child exited,
+         * or it could be the signal from pthread_cancel? */
+        if (caught_signal) {
+            signal_count++;
+//            printf("==============We got something %d==================\n", signal_count);  fflush(stdout);
+//        }
+
+//       if (got_SIGCHLD) {
+            /* to get here, we got at least one SIGCHLD */
             got_SIGCHLD = 0;
 
+            pid_t waited_pid;
             while (0 < (waited_pid = waitpid(-1, &status, WNOHANG | WUNTRACED |
                             WCONTINUED))) {
                 if (WIFEXITED(status)) {

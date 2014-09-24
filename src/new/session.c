@@ -3,10 +3,14 @@
  */
 #include <session.h>
 #include <unistd.h>
-#include <spawn_internal.h>
 #include <node.h>
 #include <print_errmsg.h>
 #include <hostfile/parser.h>
+
+#include "spawn_util.h"
+#include "strmap.h"
+#include "spawn_net.h"
+#include "spawn_net_util.h"
 
 /*
  * System headers

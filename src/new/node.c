@@ -3,7 +3,8 @@
  */
 #include <print_errmsg.h>
 #include <pollfds.h>
-#include <spawn_internal.h>
+
+#include "spawn_util.h"
 
 /*
  * System Headers

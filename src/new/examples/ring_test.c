@@ -23,7 +23,7 @@ int main(int argc, char* argv[])
   //int rc = ring_create(ep_name, &rank, &ranks, &left, &right);
   int rc = ring_create2(ep_name, &rank, &ranks, &left, &right);
 
-#if 0
+#if 1
   /* print what we got */
   printf("Rank %d, Size %d, Left %s, Me %s, Right %s\n",
     rank, ranks, left, ep_name, right

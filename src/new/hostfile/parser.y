@@ -16,7 +16,8 @@
 /*
  * Local headers
  */
-#include <spawn_internal.h>
+#include "spawn_util.h"
+#include "strmap.h"
 
 /*
  * System headers
