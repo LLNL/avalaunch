@@ -1,10 +1,11 @@
 ACLOCAL_AMFLAGS = -I m4
 
 SUBDIRS = .
-include_HEADERS = spawn_util.h strmap.h spawn_net.h spawn_net_util.h lwgrp.h
+include_HEADERS = spawn.h spawn_util.h strmap.h spawn_net.h spawn_net_util.h lwgrp.h
 lib_LTLIBRARIES = libspawn.la
 
 libspawn_la_SOURCES = \
+  spawn.h \
   spawn_util.c spawn_util.h \
   strmap.c strmap.h \
   spawn_net.c spawn_net.h \

@@ -1,7 +1,5 @@
 #include "ring.h"
-#include "spawn_util.h"
-#include "strmap.h"
-#include "spawn_net.h"
+#include "spawn.h"
 
 #include <stdio.h>
 #include <stdlib.h>

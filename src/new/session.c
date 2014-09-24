@@ -7,10 +7,7 @@
 #include <print_errmsg.h>
 #include <hostfile/parser.h>
 
-#include "spawn_util.h"
-#include "strmap.h"
-#include "spawn_net.h"
-#include "spawn_net_util.h"
+#include "spawn.h"
 
 /*
  * System headers
