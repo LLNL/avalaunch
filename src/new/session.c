@@ -4238,7 +4238,6 @@ int
 session_start (session * s)
 { 
     int i, tid, tid_tree;
-    int nodeid;
 
     if (start_event_handler()) {
         session_destroy(s);
@@ -4296,6 +4295,7 @@ session_start (session * s)
     end_delta(tid);
 
     /* identify our children */
+    int nodeid = -1;
     int children = 0;
     const char* hosts = strmap_get(s->params, "N");
     if (hosts != NULL) {
@@ -4736,35 +4736,48 @@ session_start (session * s)
     times[5] = time_diff(&t_children_params_end,  &t_children_params_start);
     print_critical_path(s, 6, times, labels);
 
-    /* if we copied launcher to /tmp, delete it now */
-    if (copy_launcher) {
-        unlink(spawn_exe);
-    }
-
-    /**********************
-     * Tear down
-     **********************/
- 
-    /*
-     * This is a busy wait.  I plan on using the state machine from mpirun_rsh
-     * in the future which will save cpu with pthread_cond_signal and friends
-     */
-    /* wait for signal from root before we start to shut down */
-    if (!nodeid) { tid = begin_delta("wait for completion"); }
-    signal_from_root(s);
-    while (children > get_num_exited());
-    if (!nodeid) { end_delta(tid); }
-
     return 0;
 }
 
 void
 session_destroy (session * s)
 {
+    int tid;
+
+    /* get pointer to spawn tree data structure,
+     * and get our rank */
+    spawn_tree* t = s->tree;
+    int nodeid = t->rank;
+
+    /* if we copied launcher to /tmp, delete it now */
+    if (copy_launcher) {
+        /* lookup spawn executable name */
+        const char* spawn_exe = strmap_get(s->params, "EXE");
+        unlink(spawn_exe);
+    }
+
+    signal_from_root(s);
+
+    /* tear down our tree connections and close our
+     * listening end point */
+    if (!nodeid) { tid = begin_delta("tear down tree (root cost)"); }
     tree_delete(&(s->tree));
     spawn_free(&(s->spawn_id));
     spawn_free(&(s->spawn_parent));
     spawn_net_close(&(s->ep));
+    if (!nodeid) { end_delta(tid); }
+
+    /* wait for forked procs that rsh/ssh'd child avalaunch
+     * procs on to remote nodes to exit.
+     *
+     * This is a busy wait.  I plan on using the state machine from mpirun_rsh
+     * in the future which will save cpu with pthread_cond_signal and friends
+     */
+    /* wait for signal from root before we start to shut down */
+    if (!nodeid) { tid = begin_delta("wait for completion (root cost)"); }
+    int children = t->children;
+    while (children > get_num_exited());
+    if (!nodeid) { end_delta(tid); }
 
     strmap_delete(&(s->params));
     strmap_delete(&(s->name2group));
