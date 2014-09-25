@@ -442,7 +442,7 @@ int PMI_KVS_Get( const char kvsname[], const char key[], char value[], int lengt
   map = strmap_new();
   spawn_net_read_strmap(server_ch, map);
 
-  char* str = strmap_get(map, "VAL");
+  const char* str = strmap_get(map, "VAL");
   if (str == NULL) {
     /* failed to find the key */
     return PMI_FAIL;
@@ -472,3 +472,65 @@ int PMI_Spawn_multiple(
   /* we don't implement this yet, but mvapich2 needs a reference */
   return PMI_FAIL;
 }
+
+int PMIX_Ring(
+  const char* addr, /* IN  - address of caller */
+  int* rank,        /* OUT - rank of caller within ring */
+  int* ranks,       /* OUT - number of ranks in ring */
+  char* left,       /* OUT - address of left rank, must be of length PMI_KVS_Get_value_length_max */
+  char* right)      /* OUT - address of right rank, must be of length PMI_KVS_Get_value_length_max */
+{
+  /* check that we're initialized */
+  if (!initialized) {
+    return PMI_ERR_INIT;
+  }
+
+  /* check length of input value */
+  if (addr == NULL || strlen(addr) > MAX_VAL_LEN) {
+    return PMI_ERR_INVALID_VAL;
+  }
+
+  /* check that we have output buffers to write to */
+  if (rank == NULL || ranks == NULL || left == NULL || right == NULL) {
+    return PMI_ERR_INVALID_VAL;
+  }
+
+  /* TODO: initialize output values */
+
+  /* create PMI_INIT message */
+  strmap* map = strmap_new();
+  strmap_set(map, "MSG",  "PMI_RING_IN");
+  strmap_set(map, "LEFT",  addr);
+  strmap_set(map, "RIGHT", addr);
+  strmap_set(map, "COUNT", "1");
+
+  /* send strmap to server */
+  spawn_net_write_strmap(server_ch, map);
+
+  /* read strmap from server */
+  spawn_net_read_strmap(server_ch, map);
+
+  /* TODO: check for errors in reply */
+
+  /* extract values from map, we now have
+   * the address of our left and right neighbors
+   * in the ring, as well as our rank within
+   * the ring, note that our ring rank may be
+   * different than our global rank */
+  const char* left_str  = strmap_get(map, "LEFT");
+  const char* right_str = strmap_get(map, "RIGHT");
+  const char* count_str = strmap_get(map, "COUNT");
+
+  /* set output params */
+  *rank  = atoi(count_str);
+  *ranks = global_ranks;
+  strncpy(left, left_str, MAX_VAL_LEN);
+  strncpy(right, right_str, MAX_VAL_LEN);
+
+  /* delete the strmap */
+  strmap_delete(&map);
+
+  return PMI_SUCCESS;
+}
+
+

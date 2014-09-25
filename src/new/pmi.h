@@ -823,6 +823,15 @@ Notes:
 @*/
 int PMI_Get_options(char *str, int *length);
 
+#define HAVE_PMIX_RING 1
+int PMIX_Ring(
+  const char* addr, /* IN  - address of caller */
+  int* rank,        /* OUT - rank of caller within ring */
+  int* ranks,       /* OUT - number of ranks in ring */
+  char* left,       /* OUT - address of left rank, must be of length PMI_KVS_Get_value_length_max */
+  char* right       /* OUT - address of right rank, must be of length PMI_KVS_Get_value_length_max */
+);
+
 #if defined(__cplusplus)
 }
 #endif
