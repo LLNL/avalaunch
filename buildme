@@ -9,8 +9,12 @@ export CFLAGS="-g -O0"
 autoreconf --install --force
 #exit 0
 
+installdir=`pwd`/install
+
+rm -rf $installdir
+
 ./configure \
-  --prefix=`pwd`/install \
+  --prefix=$installdir \
   LDFLAGS="-libverbs" \
   --disable-silent-rules \
   --with-spawnnet=`pwd`/spawnnet/install

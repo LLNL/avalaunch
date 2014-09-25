@@ -13,6 +13,8 @@ rm -rf $installdir
 autoreconf --install --force
 #exit 0
 
+make distclean
+
 ./configure \
   --prefix=$installdir \
   LDFLAGS="-libverbs" \
