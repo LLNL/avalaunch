@@ -1228,6 +1228,23 @@ tree_new (void)
 }
 
 static void
+tree_disconnect (spawn_tree* t)
+{
+    if (t == NULL) {
+        return;
+    }
+
+    /* free off each child channel if we have them */
+    int i;
+    for (i = 0; i < t->children; i++) {
+        spawn_net_disconnect(&(t->child_chs[i]));
+    }
+
+    /* free connection to parent */
+    spawn_net_disconnect(&(t->parent_ch));
+}
+
+static void
 tree_delete (spawn_tree ** pt)
 {
     if (pt == NULL) {
@@ -1239,7 +1256,6 @@ tree_delete (spawn_tree ** pt)
     /* free off each child channel if we have them */
     int i;
     for (i = 0; i < t->children; i++) {
-        spawn_net_disconnect(&(t->child_chs[i]));
         spawn_free(&(t->child_hosts[i]));
     }
 
@@ -1248,9 +1264,6 @@ tree_delete (spawn_tree ** pt)
     spawn_free(&(t->child_chs));
     spawn_free(&(t->child_hosts));
     spawn_free(&(t->child_pids));
-
-    /* free connection to parent */
-    spawn_net_disconnect(&(t->parent_ch));
 
     /* free tree structure itself */
     spawn_free(pt);
@@ -4749,6 +4762,7 @@ session_destroy (session * s)
     spawn_tree* t = s->tree;
     int nodeid = t->rank;
 
+    /* TODO: perhaps delete this right after starting */
     /* if we copied launcher to /tmp, delete it now */
     if (copy_launcher) {
         /* lookup spawn executable name */
@@ -4756,14 +4770,16 @@ session_destroy (session * s)
         unlink(spawn_exe);
     }
 
+    /* wait until we get the go ahead from root */
     signal_from_root(s);
 
-    /* tear down our tree connections and close our
-     * listening end point */
-    if (!nodeid) { tid = begin_delta("tear down tree (root cost)"); }
-    tree_delete(&(s->tree));
-    spawn_free(&(s->spawn_id));
-    spawn_free(&(s->spawn_parent));
+    /* tear down our tree connections */
+    if (!nodeid) { tid = begin_delta("disconnect tree (root cost)"); }
+    tree_disconnect(s->tree);
+    if (!nodeid) { end_delta(tid); }
+
+    /* close our listening endpoint */
+    if (!nodeid) { tid = begin_delta("close endpoint (root cost)"); }
     spawn_net_close(&(s->ep));
     if (!nodeid) { end_delta(tid); }
 
@@ -4774,10 +4790,15 @@ session_destroy (session * s)
      * in the future which will save cpu with pthread_cond_signal and friends
      */
     /* wait for signal from root before we start to shut down */
-    if (!nodeid) { tid = begin_delta("wait for completion (root cost)"); }
+    if (!nodeid) { tid = begin_delta("wait for children (root cost)"); }
     int children = t->children;
     while (children > get_num_exited());
     if (!nodeid) { end_delta(tid); }
+
+    /* free tree data structure */
+    tree_delete(&(s->tree));
+    spawn_free(&(s->spawn_id));
+    spawn_free(&(s->spawn_parent));
 
     strmap_delete(&(s->params));
     strmap_delete(&(s->name2group));
