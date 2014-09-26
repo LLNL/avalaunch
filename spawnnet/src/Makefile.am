@@ -1,6 +1,7 @@
 ACLOCAL_AMFLAGS = -I m4
 
 SUBDIRS = .
+noinst_HEADERS = spawn_clock.h spawn_internal.h spawn_net_fifo.h spawn_net_ib.h spawn_net_ib_internal.h spawn_net_tcp.h
 include_HEADERS = spawn.h spawn_util.h strmap.h spawn_net.h spawn_net_util.h lwgrp.h
 lib_LTLIBRARIES = libspawn.la
 
