@@ -4643,7 +4643,7 @@ session_start (session * s)
         if (value != NULL) {
             strmap_set(appmap, "PMI", value);
         } else {
-            strmap_set(appmap, "PMI", "0");
+            strmap_set(appmap, "PMI", "1");
         }
 
         /* detect whether we should run RING exchange */
