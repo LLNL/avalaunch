@@ -26,7 +26,7 @@ int main(int argc, char* argv[])
   const char* file = argv[1];
 
   strmap* map = strmap_new();
-  lib_capture(map, file);
+  int rc = lib_capture(map, file);
 
   int libs = lib_num(map);
   for (i = 0; i < libs; i++) {
@@ -36,5 +36,5 @@ int main(int argc, char* argv[])
 
   strmap_delete(&map);
 
-  return 0;
+  return rc;
 }

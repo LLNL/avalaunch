@@ -3945,7 +3945,13 @@ session_start (session * s)
             /* if we're bcasting libs,
              * lookup and set paths to libs */
             if (use_lib_bcast) {
-                lib_capture(appmap, app_path);
+                int lib_rc = lib_capture(appmap, app_path);
+
+                /* TODO: disable library bcast in this case? */
+                /* if we failed to find a library, print error */
+                if (lib_rc != 0) {
+                    SPAWN_ERR("Failed to find at least one library");
+                }
             }
 
             spawn_free(&app_path);

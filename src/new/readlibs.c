@@ -31,6 +31,10 @@
 /* for reading elf */
 #include <elf.h>
 
+/* TODO: get this data some other way */
+/* hard code ld.so.conf paths */
+static char ld_so_conf_paths[] = "/usr/lib64:/usr/lib:/lib64:/lib";
+
 /*******************************
  * Routines that identify libs to bcast
  ******************************/
@@ -439,7 +443,7 @@ static int lib_read_needed32(const char* file, int fd, const Elf32_Ehdr* elfhdr,
     strmap* paths  = strmap_new();
 
     /* hard code some ld.so.cache paths */
-    strmap_set(paths, "LDSO", "/usr/lib64:/usr/lib:/lib64:/lib");
+    strmap_set(paths, "LDSO", ld_so_conf_paths);
 
     const char* ldlibpath = getenv("LD_LIBRARY_PATH");
     if (ldlibpath != NULL) {
@@ -489,11 +493,20 @@ static int lib_read_needed32(const char* file, int fd, const Elf32_Ehdr* elfhdr,
     strmap* newfilemap = strmap_new();
 
     /* iterate over each library and compute path */
+    int rc = 0;
     for (i = 0; i < libs; i++) {
         const char* libname = strmap_getf(libmap, "%d", i);
         const char* existing = strmap_get(lib2file, libname);
         if (existing == NULL) {
             const char* pathname = lib_path_search(libname, paths);
+
+            /* if we failed to find the library, print an error,
+             * set our return code, and try the next one */
+            if (pathname == NULL) {
+                SPAWN_ERR("Failed to find library: %s", libname);
+                rc = 1;
+                continue;
+            }
 
             strmap_set(lib2file, libname, pathname);
 
@@ -508,7 +521,10 @@ static int lib_read_needed32(const char* file, int fd, const Elf32_Ehdr* elfhdr,
     /* now do breadth-first search */
     for (i = 0; i < newfiles; i++) {
         const char* filename = strmap_getf(newfilemap, "%d", i);
-        lib_lookup(filename, lib2file);
+        int tmp_rc = lib_lookup(filename, lib2file);
+        if (tmp_rc != 0) {
+            rc = tmp_rc;
+        }
     }
 
     strmap_delete(&newfilemap);
@@ -518,7 +534,7 @@ static int lib_read_needed32(const char* file, int fd, const Elf32_Ehdr* elfhdr,
     spawn_free(&dyn_buf);
     spawn_free(&pheader_buf);
 
-    return;
+    return rc;
 }
 
 static int lib_read_needed64(const char* file, int fd, const Elf64_Ehdr* elfhdr, const strmap* map, strmap* lib2file)
@@ -586,7 +602,7 @@ static int lib_read_needed64(const char* file, int fd, const Elf64_Ehdr* elfhdr,
     strmap* paths  = strmap_new();
 
     /* hard code some ld.so.cache paths */
-    strmap_set(paths, "LDSO", "/usr/lib64:/usr/lib:/lib64:/lib");
+    strmap_set(paths, "LDSO", ld_so_conf_paths);
 
     const char* ldlibpath = getenv("LD_LIBRARY_PATH");
     if (ldlibpath != NULL) {
@@ -636,11 +652,20 @@ static int lib_read_needed64(const char* file, int fd, const Elf64_Ehdr* elfhdr,
     strmap* newfilemap = strmap_new();
 
     /* iterate over each library and compute path */
+    int rc = 0;
     for (i = 0; i < libs; i++) {
         const char* libname = strmap_getf(libmap, "%d", i);
         const char* existing = strmap_get(lib2file, libname);
         if (existing == NULL) {
             const char* pathname = lib_path_search(libname, paths);
+
+            /* if we failed to find the library, print an error,
+             * set our return code, and try the next one */
+            if (pathname == NULL) {
+                SPAWN_ERR("Failed to find library: %s", libname);
+                rc = 1;
+                continue;
+            }
 
             strmap_set(lib2file, libname, pathname);
 
@@ -655,7 +680,10 @@ static int lib_read_needed64(const char* file, int fd, const Elf64_Ehdr* elfhdr,
     /* now do breadth-first search */
     for (i = 0; i < newfiles; i++) {
         const char* filename = strmap_getf(newfilemap, "%d", i);
-        lib_lookup(filename, lib2file);
+        int tmp_rc = lib_lookup(filename, lib2file);
+        if (tmp_rc != 0) {
+            rc = tmp_rc;
+        }
     }
 
     strmap_delete(&newfilemap);
@@ -665,7 +693,7 @@ static int lib_read_needed64(const char* file, int fd, const Elf64_Ehdr* elfhdr,
     spawn_free(&dyn_buf);
     spawn_free(&pheader_buf);
 
-    return;
+    return rc;
 }
 
 /* given a path to an executable, open the file and lookup
@@ -753,12 +781,12 @@ static int lib_lookup(const char* file, strmap* lib2file)
     /* close the file */
     close(fd);
 
-    return 0;
+    return rc;
 }
 
 /* given a path to an executable, lookup its list of libraries
  * and record the full path to each in the given map */
-void lib_capture(strmap* map, const char* file)
+int lib_capture(strmap* map, const char* file)
 {
     /* create a map to record library name to its full path */
     strmap* lib2file = strmap_new();
@@ -789,5 +817,5 @@ void lib_capture(strmap* map, const char* file)
     /* free map of library file name to its full path */
     strmap_delete(&lib2file);
 
-    return;
+    return rc;
 }
