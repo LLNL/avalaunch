@@ -1,0 +1,49 @@
+#!/usr/bin/perl -w
+use strict;
+
+# make sure we're in a slurm allocation
+if (not defined $ENV{SLURM_JOBID}) {
+  print "Must run from within SLURM allocation\n";
+  exit 1;
+}
+my $jobid = $ENV{SLURM_JOBID};
+
+if (not defined $ENV{SLURM_JOB_NUM_NODES}) {
+  print "Unknown number of nodes, \$SLURM_JOB_NUM_NODES not defined\n";
+  exit 1;
+}
+my $nodes = $ENV{SLURM_JOB_NUM_NODES};
+
+# get our current working directory
+my $pwd = `pwd`;
+chomp $pwd;
+
+# TODO: check that we got a target
+if (@ARGV != 2) {
+  print "Usage: preptmp <srcdir> <destdir>\n";
+  exit 1;
+}
+
+# get target executable or library
+my $stagedir = $ARGV[0];
+print "source = $stagedir\n";
+
+# directory to hold copies of exe and libs on each node
+my $nodedir = $ARGV[1];
+print "dest = $nodedir\n";
+
+# create list of items to be copied from stagedir
+#my $list = `ls $stagedir`;
+#chomp $list;
+#print "$list\n";
+#exit 0;
+
+# clear node directory and copy items to each compute node
+#`pdsh -j $jobid "rm -rf $nodedir"`;
+#`pdsh -j $jobid "mkdir -p $nodedir"`;
+#`pdsh -j $jobid "cp $list $nodedir/."`;
+
+# for SLURM, use this
+`srun -n $nodes -N $nodes rm -rf $nodedir`;
+`srun -n $nodes -N $nodes mkdir -p $nodedir`;
+`srun -n $nodes -N $nodes cp $pwd/$stagedir/* $nodedir`;

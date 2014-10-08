@@ -1,0 +1,95 @@
+#!/usr/bin/perl -w
+use strict;
+
+# Given a target executable or library, this script copies that target
+# and its dependent libraries (as identified by readlibs) to a staging
+# directory called 'stagedir'.  It then calls chrpath -d on each item
+# to remove all RPATH entries.  Such a file set can then be copied
+# using copylibs and executed via avalaunch.
+#
+# Usage: norpath <executable>
+#
+# This script deletes the stage directory and recreates it
+# with each invocation.
+
+# get our current working directory
+my $pwd = `pwd`;
+chomp $pwd;
+
+# directory used to stage files to node directory,
+# we use this so we can copy exe and libs and then
+# modify them by dropping rpath
+my $stagedir = "$pwd/stagedir";
+
+# TODO: check that we got a target
+if (@ARGV != 1) {
+  print "Usage: preptmp <exe>\n";
+  exit 1;
+}
+
+# get target executable or library
+my $target = $ARGV[0];
+print "Target = $target\n";
+
+# use readlibs to get list of library files for target
+my $readlibs = "$pwd/src/new/examples/readlibs";
+my $list = `$readlibs $target`;
+chomp $list;
+print "\nLIBS:\n$list\n\n";
+
+# split items in list to get an array of libs
+my @items = split("\n", $list);
+
+# we'll store list of items in stage directory
+my @stageditems = ();
+
+# clear out our staging directory
+`rm -rf $stagedir`;
+`mkdir -p $stagedir`;
+
+# copy target to stagedir
+`cp $target $stagedir`;
+if ($? ne 0) {
+  print "Failed to copy $target to $stagedir\n";
+  exit 1;
+}
+
+# get new target name
+my $basetarget = `basename $target`;
+chomp $basetarget;
+my $newtarget = "$stagedir/$basetarget";
+
+# add target to staged list
+push @stageditems, $newtarget;
+
+# drop rpath from target
+print "chrpath -d $newtarget\n";
+`chrpath -d $newtarget`;
+
+# process all libs
+foreach my $lib (@items) {
+  # copy library to stage directory
+  `cp $lib $stagedir`;
+  if ($? ne 0) {
+    print "Failed to copy $lib to $stagedir\n";
+    exit 1;
+  }
+
+  # get new library name
+  my $baselib = `basename $lib`;
+  chomp $baselib;
+  my $newlib  = "$stagedir/$baselib";
+
+  # and lib to staged list
+  push @stageditems, $newlib;
+
+  # drop rpath from lib
+  print "chrpath -d $newlib\n";
+  `chrpath -d $newlib`;
+}
+
+# TODO: we don't actually use this but keep it around for now
+# create list of items to be copied from stagedir
+my $newlist = join(" ", @stageditems);
+#print "$newlist\n";
+exit 0;
