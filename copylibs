@@ -1,6 +1,15 @@
 #!/usr/bin/perl -w
 use strict;
 
+# Given the name of a source directory (expected to have been
+# created with norpath), copy contents to a destination directory
+# on each compute node.
+#
+# Usage: copylibs <stagedir> <destdir>
+#
+# This script deletes the destdir from all nodes and recreates it
+# before copying files.
+
 # make sure we're in a slurm allocation
 if (not defined $ENV{SLURM_JOBID}) {
   print "Must run from within SLURM allocation\n";
