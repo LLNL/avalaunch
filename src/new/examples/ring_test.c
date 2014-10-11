@@ -23,7 +23,7 @@ int main(int argc, char* argv[])
   //int rc = ring_create(ep_name, &rank, &ranks, &left, &right);
   int rc = ring_create2(ep_name, &rank, &ranks, &left, &right);
 
-#if 1
+#if 0
   /* print what we got */
   printf("Rank %d, Size %d, Left %s, Me %s, Right %s\n",
     rank, ranks, left, ep_name, right
@@ -31,7 +31,6 @@ int main(int argc, char* argv[])
   fflush(stdout);
 #endif
 
-#if 1
   /* create to log(N) tasks on left and right sides */
   lwgrp* group = lwgrp_create(ranks, rank, ep_name, left, right, ep);
 
@@ -39,21 +38,25 @@ int main(int argc, char* argv[])
   spawn_free(&left);
   spawn_free(&right);
 
+#if 0
+  /* split procs into groups */
   char split_str[256];
   //sprintf(split_str, "%d", (rank/2)*100);
   sprintf(split_str, "hello");
   lwgrp* newgroup = lwgrp_split_str(group, split_str);
   lwgrp_barrier(newgroup);
   lwgrp_free(&newgroup);
+#endif
 
-  /* gather endpoint addresses for all procs */
+#if 0
+  /* execute a global allgather operation */
   strmap* map = strmap_new();
   strmap_setf(map, "%d=%s", rank, ep_name);
-
   lwgrp_allgather_strmap(map, group);
 #endif
 
 #if 0
+  /* print values that we collected in allgather above */
   if (rank == 0) {
     int64_t i;
     for (i = 0 ; i < ranks; i++) {
@@ -64,12 +67,13 @@ int main(int argc, char* argv[])
   }
 #endif
 
-#if 1
+#if 0
+  /* free map used in allgather */
   strmap_delete(&map);
+#endif
 
   /* disconnect and free group */
   lwgrp_free(&group);
-#endif
 
   spawn_net_close(&ep);
 
