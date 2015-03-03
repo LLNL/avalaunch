@@ -9,6 +9,18 @@
  * copyright file COPYRIGHT in the top level MVAPICH2 directory.
  *
  */
+
+/*
+ * Copyright (c) 2015, Lawrence Livermore National Security, LLC.
+ * Produced at the Lawrence Livermore National Laboratory.
+ * Written by Adam Moody <moody20@llnl.gov>.
+ * LLNL-CODE-667277.
+ * All rights reserved.
+ * This file is part of the SpawnNet library.
+ * For details, see https://github.com/hpc/spawnnet
+ * Please also read this file: LICENSE.TXT.
+*/
+
 #ifndef _SPAWN_NET_IB_INTERNAL_H
 #define _SPAWN_NET_IB_INTERNAL_H
 
