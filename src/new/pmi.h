@@ -45,6 +45,17 @@
  *  <http://www.anl.gov>     University of Chicago <http://www.uchicago.edu>
 \*****************************************************************************/
 
+/*
+ * Copyright (c) 2015, Lawrence Livermore National Security, LLC.
+ * Produced at the Lawrence Livermore National Laboratory.
+ * Written by Adam Moody <moody20@llnl.gov>.
+ * LLNL-CODE-667270.
+ * All rights reserved.
+ * This file is part of the Avalaunch process launcher.
+ * For details, see https://github.com/hpc/avalaunch
+ * Please also read the LICENSE file.
+*/
+
 #ifndef PMI_H
 #define PMI_H
 
