@@ -21,6 +21,7 @@ avalaunch_SOURCES = \
   readlibs.c readlibs.h \
   session.c session.h \
   timer_util.c timer_util.h
-avalaunch_CFLAGS  = -pthread -Wall -g
-avalaunch_LDADD   = hostfile/libhostfile.a
-avalaunch_LDFLAGS = -lpthread -lrt
+SPINDLE = /collab/usr/global/tools/spindle/chaos_5_x86_64_ib/devel
+avalaunch_CFLAGS  = -pthread -Wall -g -I$(SPINDLE)/include
+avalaunch_LDADD   = hostfile/libhostfile.a -L$(SPINDLE)/lib
+avalaunch_LDFLAGS = -lpthread -lrt -lspindlefe -lspindlebe

@@ -4,6 +4,8 @@ set -x
 
 export LD_LIBRARY_PATH=`pwd`/install/lib:`pwd`/spawnnet/install/lib
 
+export SPINDLE_DEBUG=2
+
 #num=1
 #hosts=`glob-hosts -s $num -e -a -h "$SLURM_NODELIST"`
 #hosts=`scontrol show hostnames`
@@ -30,9 +32,9 @@ export MV2_SPAWN_NET_TYPE=ibud
 #app=mpiBench/mpiBench_gen2_ava
 #args="Barrier"
 #app=mpiBarrier_gen2_ava.norpath
-app=../install_gen2_ava/libexec/mvapich2/osu_bcast
+#app=../install_gen2_ava/libexec/mvapich2/osu_bcast
 
-#app=src/new/examples/pmi_test
+app=src/new/examples/pmi_test
 export MV2_SPAWN_PMI=1   # whether to enable PMI
 
 #app=src/new/examples/ring_test
@@ -44,8 +46,8 @@ export MV2_SPAWN_PMI=1   # whether to enable PMI
 #export MV2_SPAWN_COPY=1   # whether to rcp avalaunch proc to /tmp during unfurl
 #export MV2_SPAWN_BCAST_BIN=1 # whether to broadcast app binary to /tmp via spawn tree
 #export MV2_SPAWN_BCAST_LIB=1 # whether to broadcast app libs to /tmp via spawn tree
-#export MV2_SPAWN_NET=tcp  # tcp/ibud - network transport (ibud is default)
-export MV2_SPAWN_NET=ibud  # tcp/ibud - network transport (ibud is default)
+export MV2_SPAWN_NET=tcp  # tcp/ibud - network transport (ibud is default)
+#export MV2_SPAWN_NET=ibud  # tcp/ibud - network transport (ibud is default)
 
 # app/spawn - select whether to debug app or spawn tree when running under
 # totalview (defaults to spawn tree)

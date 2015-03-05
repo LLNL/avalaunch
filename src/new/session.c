@@ -42,6 +42,10 @@
 /* needed to read library list from ELF headers */
 #include "readlibs.h"
 
+/* we execute spindle daemons as threads */
+#include "spindle_launch.h"
+#include <pthread.h>
+
 #define KEY_NET_TCP  "tcp"
 #define KEY_NET_IBUD "ibud"
 #define KEY_LOCAL_SHELL  "sh"
@@ -331,24 +335,9 @@ static int args_num(const strmap* map)
         num = atoi(count);
     }
     return num;
-}
-
-/* record program arguments in strmap */
-static void args_capture(strmap* map, const char* argstr)
-{
-    /* initialize our id to current number of args */
-    int num = args_num(map);
-
-    /* make a copy of the argument string so we can manipulate it */
-    char* copy = strdup(argstr);
-
-    /* TODO: tokenize argstring by parsing quotes and such */
-    char* arg = strtok(copy, " \t");
-
-    /* add each token as a new argument */
-    while (arg != NULL) {
-        /* add argument */
-        strmap_setf(map, "ARG%d=%s", num, arg);
+#if 0
+    int num = 0;
+    const char* count = strmap_get(map, "ARG%d=%s", num, arg);
         num++;
 
         /* get next token */
@@ -362,6 +351,7 @@ static void args_capture(strmap* map, const char* argstr)
     spawn_free(&copy);
 
     return;
+#endif
 }
 
 /* append all variables in src to dst */
@@ -3191,6 +3181,23 @@ find_command (strmap * map, const char * cmd)
     return;
 }
 
+/* deifne variables the spindle backends need to read */
+static spindle_args_t spindle_args;
+static void
+define_spindle_args(strmap* map)
+{
+    /* fill in spindle args with reasonable defaults */
+    fillInSpindleArgsFE(&spindle_args);
+
+    /* change any defaults here */
+
+    strmap_setf(map, "SP_PORT=%d", (int) spindle_args.port);
+    strmap_setf(map, "SP_PORTS=%d", (int) spindle_args.num_ports);
+    strmap_setf(map, "SP_UNIQ=%llu", (unsigned long long) spindle_args.unique_id);
+    strmap_setf(map, "SP_SEC=%d", (int) OPT_GET_SEC(spindle_args.opts));
+    return;
+}
+
 static void
 process_options (session* s, int argc, char * argv[])
 {
@@ -3474,6 +3481,9 @@ session_init (int argc, char * argv[])
         find_command(s->params, "sh");
         find_command(s->params, "env");
 
+        /* define spindle args */
+        define_spindle_args(s->params);
+
         printf("Spawn parameters map:\n");
         strmap_print(s->params);
         printf("\n");
@@ -3495,6 +3505,27 @@ time_diff (struct timespec * end, struct timespec * start)
     uint64_t nsec = (uint64_t) (end->tv_nsec - start->tv_nsec);
     uint64_t total = sec * 1000000000 + nsec;
     return total;
+}
+
+/* spindle backend daemon, started as a thread */
+static void*
+spindle_daemon(void* a)
+{
+    strmap* map = (strmap*) a;
+
+    char* port_str  = strmap_get(map, "SP_PORT");
+    char* ports_str = strmap_get(map, "SP_PORTS");
+    char* sec_str   = strmap_get(map, "SP_SEC");
+    char* uniq_str  = strmap_get(map, "SP_UNIQ");
+
+    unsigned int port = (unsigned int) atoi(port_str);
+    unsigned int ports = (unsigned int) atoi(ports_str);
+    int sec = atoi(sec_str);
+    unique_id_t uniq = (unique_id_t) strtoull(uniq_str, NULL, 10);
+
+    spindleRunBE(port, ports, uniq, sec, NULL);
+
+    return NULL;
 }
 
 int
@@ -3860,6 +3891,29 @@ session_start (session * s)
 #endif
 
     /**********************
+     * Spawn spindle back end threads
+     **********************/
+
+    /* TODO: don't join attribute, or call pthread_join */
+    pthread_t spindle_thrd;
+    pthread_create(&spindle_thrd, NULL, spindle_daemon, (void*) s->params);
+    if (s->spawn_parent == NULL) {
+        char* numhost_str = strmap_getf(s->params, "N");
+        int numhosts = atoi(numhost_str);
+        const char** hosts = (const char**) SPAWN_MALLOC((numhosts + 1) * sizeof(char*));
+        int j;
+        for (j = 0; j < numhosts; j++) {
+            hosts[j] = strmap_getf(s->params, "%d", j);
+        }
+        hosts[numhosts] = NULL;
+
+        spindleInitFE(hosts, &spindle_args);
+
+        spawn_free(&hosts);
+    }
+
+    /* create map to set/receive app parameters */
+    /**********************
      * Create app procs
      **********************/
 
@@ -3967,6 +4021,45 @@ session_start (session * s)
 
             spawn_free(&app_path);
         }
+
+        strmap* argmap = strmap_new();
+
+        /* get list of args we should put infront of application */
+        int spindle_argc;
+        char** spindle_argv;
+        getApplicationArgsFE(&spindle_args, &spindle_argc, &spindle_argv);
+
+        /* prepend spindle args */
+        int j;
+        int argnum = args_num(argmap);
+        for (j = 1; j < spindle_argc; j++) {
+            strmap_setf(argmap, "ARG%d=%s", argnum, spindle_argv[j]);
+            argnum++;
+        }
+
+        /* tack on executable name (and its args?) */
+        strmap_setf(argmap, "ARG%d=%s", argnum, strmap_get(appmap, "EXE"));
+        argnum++;
+
+        /* specify number of arguments */
+        strmap_setf(argmap, "ARGS=%d", argnum);
+
+        /* append original args */
+        args_merge(argmap, appmap);
+
+        /* overwrite args in appmap */
+        argnum = args_num(argmap);
+        for (j = 0; j < argnum; j++) {
+            char* argval = strmap_getf(argmap, "ARG%d", j);
+            strmap_setf(appmap, "ARG%d=%s", j, argval);
+        }
+        strmap_delete(&argmap);
+
+        /* specify number of arguments */
+        strmap_setf(appmap, "ARGS=%d", argnum);
+
+        /* replace executable with spindle exe */
+        strmap_set(appmap, "EXE", spindle_argv[0]);
 
         /* set environment variables for app procs */
         environ_capture(appmap);

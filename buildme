@@ -6,18 +6,30 @@ export PATH=`pwd`/autotools/install/bin:$PATH
 
 export CFLAGS="-g -O0"
 
-autoreconf --install --force
+#autoreconf --install --force
 #exit 0
 
 installdir=`pwd`/install
 
 rm -rf $installdir
 
-./configure \
-  --prefix=$installdir \
-  LDFLAGS="-libverbs" \
-  --disable-silent-rules \
-  --with-spawnnet=`pwd`/spawnnet/install
+if [ ! -d spawnnet ] ; then
+  wget https://github.com/hpc/spawnnet/releases/download/v0.1/spawnnet-0.1.tar.gz
+  tar -zxf spawnnet-0.1.tar.gz
+  mv spawnnet-0.1 spawnnet
+  pushd spawnnet
+    ./configure \
+      --prefix=`pwd`/install \
+      --disable-silent-rules
+    make
+    make install
+  popd
+fi
+
+#./configure \
+#  --prefix=$installdir \
+#  --disable-silent-rules \
+#  --with-spawnnet=`pwd`/spawnnet/install
 #exit 0
 
 make clean
