@@ -835,13 +835,31 @@ Notes:
 int PMI_Get_options(char *str, int *length);
 
 #define HAVE_PMIX_RING 1
-int PMIX_Ring(
-  const char* addr, /* IN  - address of caller */
-  int* rank,        /* OUT - rank of caller within ring */
-  int* ranks,       /* OUT - number of ranks in ring */
-  char* left,       /* OUT - address of left rank, must be of length PMI_KVS_Get_value_length_max */
-  char* right       /* OUT - address of right rank, must be of length PMI_KVS_Get_value_length_max */
-);
+/*@
+PMIX_Ring - execute ring exchange over processes in group
+
+Input Parameters:
+. value  - input string
+. length - max size of input and output strings
+
+Output Parameters:
+. rank   - returns caller's rank within ring
+. ranks  - returns number of procs in ring
+. left   - buffer to receive value provided by (rank - 1) % ranks
+. right  - buffer to receive value provided by (rank + 1) % ranks
+
+Return values:
++ PMI_SUCCESS - ring successfully finished
+- PMI_FAIL - ring failed
+
+Notes:
+This function is collective, but not necessarily synchronous,
+across all processes in the process group to which the calling
+process belongs.  All processes in the group must call this
+function, but a process may return before all processes have called
+the function.
+@*/
+int PMIX_Ring( const char value[], int *rank, int *ranks, char left[], char right[], int length );
 
 #if defined(__cplusplus)
 }

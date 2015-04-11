@@ -485,11 +485,12 @@ int PMI_Spawn_multiple(
 }
 
 int PMIX_Ring(
-  const char* addr, /* IN  - address of caller */
-  int* rank,        /* OUT - rank of caller within ring */
-  int* ranks,       /* OUT - number of ranks in ring */
-  char* left,       /* OUT - address of left rank, must be of length PMI_KVS_Get_value_length_max */
-  char* right)      /* OUT - address of right rank, must be of length PMI_KVS_Get_value_length_max */
+  const char value[], /* IN  - input string */
+  int *rank,          /* OUT - rank of caller within ring */
+  int *ranks,         /* OUT - number of ranks in ring */
+  char left[],        /* OUT - buffer to receive value provided by (rank - 1) % ranks */
+  char right[],       /* OUT - buffer to receive value provided by (rank + 1) % ranks */
+  int length)         /* IN  - max size of input and output strings */
 {
   /* check that we're initialized */
   if (!initialized) {
@@ -497,7 +498,7 @@ int PMIX_Ring(
   }
 
   /* check length of input value */
-  if (addr == NULL || strlen(addr) > MAX_VAL_LEN) {
+  if (value == NULL || strlen(value) > MAX_VAL_LEN || length > MAX_VAL_LEN) {
     return PMI_ERR_INVALID_VAL;
   }
 
@@ -511,8 +512,8 @@ int PMIX_Ring(
   /* create PMI_INIT message */
   strmap* map = strmap_new();
   strmap_set(map, "MSG",  "PMI_RING_IN");
-  strmap_set(map, "LEFT",  addr);
-  strmap_set(map, "RIGHT", addr);
+  strmap_set(map, "LEFT",  value);
+  strmap_set(map, "RIGHT", value);
   strmap_set(map, "COUNT", "1");
 
   /* send strmap to server */
@@ -535,8 +536,8 @@ int PMIX_Ring(
   /* set output params */
   *rank  = atoi(count_str);
   *ranks = global_ranks;
-  strncpy(left, left_str, MAX_VAL_LEN);
-  strncpy(right, right_str, MAX_VAL_LEN);
+  strncpy(left, left_str, length);
+  strncpy(right, right_str, length);
 
   /* delete the strmap */
   strmap_delete(&map);
