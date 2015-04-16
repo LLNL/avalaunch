@@ -230,6 +230,21 @@ int PMI_Get_appnum( int *appnum )
   return PMI_SUCCESS;
 }
 
+int PMI_Publish_name( const char service_name[], const char port[] )
+{
+    return PMI_FAIL;
+}
+
+int PMI_Unpublish_name( const char service_name[] )
+{
+    return PMI_FAIL;
+}
+
+int PMI_Lookup_name( const char service_name[], char port[] )
+{
+    return PMI_FAIL;
+}
+
 int PMI_Abort(int exit_code, const char error_msg[])
 {
   /* TODO: send "ABORT" message to server */
