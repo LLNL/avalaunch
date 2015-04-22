@@ -513,7 +513,7 @@ int PMIX_Ring(
   }
 
   /* check length of input value */
-  if (value == NULL || strlen(value) > MAX_VAL_LEN || length > MAX_VAL_LEN) {
+  if (value == NULL || strlen(value) > MAX_VAL_LEN) {
     return PMI_ERR_INVALID_VAL;
   }
 
@@ -551,7 +551,7 @@ int PMIX_Ring(
   /* set output params */
   *rank  = atoi(count_str);
   *ranks = global_ranks;
-  strncpy(left, left_str, length);
+  strncpy(left,  left_str,  length);
   strncpy(right, right_str, length);
 
   /* delete the strmap */
