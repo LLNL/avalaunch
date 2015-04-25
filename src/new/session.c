@@ -3082,9 +3082,9 @@ process_group_start (session* s, strmap* params)
         gather_strmap(procmap, s->tree);
 
         if (rank == 0) {
-            printf("App proc host, pid, exe map:\n");
-            strmap_print(procmap);
-            printf("\n");
+//            printf("App proc host, pid, exe map:\n");
+//            strmap_print(procmap);
+//            printf("\n");
         }
 
         spawn_free(&hostname);
@@ -3759,9 +3759,9 @@ session_start (session * s)
     if (!nodeid) { end_delta(tid); }
 
     if (nodeid == 0) {
-        printf("Spawn pid map:\n");
-        strmap_print(spawnproc_strmap);
-        printf("\n");
+//        printf("Spawn pid map:\n");
+//        strmap_print(spawnproc_strmap);
+//        printf("\n");
     }
 
     /* at this point we can fill in MPIR proc table for spawn procs */
@@ -3821,9 +3821,9 @@ session_start (session * s)
 
     /* print map from rank 0 */
     if (nodeid == 0) {
-        printf("Spawn endpoints map:\n");
-        strmap_print(spawnep_strmap);
-        printf("\n");
+//        printf("Spawn endpoints map:\n");
+//        strmap_print(spawnep_strmap);
+//        printf("\n");
     }
 
 #if 1
