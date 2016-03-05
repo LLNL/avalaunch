@@ -3004,6 +3004,11 @@ process_group_start (session* s, strmap* params)
     signal_from_root(s);
 
     for (i = 0; i < children; i++) {
+        /* TODO: allow for other assignments */
+        /* assign group rank to this process */
+        uint64_t child_rank = rank * children + i;
+        pg->ranks[i] = child_rank;
+
         /* create map for arguments */
         strmap* argmap = strmap_new();
         strmap_setf(argmap, "ARG0=%s", app_exe);
@@ -3020,6 +3025,10 @@ process_group_start (session* s, strmap* params)
 
         /* set MV2_PMI_ADDR so child process knows how to connect to us */
         strmap_setf(envmap, "ENV%d=MV2_PMI_ADDR=%s", envs, ep_name);
+        envs++;
+
+        /* set AVALAUNCH_RANK so child knows which rank it is */
+        strmap_setf(envmap, "ENV%d=AVALAUNCH_RANK=%d", envs, child_rank);
         envs++;
 
         /* set MPIR flag if we're debugging the application */
@@ -3051,11 +3060,6 @@ process_group_start (session* s, strmap* params)
          * we use this to determine which group to tear down when a
          * given pid fails */
         process_group_map_pid(s, pg, pid);
-
-        /* TODO: allow for other assignments */
-        /* assign group rank to this process */
-        uint64_t child_rank = rank * children + i;
-        pg->ranks[i] = child_rank;
 
         /* free maps */
         strmap_delete(&envmap);
