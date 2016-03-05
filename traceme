@@ -1,0 +1,8 @@
+#!/bin/bash
+
+# run strace on rank 0
+if [ "$AVALAUNCH_RANK" == "0" ] ; then
+  /usr/bin/strace "$@"
+else
+  exec "$@"
+fi
