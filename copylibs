@@ -53,6 +53,9 @@ print "dest = $nodedir\n";
 #`pdsh -j $jobid "cp $list $nodedir/."`;
 
 # for SLURM, use this
-`srun -n $nodes -N $nodes rm -rf $nodedir`;
-`srun -n $nodes -N $nodes mkdir -p $nodedir`;
-`srun -n $nodes -N $nodes cp $pwd/$stagedir/* $nodedir`;
+print "removing $nodedir from all nodes\n";
+`srun -W0 -n $nodes -N $nodes rm -rf $nodedir`;
+print "creating $nodedir on all nodes\n";
+`srun -W0 -n $nodes -N $nodes mkdir -p $nodedir`;
+print "copying files from $stagedir to $nodedir ...\n";
+`srun -W0 -n $nodes -N $nodes cp $pwd/$stagedir/* $nodedir`;
