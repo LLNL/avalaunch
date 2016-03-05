@@ -19,6 +19,8 @@ export MV2_SPAWN_PPN=8 # number of app procs per node
 #app=echo
 #args="-e -n hi there world"
 
+export SPAWN_TCP_NODELAY=1 # enable nodelay option for spawnnet's TCP (delay is active by default)
+
 export MV2_ON_DEMAND_THRESHOLD=0
 export MV2_ON_DEMAND_UD_INFO_EXCHANGE=1
 export MV2_USE_RING_STARTUP=0
@@ -32,7 +34,31 @@ export MV2_SPAWN_NET_TYPE=ibud
 #args="Barrier"
 #app=mpiBarrier_gen2_ava.norpath
 #app=../install_gen2_ava/libexec/mvapich2/osu_bcast
-app=../../install_gen2_ava/exp/osu_initfin
+#app=../../install_gen2_ava/exp/osu_initfin
+
+# run the commands below to put together a stage directory
+# this makes a copy of a binary and its libs, and removse rpath from everything
+#
+# export LD_LIBRARY_PATH=`pwd`/spawnnet/install/lib
+# preplibs ../install_gen2_ava/libexec/mvapich2/osu_bcast
+
+# uncomment this when using preplibs + binary and lib bcast
+# to measure startup performance with bin/lib bcast support
+#
+#export LD_LIBRARY_PATH=`pwd`/osu_bcast.stage
+#app=osu_bcast.stage/osu_bcast
+
+# uncomment this when using preplibs + copylibs (disable bin and lib bcast)
+# to measure performance when bin and libs are prestaged (best case)
+# copylibs osu_bcast.stage /tmp/stage
+#
+#export LD_LIBRARY_PATH=/tmp/stage
+#app=/tmp/stage/osu_bcast
+
+# example on how to run strace on rank 0
+app=traceme
+args=../../install_gen2_ava/libexec/mvapich2/osu_bcast
+#args=/tmp/stage/osu_bcast
 
 #app=src/new/examples/pmi_test
 export MV2_SPAWN_PMI=1   # whether to enable PMI
