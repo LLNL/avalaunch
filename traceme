@@ -2,7 +2,9 @@
 
 # run strace on rank 0
 if [ "$AVALAUNCH_RANK" == "0" ] ; then
-  /usr/bin/strace "$@"
+#  /usr/bin/strace -c -o trace.0 "$@"
+  /usr/bin/strace -r -o trace.0 "$@"
+#  /usr/bin/strace -ttt -o trace.0 "$@"
 else
   exec "$@"
 fi
