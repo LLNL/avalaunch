@@ -4,10 +4,14 @@ set -x
 
 export LD_LIBRARY_PATH=`pwd`/install/lib:`pwd`/spawnnet/install/lib
 
-#num=1
-#hosts=`glob-hosts -s $num -e -a -h "$SLURM_NODELIST"`
+#num=100
+#glob-hosts -s $num -e -a -h "$SLURM_NODELIST" | sed 's/ /\n/g' > hostfile
 scontrol show hostnames > hostfile
-sed -i 1d hostfile
+
+# assuming avalaunch is started on first host, remove that host from the list
+# otherwise, we'll end up with two avalaunch processes running there
+sed -i '1d' hostfile
+cat hostfile
 
 #export MV2_SPAWN_SH=ssh # rsh/ssh - remote shell command (rsh is default)
 
@@ -19,14 +23,13 @@ export MV2_SPAWN_PPN=8 # number of app procs per node
 #app=echo
 #args="-e -n hi there world"
 
-export SPAWN_TCP_NODELAY=1 # enable nodelay option for spawnnet's TCP (delay is active by default)
-
 export MV2_ON_DEMAND_THRESHOLD=0
 export MV2_ON_DEMAND_UD_INFO_EXCHANGE=1
 export MV2_USE_RING_STARTUP=0
 export MV2_CM_ADDR_ENABLED=0
 export MV2_PMIX_RING_ENABLE=1
 export MV2_SPAWN_NET_ENABLE=1
+export SPAWN_TCP_NODELAY=1 # enable nodelay option for spawnnet's TCP (delay is active by default)
 #export MV2_SPAWN_NET_TYPE=tcp
 export MV2_SPAWN_NET_TYPE=ibud
 
