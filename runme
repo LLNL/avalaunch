@@ -4,24 +4,40 @@ set -x
 
 export LD_LIBRARY_PATH=`pwd`/install/lib:`pwd`/spawnnet/install/lib
 
-#num=100
+######
+# define set of nodes to use in hostfile
+######
+
+num=100
+
+# get first N hosts in allocation
+#num=10
 #glob-hosts -s $num -e -a -h "$SLURM_NODELIST" | sed 's/ /\n/g' > hostfile
-scontrol show hostnames > hostfile
+#sed -i '1d' hostfile.all
+
+# get list of hosts in our allocation
+scontrol show hostnames > hostfile.all
 
 # assuming avalaunch is started on first host, remove that host from the list
 # otherwise, we'll end up with two avalaunch processes running there
-sed -i '1d' hostfile
+sed -i '1d' hostfile.all
+
+# now pick off the first N-1 for this run, where N may be less than number in allocation
+head -n $(($nodes - 1)) hostfile.all > hostfile
 cat hostfile
 
-#export MV2_SPAWN_SH=ssh # rsh/ssh - remote shell command (rsh is default)
-
-export MV2_SPAWN_DEGREE=8 # degree of k-ary tree
-export MV2_SPAWN_PPN=8 # number of app procs per node
+######
+# simple apps for testing launch
+######
 
 #app=/bin/hostname
 
 #app=echo
 #args="-e -n hi there world"
+
+######
+# Variables that affect MV2
+######
 
 export MV2_ON_DEMAND_THRESHOLD=0
 export MV2_ON_DEMAND_UD_INFO_EXCHANGE=1
@@ -47,8 +63,9 @@ export MV2_SPAWN_NET_TYPE=ibud
 
 # uncomment this when using preplibs + binary and lib bcast
 # to measure startup performance with bin/lib bcast support
+# binary and libs get copied to /tmp/mpilaunch
 #
-#export LD_LIBRARY_PATH=`pwd`/osu_bcast.stage
+#export LD_LIBRARY_PATH=/tmp/mpilaunch:`pwd`/osu_bcast.stage
 #app=osu_bcast.stage/osu_bcast
 
 # uncomment this when using preplibs + copylibs (disable bin and lib bcast)
@@ -56,21 +73,37 @@ export MV2_SPAWN_NET_TYPE=ibud
 # copylibs osu_bcast.stage /tmp/stage
 #
 #export LD_LIBRARY_PATH=/tmp/stage
+#app=/tmp/osu_bcast.stage/osu_bcast
+#app=traceme
+#args=/tmp/osu_bcast.stage/osu_bcast
+#args=osu_bcast.stage/osu_bcast
+#app=../../install_gen2_ava/libexec/mvapich2/osu_bcast
 #app=/tmp/stage/osu_bcast
 
 # example on how to run strace on rank 0
-app=traceme
-args=../../install_gen2_ava/libexec/mvapich2/osu_bcast
+# edit traceme to pick MPI rank to strace (AVALAUNCH_RANK)
+# set app to "traceme" and args to executable and its arguments
+#
+#app=traceme
+#args=../../install_gen2_ava/libexec/mvapich2/osu_bcast
 #args=/tmp/stage/osu_bcast
 
+######
+# These variables affect behavior of avalaunch
+######
+
+#export MV2_SPAWN_SH=ssh # rsh/ssh - remote shell command (rsh is default)
+
+export MV2_SPAWN_DEGREE=8 # degree of k-ary tree
+export MV2_SPAWN_PPN=8 # number of app procs per node
+
 #app=src/new/examples/pmi_test
-export MV2_SPAWN_PMI=1   # whether to enable PMI
+#export MV2_SPAWN_PMI=1   # whether to enable PMI
 
 #app=src/new/examples/ring_test
 #export MV2_SPAWN_RING=1  # whether to enable ring
 
 #export MV2_SPAWN_FIFO=1   # whether to use FIFO vs TCP for PMI (off by default)
-
 #export MV2_SPAWN_LOCAL=sh # sh/direct - how to exec local procs (direct is default)
 #export MV2_SPAWN_COPY=1   # whether to rcp avalaunch proc to /tmp during unfurl
 #export MV2_SPAWN_BCAST_BIN=1 # whether to broadcast app binary to /tmp via spawn tree
@@ -78,14 +111,38 @@ export MV2_SPAWN_PMI=1   # whether to enable PMI
 #export MV2_SPAWN_NET=tcp  # tcp/ibud - network transport (ibud is default)
 export MV2_SPAWN_NET=ibud  # tcp/ibud - network transport (ibud is default)
 
+######
+# Whether to attach Totalview to avalaunch tree or MPI procs
+######
+
 # app/spawn - select whether to debug app or spawn tree when running under
 # totalview (defaults to spawn tree)
 #export MV2_SPAWN_DBG=app
 
-#export LD_LIBRARY_PATH="/tmp/mpilaunch"
+######
+# Run tests
+######
 
 #install/bin/avalaunch $app $args
 #totalview install/bin/avalaunch -a $app $args
 
-install/bin/avalaunch -h hostfile $app $args
+# clear pagecache (file data) and slab cache (inode and dentry)
+#
+#srun --drop-caches=pagecache -n $SLURM_NNODES -N $SLURM_NNODES /bin/hostname > /dev/null
+#srun --drop-caches=slab -n $SLURM_NNODES -N $SLURM_NNODES /bin/hostname > /dev/null
+#srun --drop-caches -n $SLURM_NNODES -N $SLURM_NNODES /bin/hostname > /dev/null
+
+# use this when prestaging avalaunch (prepava), tools (preptools)
+#
+export LD_LIBRARY_PATH=/tmp/osu_bcast.stage:/tmp/avalaunch.stage
+export LD_LIBRARY_PATH=/tmp/stage:$LD_LIBRARY_PATH
+export PATH=/tmp/stage:$PATH
+
+#strace -f -c -o traceava /tmp/avalaunch.stage/avalaunch -h hostfile $app $args
+/tmp/avalaunch.stage/avalaunch -h hostfile $app $args
+#install/bin/avalaunch -h hostfile $app $args
 #totalview install/bin/avalaunch -a -h hostfile $app $args
+
+#export LD_LIBRARY_PATH="/tmp/avalaunch.stage":$LD_LIBRARY_PATH
+#ldd /tmp/avalaunch.stage/avalaunch
+#/tmp/avalaunch.stage/avalaunch -h hostfile $app $args
