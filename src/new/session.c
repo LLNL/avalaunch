@@ -3040,14 +3040,12 @@ process_group_start (session* s, strmap* params)
             envs++;
         }
 
-#if 0
         /* TODO: HACK: override LD_LIBRARY_PATH,
          * proper way to do this is like SPINDLE does it with LD_AUDIT lib */
         if (use_lib_bcast) {
             strmap_setf(params, "ENV%d=LD_LIBRARY_PATH=%s", envs, TMPDIR);
             envs++;
         }
-#endif
 
         /* update the number of env vars */
         strmap_setf(envmap, "ENVS=%d", envs);
