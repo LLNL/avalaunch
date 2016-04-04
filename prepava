@@ -1,0 +1,10 @@
+#!/bin/bash
+set -x
+
+rm -rf avalaunch.stage
+
+export LD_LIBRARY_PATH=`pwd`/../spawnnet.git/install/lib
+./preplibs install/bin/avalaunch
+
+srun -n $SLURM_NNODES -N $SLURM_NNODES rm -rf /tmp/avalaunch.stage
+srun -n $SLURM_NNODES -N $SLURM_NNODES cp -pr `pwd`/avalaunch.stage /tmp/.
