@@ -689,9 +689,12 @@ exec_remote (const char * host, const strmap * params, const char * cwd,
 
     /* create command to execute with shell */
     char* app_command = SPAWN_STRDUPF("cd %s && %s %s %s",
-        cwd, envpath, envstr, argstr);
+        "/tmp/avalaunch.stage", envpath, envstr, argstr);
+//ATM: force to use stage
+        //cwd, envpath, envstr, argstr);
 
     /* exec process, we only return on error */
+//    printf("%s\n", app_command);  fflush(stdout)
     execl(shpath, shname, host, app_command, (char*)0);
     SPAWN_ERR("Failed to exec program (execl errno=%d %s)", errno, strerror(errno));
 
@@ -3657,14 +3660,32 @@ session_start (session * s)
 
         /* build map of arguments */
         strmap* argmap = strmap_new();
-        strmap_setf(argmap, "ARG0=%s", spawn_exe);
-        strmap_setf(argmap, "ARGS=%d", 1);
+//ATM: add strace
+        //if (child_rank == 50 || child_rank == 16 || child_rank == 99) {
+        if (child_rank == -1) {
+            strmap_set(argmap, "ARG0", "/usr/bin/strace");
+            strmap_set(argmap, "ARG1", "-f");
+            strmap_set(argmap, "ARG2", "-c");
+            strmap_set(argmap, "ARG3", "-o");
+            strmap_setf(argmap, "ARG4=trace.ava.r%d", child_rank);
+            strmap_setf(argmap, "ARG5=%s", spawn_exe);
+            strmap_setf(argmap, "ARGS=%d", 6);
+        } else {
+            strmap_setf(argmap, "ARG0=%s", spawn_exe);
+            strmap_setf(argmap, "ARGS=%d", 1);
+        }
 
         /* build map of environment variables */
         strmap* envmap = strmap_new();
         strmap_setf(envmap, "ENV0=MV2_SPAWN_PARENT=%s", s->ep_name);
         strmap_setf(envmap, "ENV1=MV2_SPAWN_ID=%d", child_rank);
-        strmap_setf(envmap, "ENVS=%d", 2);
+        //strmap_setf(envmap, "ENVS=%d", 2);
+
+//ATM: force to use /tmp stage areas
+        strmap_set(envmap, "ENV2", "PATH=/tmp/stage:/bin:/usr/bin");
+        strmap_set(envmap, "ENV3", "LD_LIBRARY_PATH=/tmp/avalaunch.stage:/tmp/stage");
+        strmap_set(envmap, "ENV4", "SPAWN_TCP_NODELAY=1");
+        strmap_setf(envmap, "ENVS=%d", 5);
 
         /* launch child process */
         pid_t pid = fork_proc(host, s->params, spawn_cwd, spawn_exe, argmap, envmap);
